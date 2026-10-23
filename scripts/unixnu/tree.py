@@ -20,9 +20,27 @@ def _clear_links(directory):
 
 def _link(target, link):
     link.parent.mkdir(parents=True, exist_ok=True)
-    if link.is_symlink() or link.exists():
+    if link.is_symlink() or link.is_file():
         link.unlink()
+    elif link.is_dir():
+        shutil.rmtree(link)
     link.symlink_to(Path(target).resolve())
+
+
+def _merge_patch_module(module, link):
+    """Link a layered patch set into the build tree; the first source wins filename conflicts."""
+    if link.is_symlink() or link.is_file():
+        link.unlink()
+    elif link.is_dir():
+        shutil.rmtree(link)
+    link.mkdir(parents=True, exist_ok=True)
+    seen = set()
+    for source in (module.path, *module.overlays):
+        for patch in sorted(Path(source).glob('*.patch')):
+            if patch.name in seen:
+                continue
+            _link(patch, link / patch.name)
+            seen.add(patch.name)
 
 
 def _copy_scripts(source, destination):
@@ -66,7 +84,11 @@ def assemble(ctx, modules):
             else:
                 _link(module.path, tree / 'kits' / kit)
         else:
-            _link(module.path, tree / {'driver': 'drivers', 'kit': 'kits', 'patch': 'patches', 'refer': 'refer'}[kind] / name)
+            link = tree / {'driver': 'drivers', 'kit': 'kits', 'patch': 'patches', 'refer': 'refer'}[kind] / name
+            if kind == 'patch' and module.overlays:
+                _merge_patch_module(module, link)
+            else:
+                _link(module.path, link)
     if not (tree / 'package').is_symlink():
         raise Error('no package module: this repository or --local-package must provide package/')
     (tree / 'scripts').mkdir(exist_ok=True)

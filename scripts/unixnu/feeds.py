@@ -1,7 +1,8 @@
 """Module sources: local directories, in-tree modules and shallow, sparse git checkouts.
 
 A module is a driver, kit, patch set or the package, identified by (kind, name). Candidates are
-taken in this order, first one that exists wins:
+taken in this order, first one that exists wins. Matching patch modules in the device and base
+repositories are layered, with device files taking precedence when a filename is shared.
 
   1. --local-module NAME=PATH
   2. --local-<kind> DIR              (DIR/NAME)
@@ -25,6 +26,7 @@ class Module:
     def __init__(self, kind, name, path=None, origin='', source=None):
         self.kind, self.name, self.path, self.origin, self.source = kind, name, path, origin, source
         self.commit = None
+        self.overlays = []
 
     @property
     def local(self):
@@ -104,7 +106,13 @@ def resolve(ctx):
     result = {}
 
     def add(kind, name, path, origin, source=None):
-        result.setdefault((kind, name), Module(kind, name, path, origin, source))
+        key = (kind, name)
+        existing = result.get(key)
+        if existing is not None:
+            if kind == 'patch' and origin in ('device', 'base') and existing.origin in ('device', 'base'):
+                existing.overlays.append(Path(path))
+            return
+        result[key] = Module(kind, name, path, origin, source)
 
     plural = {kind: KINDS[kind] for kind in KINDS}
     # 1: --local-module
