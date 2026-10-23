@@ -32,21 +32,16 @@ trustcache_tag = "xnu-8796.101.5"
 
 `scripts/build-xnu-4k-baseline.sh` applies patches to `.cache/xnu-work`:
 
-1. Reverse the patches that overlap earlier contexts, when they are present:
-   - `patches/xnu/zzz-boot-progress.patch`
-   - `patches/xnu/zzy-native-gpu-addon-mount.patch`
+1. Reverse already-applied patches in reverse application order.
 2. Apply every `patches/xnu/*.patch` and `kits/NativePrelink/patches/*.patch` in name order.
-3. Skip a patch that is already applied.
-4. Run `prepare-xnu-source.py` to restore omitted headers.
+3. Run `prepare-xnu-source.py` to restore omitted headers.
 
-The late patches carry the `zzw`, `zzy` and `zzz` prefixes so they apply last. The reverse step lets a new build start from a clean context for the two regions that earlier patches also edit.
+Replaying the complete stack in reverse order keeps repeated bootstrap and final-link invocations idempotent, including patches that modify the same context. A forward `--check` still stops on conflicts instead of silently skipping them.
 
-A patch is idempotent:
+The helper simulates replay in a temporary Git index and applies the resulting aggregate diff only after every check passes:
 
 ```sh
-git -C .cache/xnu-work apply --reverse --check "$PATCH" && skip
-git -C .cache/xnu-work apply --check "$PATCH"
-git -C .cache/xnu-work apply "$PATCH"
+bash scripts/apply-xnu-patches.sh .cache/xnu-work
 ```
 
 `--check` stops the build before a partial application.

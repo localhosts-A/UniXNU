@@ -31,22 +31,8 @@ if [ ! -x .cache/fakeroot/usr/local/libexec/availability.pl ]; then
     OBJROOT="$ROOT/build/availability" SYMROOT="$ROOT/build/availability" \
     DSTROOT="$ROOT/.cache/fakeroot" CMAKE="$(command -v cmake)" NINJA="$(command -v ninja)"
 fi
-# The optional observation hooks overlap existing root/exec patch context.
-# Remove them first so earlier independent patches retain their idempotent checks.
-# The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
-# inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
-for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
-    "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
-  if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
-    git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
-  fi
-done
-for PATCH in "$ROOT"/patches/xnu/*.patch "$ROOT"/kits/NativePrelink/patches/*.patch; do
-  if ! git -C .cache/xnu-work apply --reverse --check "$PATCH" >/dev/null 2>&1; then
-    git -C .cache/xnu-work apply --check "$PATCH"
-    git -C .cache/xnu-work apply "$PATCH"
-  fi
-done
+bash "$ROOT/scripts/apply-xnu-patches.sh" .cache/xnu-work \
+  "$ROOT/patches/xnu" "$ROOT/kits/NativePrelink/patches"
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
 # The first pass of a new tree (XNU_BOOTSTRAP=1, set by the unixnu driver) only has to leave the compile records and
