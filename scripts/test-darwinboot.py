@@ -4,10 +4,15 @@ import argparse
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from unixnu.artifacts import package_efi
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--memory-size', type=lambda value: int(value, 0), choices=[0x10000000, 0x20000000])
+parser.add_argument('--uefi-efi', type=Path, help='built UniXNU.efi; otherwise require exactly one build output')
 parser.add_argument('--packed-ramdisk', action='store_true', help='Exercise real packed seed expansion before firmware exit')
 parser.add_argument('--gop', action='store_true', help='Exercise the actual QEMU ramfb UEFI GOP handoff')
 parser.add_argument('--gop-high-resolution', action='store_true', help='Exercise real QEMU ramfb 3048x2032 allocation and mode programming')
@@ -46,7 +51,7 @@ if args.packed_ramdisk:
     pack(raw, packed)
     packed.replace(raw)
 (ESP / 'EFI/BOOT').mkdir(exist_ok=True)
-shutil.copyfile(ROOT / 'unixnu/Build/Out/AARCH64-DEBUG/UniXNU.efi', ESP / 'EFI/BOOT/BOOTAA64.EFI')
+shutil.copyfile(package_efi(ROOT, args.uefi_efi), ESP / 'EFI/BOOT/BOOTAA64.EFI')
 for name in ('DarwinBoot', 'DarwinBootValidation'):
     shutil.copyfile(ROOT / f'build/DarwinBoot/DEBUG_CLANGPDB/AARCH64/{name}.efi', PAYLOADS / f'{name}.efi')
 (ESP / 'EFI/UniXNU/unixnu.toml').write_text('''version = 1
@@ -73,7 +78,7 @@ if args.gop_high_resolution or args.ramfb_geometry_refusal:
     config = ESP / 'EFI/UniXNU/unixnu.toml'
     config.write_text(config.read_text().replace('[[entry]]',
         '[[driver]]\npath = "Payloads/QemuRamfbGeometry.efi"\n[[entry]]', 1))
-subprocess.run(['python3', ROOT / 'unixnu/Scripts/qemu-run.py', ESP,
+subprocess.run(['python3', ROOT / 'package/Scripts/qemu-run.py', ESP,
                 '--log', OUTPUT / 'qemu.log', '--cpus', '1', *([] if args.gop else ['--no-gop']), '--timeout', '25',
                 '--finish-on-expect',
                 '--expect', 'DARWINBOOT: loader v2 installed EL1',

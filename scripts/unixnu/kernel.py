@@ -1,6 +1,7 @@
 """XNU kernel: build from the patched Apple source, then prelink against the original kernelcache."""
 import os
 import shlex
+import struct
 from pathlib import Path
 
 from . import ipsw
@@ -100,6 +101,39 @@ def build(ctx, modules):
             log_file=ctx.logs / 'storage-headers.log')
     build_archives(ctx, env)
     run(['bash', script], cwd=ctx.tree, env=env, log_file=ctx.logs / 'kernel.log')
+
+
+def source_output(ctx):
+    """Path of the native source-built kernel before any kernelcache prelink."""
+    return ctx.tree / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf'
+
+
+def validate_source_output(ctx):
+    """Require a complete arm64 MH_EXECUTE Mach-O and return its path and digest."""
+    path = source_output(ctx)
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        raise Error(f'source-built XNU kernel not found: {path}: {error}') from None
+    if len(data) < 32:
+        raise Error(f'source-built XNU kernel is truncated: {path}')
+    magic, cpu, _subtype, filetype, count, command_bytes, _flags, _reserved = struct.unpack_from('<8I', data)
+    if magic != 0xfeedfacf or cpu != 0x100000c or filetype != 2 or count == 0:
+        raise Error(f'source-built XNU output is not an arm64 MH_EXECUTE Mach-O: {path}')
+    end = 32 + command_bytes
+    if end > len(data):
+        raise Error(f'source-built XNU load commands exceed the file: {path}')
+    offset = 32
+    for _ in range(count):
+        if offset + 8 > end:
+            raise Error(f'source-built XNU has a truncated load command: {path}')
+        _command, size = struct.unpack_from('<II', data, offset)
+        if size < 8 or offset + size > end:
+            raise Error(f'source-built XNU has an invalid load command size: {path}')
+        offset += size
+    if offset != end:
+        raise Error(f'source-built XNU load-command table size is inconsistent: {path}')
+    return path, sha256_file(path)
 
 
 def prelink(ctx):

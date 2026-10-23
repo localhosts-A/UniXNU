@@ -51,6 +51,8 @@ def parser():
     sub.add_parser('tree', parents=[c], help='assemble the build tree')
     b = sub.add_parser('build', parents=[c], help='build kernel, package and firmware')
     b.add_argument('steps', nargs='*', choices=STEPS + OPTIONAL_STEPS + ('all', 'prelink'), default=['all'])
+    b.add_argument('--source-only', action='store_true',
+                   help='build and validate the native XNU Mach-O without kernelcache prelink (kernel step only)')
     i = sub.add_parser('bootimg', parents=[c], help='pack the boot image from the firmware volume and a device tree')
     i.add_argument('--fd', metavar='FILE', help='firmware volume (default: the build output under --uefi)')
     i.add_argument('--dtb', metavar='FILE', help='compiled device tree; or UNIXNU_DTB')
@@ -110,11 +112,21 @@ def cmd_fetch(ctx):
         log(f'wrote {ctx.lock_path}')
 
 
+def build_steps(steps, source_only=False):
+    """Resolve build steps, keeping the no-IPSW source-only path explicit."""
+    steps = list(steps)
+    if source_only:
+        if any(step not in ('all', 'kernel') for step in steps):
+            raise Error('--source-only can only be used with the kernel step')
+        return ['kernel']
+    if 'all' in steps:
+        return list(STEPS)
+    return steps
+
+
 def cmd_build(ctx):
     ctx.refuse_example()
-    steps = ctx.args.steps
-    if 'all' in steps:
-        steps = list(STEPS)
+    steps = build_steps(ctx.args.steps, ctx.args.source_only)
     if 'userdata' in steps:
         userdata.build(ctx, ctx.args.dry_run)
         steps = [step for step in steps if step != 'userdata']
@@ -127,6 +139,10 @@ def cmd_build(ctx):
     modules = prepare(ctx, steps + (['kernel'] if 'prelink' in steps else []))
     if 'kernel' in steps:
         kernel.build(ctx, modules)
+        if ctx.args.source_only:
+            path, digest = kernel.validate_source_output(ctx)
+            log(f'kernel: source-only output {path} sha256 {digest}')
+            return
         kernel.prelink(ctx)
     elif 'prelink' in steps:
         kernel.prelink(ctx)

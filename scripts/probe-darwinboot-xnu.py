@@ -12,9 +12,13 @@ import sys
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from unixnu.artifacts import package_efi
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernel', type=Path, default=ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf')
 parser.add_argument('--output', type=Path, default=ROOT / 'build/darwinboot-xnu')
+parser.add_argument('--uefi-efi', type=Path, help='built UniXNU.efi; otherwise require exactly one build output')
 parser.add_argument('--timeout', type=int, choices=range(1, 1801), default=25, help='Bounded guest deadline: up to 300 seconds, or 1800 for explicit live HID control')
 parser.add_argument('--mutate-target-main-page', action='store_true', help='Negative input control: corrupt only the actual launchd LC_MAIN vnode page before genuine validation, preserving original files/signatures')
 parser.add_argument('--follow-target-main', action='store_true', help='Follow actual original dyld startup to the supplied launchd LC_MAIN and its first completed instruction')
@@ -314,7 +318,7 @@ payloads = esp / 'EFI/UniXNU/Payloads'
 payloads.mkdir(parents=True, exist_ok=True)
 (esp / 'EFI/BOOT').mkdir(exist_ok=True)
 subprocess.run(['python3', ROOT / 'scripts/audit-xnu-kernel.py', args.kernel], check=True)
-shutil.copyfile(ROOT / 'unixnu/Build/Out/AARCH64-DEBUG/UniXNU.efi', esp / 'EFI/BOOT/BOOTAA64.EFI')
+shutil.copyfile(package_efi(ROOT, args.uefi_efi), esp / 'EFI/BOOT/BOOTAA64.EFI')
 shutil.copyfile(ROOT / 'build/DarwinBoot/DEBUG_CLANGPDB/AARCH64/DarwinBoot.efi', payloads / 'DarwinBoot.efi')
 shutil.copyfile(args.kernel, payloads / 'kernel.macho')
 trust_sidecar = payloads / 'kernel.macho.trustcache'

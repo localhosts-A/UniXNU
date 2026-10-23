@@ -729,6 +729,11 @@ PY_BINDINGS
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/boot-progress/libBootProgress.a"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/boot-progress/libBootProgress.a"
   fi
+  # Device-specific archives must be both force-loaded and declared as external
+  # kernel inputs so cached XNU link products are invalidated when they change.
+  if [ -n "${XNU_EXTRA_KERNEL_ARCHIVE_DEPENDENCIES:-}" ]; then
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $XNU_EXTRA_KERNEL_ARCHIVE_DEPENDENCIES"
+  fi
   KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES ${XNU_EXTRA_LD_ARCHIVES:-}"
   EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=$KERNEL_EXTRA_ARCHIVES")
   EXTRA_MAKE_ARGS+=("XNU_EXTERNAL_KERNEL_ARCHIVES=$KERNEL_ARCHIVE_DEPENDENCIES")
@@ -744,12 +749,14 @@ python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-a
   "$NATIVE_VIRTIO_CONSOLE" "$ROOT/build/native-virtio-console/libNativeVirtioConsole.a" \
   "$NATIVE_OFFLINE_GPU" "$ROOT/build/native-offline-gpu/libNativeOfflineGPU.late.a" \
   "$SHENG_PMGR" "$ROOT/build/sheng-platform-power/libShengPlatformPower.a" \
-  "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/native-adreno/libNativeAdreno.a" <<'PY'
+  "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/native-adreno/libNativeAdreno.a" \
+  "${XNU_EXTRA_KERNEL_ARCHIVE_DEPENDENCIES:-}" <<'PY'
 import hashlib
 from pathlib import Path
+import shlex
 import sys
 directory = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
-stamp = directory / '.native-aes-link-input'
+stamp = directory / '.external-kernel-archive-inputs'
 
 
 def state(mode, archive):
@@ -760,7 +767,14 @@ def state(mode, archive):
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else 'missing'
 
 
-identity = '|'.join(mode + ':' + state(mode, archive) for mode, archive in zip(sys.argv[1::2], sys.argv[2::2]))
+pair_args = sys.argv[1:-1]
+identity_parts = [mode + ':' + state(mode, archive)
+                  for mode, archive in zip(pair_args[::2], pair_args[1::2])]
+for archive in shlex.split(sys.argv[-1]):
+    path = Path(archive)
+    identity_parts.append('extra:' + str(path) + ':' + (hashlib.sha256(path.read_bytes()).hexdigest()
+                                                        if path.is_file() else 'missing'))
+identity = '|'.join(identity_parts)
 if not stamp.exists() or stamp.read_text() != identity:
     # Make does not track selection of an older alternative external archive.
     # Rebuild the conditional personality and relink when this input changes.
