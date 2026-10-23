@@ -67,13 +67,13 @@ class SourceOnlyBuild(unittest.TestCase):
             first = root / 'out/dali/package/Build/Out/AARCH64-DEBUG/UniXNU.efi'
             first.parent.mkdir(parents=True)
             first.write_bytes(b'efi')
-            self.assertEqual(package_efi(root), first)
-            second = root / 'out/sheng/package/Build/Out/AARCH64-DEBUG/UniXNU.efi'
-            second.parent.mkdir(parents=True)
-            second.write_bytes(b'efi')
-            with patch.dict('os.environ', {'UNIXNU_OUT': str(root / 'out')}), \
-                 self.assertRaisesRegex(Error, 'multiple UniXNU EFI'):
-                package_efi(root)
+            with patch.dict('os.environ', {'UNIXNU_OUT': str(root / 'out')}):
+                self.assertEqual(package_efi(root), first.resolve())
+                second = root / 'out/sheng/package/Build/Out/AARCH64-DEBUG/UniXNU.efi'
+                second.parent.mkdir(parents=True)
+                second.write_bytes(b'efi')
+                with self.assertRaisesRegex(Error, 'multiple UniXNU EFI'):
+                    package_efi(root)
 
 
 if __name__ == '__main__':

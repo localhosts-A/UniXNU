@@ -80,7 +80,7 @@ class PatchOverlays(unittest.TestCase):
             ctx = context(root, device, output, [f'patch:xnu={local}'])
             modules = feeds.resolve(ctx)
             patch_set = modules[('patch', 'xnu')]
-            self.assertEqual(patch_set.path, local)
+            self.assertEqual(patch_set.path.resolve(), local.resolve())
             self.assertEqual(patch_set.overlays, [])
 
 
