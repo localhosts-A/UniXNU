@@ -11,6 +11,7 @@ import struct
 import zlib
 import uuid
 import platform
+import re
 import subprocess
 
 
@@ -57,6 +58,8 @@ parser.add_argument('--smp', type=int, default=1, help='Number of QEMU CPUs; Aff
 parser.add_argument('--armcpu', action='store_true', help='Add the real QEMU GICv3 distributor/redistributor DT resources')
 parser.add_argument('--data-ramdisk', action='store_true', help='Provide a writable scratch RAMDisk sidecar while keeping actual disk root matching')
 parser.add_argument('--ramdisk', action='store_true', help='Provide an owned memory-disk binding placeholder for the loader')
+parser.add_argument('--test-service', action='append', default=[], metavar='NODE:COMPATIBLE',
+                    help='Add an explicitly named offline software-service nub, with no MMIO resources')
 parser.add_argument('--nvram-proxy', action='store_true', help='Initialize real IODTNVRAM from an empty volatile CHRP bank; no persistence controller')
 parser.add_argument('--conflicting-boot-manifest', action='store_true', help='Negative offline identity-collision input: install an untrusted A5 hash which owner publication must refuse to replace')
 parser.add_argument('--crypto-hash-method', choices=['sha2-384', 'sha1'], help='Explicit Image4 hash algorithm; target J120 DT specifies sha2-384')
@@ -79,6 +82,17 @@ if args.qemu_vmm_present and not args.armvirt:
     parser.error('--qemu-vmm-present requires the actual QEMU platform fixture')
 if args.armcpu and not args.armvirt:
     parser.error('--armcpu requires --armvirt')
+test_nodes = []
+test_names = {'intc', 'ufshc', 'ufsphy'}
+if args.test_service and not args.armvirt:
+    parser.error('--test-service requires the actual offline virt fixture')
+for service in args.test_service:
+    pair = service.split(':')
+    if len(pair) != 2 or not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', pair[0]) or \
+            not re.fullmatch(r'[a-zA-Z0-9,_-]{1,64}', pair[1]) or pair[0] in test_names:
+        parser.error('Test services require unique bounded NODE:COMPATIBLE names')
+    test_names.add(pair[0])
+    test_nodes.append(node(pair[0], [('compatible', pair[1].encode() + b'\0')]))
 if not 1 <= args.smp <= 8 or (args.smp > 1 and not args.armcpu):
     parser.error('--smp is 1..8 and needs --armcpu')
 if args.root_match_volume_uuid and (not args.virtio_mmio_fdt or args.ramdisk):
@@ -176,6 +190,7 @@ tree = node('device-tree', [('model', b'qemu-entry-fixture\0'),
          ([node('intc', [('compatible', b'arm,gic-v3\0'),
                         ('reg', struct.pack('<4Q', 0, 0x10000, 0xa0000, 0xf60000))])]
          if args.armcpu else []) +
+         test_nodes +
          ([node('ufshc', [('compatible', b'qcom,sm8550-ufshc\0'),
                           ('reg', struct.pack('<2Q', 0x03ff0000, 0x3000))]),
            node('ufsphy', [('compatible', b'qcom,sm8550-qmp-ufs-phy\0'),

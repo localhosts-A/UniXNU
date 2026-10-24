@@ -316,6 +316,21 @@ The stop helper records registers and memory at a symbol:
 python3 scripts/qemu-entry/gdb-stop.py --help
 ```
 
+For source-kernel process tests, `scripts/build-native-user-fixture.py --source
+OWN_ASSEMBLY --output DIRECTORY` builds and ad-hoc signs an owned static ARM64
+program instead of the default fixture. Keep the `_checkpoint`, `_results`,
+`_user_page_size` and `_old_length` fixture symbols. This option is separate from
+the original-file, APFS and SIMD instruments.
+
+`scripts/probe-darwinboot-xnu.py` accepts repeatable `--test-service
+NODE:COMPATIBLE` software nubs in the synthetic virt device tree; these nodes
+have no MMIO resources. `--read-kernel-symbol SYMBOL:BYTES` and
+`--read-user-symbol SYMBOL:BYTES` capture 1–512 bytes at exact symbols in the
+current kernel or owned native-user image. Kernel bytes appear in
+`requested_kernel_symbols`, and user bytes in `native_user_memory`. Decode these
+with the producing program's ABI and check artifact hashes. QEMU observations
+do not establish hardware execution or persistent-log recovery.
+
 ## Debug arguments
 
 | Argument | Use |

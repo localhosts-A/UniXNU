@@ -316,6 +316,18 @@ python3 package/Scripts/qemu-run.py out/esp \
 python3 scripts/qemu-entry/gdb-stop.py --help
 ```
 
+源码内核的进程测试可用 `scripts/build-native-user-fixture.py --source
+OWN_ASSEMBLY --output DIRECTORY` 构建并 ad-hoc 签名自有静态 ARM64 程序，替换默认样例。
+保留 `_checkpoint`、`_results`、`_user_page_size` 和 `_old_length` 这些样例符号。
+该选项不能与原始文件、APFS 或 SIMD 测试混用。
+
+`scripts/probe-darwinboot-xnu.py` 可重复指定 `--test-service NODE:COMPATIBLE`，
+在合成 virt 设备树中加入没有 MMIO 资源的软件服务节点。
+`--read-kernel-symbol SYMBOL:BYTES` 和 `--read-user-symbol SYMBOL:BYTES` 从当前
+内核或自有用户程序的精确符号处捕获 1–512 字节。内核原始字节记录在
+`requested_kernel_symbols`，用户字节记录在 `native_user_memory`。应按产生数据的程序
+ABI 解码并核对产物哈希。QEMU 观测不能代替实机执行或持久日志恢复验证。
+
 ## 调试参数
 
 | 参数 | 用途 |

@@ -89,6 +89,12 @@ parser.add_argument('--armcpu', action='store_true', help='Describe GICv3 resour
 parser.add_argument('--missing-gic', action='store_true', help='Omit GIC resources to test CPU driver rejection')
 parser.add_argument('--check-commpage', action='store_true', help='Require real legacy and RO commpage user page shifts of 12')
 parser.add_argument('--native-user', action='store_true', help='Boot the signed static Darwin EL0/SVC fixture as md0/mockfs')
+parser.add_argument('--test-service', action='append', default=[], metavar='NODE:COMPATIBLE',
+                    help='Explicit offline software-service nub without hardware resources')
+parser.add_argument('--read-kernel-symbol', action='append', default=[], metavar='SYMBOL:BYTES',
+                    help='Read 1..512 bytes at an exact symbol in the current kernel artifact')
+parser.add_argument('--read-user-symbol', action='append', default=[], metavar='SYMBOL:BYTES',
+                    help='Read 1..512 bytes at an exact symbol in the owned native-user image')
 parser.add_argument('--native-data-user-image',type=Path,help='Observe a fixed-address own static instrument staged through the signed original-root/Data init path; no mockfs boot')
 parser.add_argument('--native-user-image', type=Path, help='Explicit own process image with a sibling addresses.json symbol record')
 parser.add_argument('--data-ramdisk', type=Path, help='Explicit mutable scratch APFS initrd; retain the genuine original OS disk root')
@@ -158,6 +164,19 @@ parser.add_argument('--missing-virtio-device', action='store_true', help='Actual
 parser.add_argument('--boot-progress-clock-fixture', type=int, choices=(31,121),
                     help='QEMU-only: advance own diagnostic epoch at its first poll; no OS/timebase/register mutation')
 args = parser.parse_args()
+if args.read_user_symbol and not args.native_user:
+    parser.error('--read-user-symbol requires an owned native-user image')
+def symbol_read(value):
+    try:
+        name, count = value.rsplit(':', 1)
+        count = int(count, 0)
+    except ValueError:
+        parser.error('Symbol reads use SYMBOL:BYTES')
+    if not re.fullmatch(r'_[A-Za-z0-9_.$]+', name) or not 1 <= count <= 512:
+        parser.error('Symbol reads require an exact bounded symbol and 1..512 bytes')
+    return name, count
+requested_kernel_symbols = [symbol_read(v) for v in args.read_kernel_symbol]
+requested_user_symbols = [symbol_read(v) for v in args.read_user_symbol]
 if args.qemu_ramfb_high_resolution:
     if not args.qemu_ramfb:
         parser.error('High-resolution fixture requires the actual QEMU ramfb')
@@ -358,6 +377,8 @@ if args.armdt_platform and args.negative_platform_match:
     parser.error('Select either the sheng-shaped root or the unmatched control')
 if args.native_user:
     dt_command.append('--ramdisk')
+for service in args.test_service:
+    dt_command += ['--test-service', service]
 if args.data_ramdisk:
     dt_command.append('--data-ramdisk')
 if args.nvram_proxy:
@@ -1003,6 +1024,7 @@ if block_image:
                     ('_native_virtio_sectors', 8), ('_native_virtio_mmio_physical', 8), ('_native_virtio_first_sector_sha256', 32)]
 if args.native_user:
     inspections += [('_amfi', 8), ('_cs_validate_page_bad_hash', 8), ('_cs_validate_page_no_hash', 8)]
+inspections += requested_kernel_symbols
 native_hash_cache = re.search(r'\s_cs_native4k_hash_cache_version$', symbols, re.M) is not None
 if args.mutate_own_vnode_page is not None or cache_fault or main_fault:
     if not native_hash_cache:
@@ -1161,6 +1183,7 @@ if args.inspect_dyld_flags:
 user_requests = {}
 if args.native_user:
     user_inspections = [('_results', 32), ('_user_page_size', 8), ('_old_length', 8)]
+    user_inspections += requested_user_symbols
     if '_fp_context_results' in user_addresses:
         user_inspections += [('_fp_context_results',80),('_fp_context_actual',512),('_fp_context_expected',512)]
     if '_file_probe_results' in user_addresses:
@@ -1622,6 +1645,8 @@ if args.check_commpage:
                                         for name, request in commpage_requests.items()}
     if any(shift != 12 for shift in report['commpage_user64_shifts'].values()):
         raise SystemExit(f"Incorrect native user ABI: {report['commpage_user64_shifts']}")
+report['requested_kernel_symbols'] = {name: report['memory'][page_globals[name]]
+                                      for name, _ in requested_kernel_symbols}
 (output / 'gdb-stop.json').write_text(json.dumps(report, indent=2) + '\n')
 print('PASS: real UEFI -> UniXNU -> DarwinBoot -> active native 4K XNU translation')
 print(json.dumps(report['kernel_page_globals'], indent=2))
