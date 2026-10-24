@@ -22,6 +22,8 @@ if args.ramfb_geometry_refusal and (args.gop or args.gop_high_resolution):
     parser.error('The refusal control requires no GOP device')
 if args.gop_high_resolution:
     args.gop = True
+subprocess.run(['python3', ROOT / 'scripts/test-darwinboot-entry.py',
+                '--uefi-efi', package_efi(ROOT, args.uefi_efi)], check=True)
 OUTPUT = ROOT / ('build/darwinboot-test' if not args.memory_size else f'build/darwinboot-test-{args.memory_size >> 20}m')
 if args.gop:
     OUTPUT = OUTPUT.with_name(OUTPUT.name + '-gop')

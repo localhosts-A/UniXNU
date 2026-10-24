@@ -9,7 +9,7 @@
 	url = https://github.com/UniXNU/ArmVirtPlatform.git
 [submodule "drivers/DarwinBoot"]
 	path = drivers/DarwinBoot
-	url = https://github.com/UniXNU/DarwinBoot.git
+	url = https://github.com/localhosts-A/DarwinBoot.git
 [submodule "drivers/NativeAES"]
 	path = drivers/NativeAES
 	url = https://github.com/UniXNU/NativeAES.git
