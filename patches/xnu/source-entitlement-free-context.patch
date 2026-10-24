@@ -1,0 +1,92 @@
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -3929,1 +3929,7 @@
+-		amfi->OSEntitlements_invalidate(blob->csb_entitlements);
++#if !defined(XNU_SOURCE_ENTITLEMENT_FREE) || !XNU_SOURCE_ENTITLEMENT_FREE
++		amfi->OSEntitlements_invalidate(blob->csb_entitlements);
++#else
++		if (amfi != NULL) {
++			amfi->OSEntitlements_invalidate(blob->csb_entitlements);
++		}
++#endif
+@@ -4351,7 +4357,60 @@
+-static errno_t
+-accelerate_entitlement_queries(
+-	struct cs_blob *cs_blob)
+-{
+-	kern_return_t ret = KERN_NOT_SUPPORTED;
+-
+-#if CODE_SIGNING_MONITOR
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++#if CODE_SIGNING_MONITOR
++#error "XNU_SOURCE_ENTITLEMENT_FREE requires no code signing monitor"
++#endif
++/* Development source profile: observe empty contexts, never AMFI trust. */
++uint64_t source_entitlement_free_accepts;
++uint64_t source_entitlement_free_refusals;
++uint64_t source_entitlement_free_entitlement_refusals;
++
++static errno_t
++source_entitlement_free_validate(struct cs_blob *cs_blob)
++{
++	if (amfi != NULL) {
++		return 0;
++	}
++	if ((cs_blob->csb_flags & (CS_VALID | CS_ADHOC)) != (CS_VALID | CS_ADHOC) ||
++	    cs_blob->csb_entitlements != NULL) {
++		goto refuse;
++	}
++	void *xml = NULL;
++	const CS_GenericBlob *der = NULL;
++	size_t xml_length = 0, der_length = 0;
++	int xml_error = csblob_get_entitlements(cs_blob, &xml, &xml_length);
++	int der_error = csblob_get_der_entitlements(cs_blob, &der, &der_length);
++	if (xml_error != 0 || der_error != 0) {
++		goto refuse;
++	}
++	/* Also check raw pointers BEFORE reconstitution can discard XML data.
++	 * An unsigned/zero-hash XML blob must not turn into an absent context.
++	 */
++	if (xml != NULL || der != NULL || xml_length != 0 || der_length != 0 ||
++	    cs_blob->csb_entitlements_blob != NULL || cs_blob->csb_der_entitlements_blob != NULL) {
++		os_atomic_inc(&source_entitlement_free_entitlement_refusals, relaxed);
++		goto refuse;
++	}
++	return 0;
++refuse:
++	os_atomic_inc(&source_entitlement_free_refusals, relaxed);
++	return EPERM;
++}
++#endif
++
++static errno_t
++accelerate_entitlement_queries(
++	struct cs_blob *cs_blob)
++{
++	kern_return_t ret = KERN_NOT_SUPPORTED;
++
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++	if (amfi == NULL) {
++		int error = source_entitlement_free_validate(cs_blob);
++		if (error != 0) {
++			return error;
++		}
++		os_atomic_inc(&source_entitlement_free_accepts, relaxed);
++		return 0;
++	}
++#endif
++
++#if CODE_SIGNING_MONITOR
+@@ -4806,2 +4865,10 @@
+-	/* Perform 2nd stage reconstitution */
+-	error = reconstitute_code_signature_2nd_stage(&tmp_blob);
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++	/* Validate raw XML/DER before the second stage can discard XML bytes. */
++	error = source_entitlement_free_validate(&tmp_blob);
++	if (error != 0) {
++		goto out;
++	}
++#endif
++
++	/* Perform 2nd stage reconstitution */
++	error = reconstitute_code_signature_2nd_stage(&tmp_blob);

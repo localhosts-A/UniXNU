@@ -76,6 +76,14 @@ DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=17.0 -DXNU_TARGET_OS_IOS"
 | `XNU_TRUST_CACHE_RUNTIME` | 初始化 trust cache 运行时 | 无 |
 | `XNU_BOOT_PROGRESS` | 加入启动进度层 | `build/boot-progress/libBootProgress.a` |
 | `XNU_SOURCE_MOCKFS` | 加入 mockfs 测试文件 | `build/mockfs-fixture/libmockfs_fixture.a` |
+| `XNU_SOURCE_ENTITLEMENT_FREE` | 无 AMFI 提供者的源码开发 RAM 根：仅接受有效 ad-hoc 签名且无 XML/DER entitlement 的程序；拒绝不支持的输入 | 源码 crypto、CPU、mockfs；关闭 trust runtime |
+
+该选项仅省略空 entitlement 上下文的加速操作，保留 MACF、签名解析和代码页
+哈希校验，不提供 AMFI/Image4、Apple 信任链或任何 entitlement。两个安全
+读取接口必须确认输入为空，包括 CodeDirectory special-slot 哈希检查。
+在重构可能移除 XML 字节前检查原始数据；缺少字节但签名槽哈希非零也拒绝。
+存在提供者时仍走原路径；默认不启用，启用签名 monitor 的构建不能选此选项。
+自建程序构建器的 `--entitlements PLIST` 可生成用于验证拒绝行为的负例。
 
 `board.toml` 的 `[kernel] archives` 按顺序列出静态库脚本。每个条目是构建树中的脚本及其参数。例如：
 

@@ -76,6 +76,17 @@ Each `CONFIG_XNU_<NAME>` line becomes `XNU_<NAME>` in the kernel build environme
 | `XNU_TRUST_CACHE_RUNTIME` | Initializes the trust cache runtime | none |
 | `XNU_BOOT_PROGRESS` | Adds the boot progress layer | `build/boot-progress/libBootProgress.a` |
 | `XNU_SOURCE_MOCKFS` | Adds the mockfs test file | `build/mockfs-fixture/libmockfs_fixture.a` |
+| `XNU_SOURCE_ENTITLEMENT_FREE` | Source development RAM root with no AMFI provider: only validated ad-hoc signatures with no XML/DER entitlements; unsupported inputs fail | source crypto, CPU and mockfs; trust runtime disabled |
+
+The entitlement-free option only avoids accelerating an absent entitlement
+context. It retains MACF, signature parsing and code-page hash validation. It
+does not provide AMFI/Image4, authenticate an Apple trust chain or grant any
+entitlements. Both safe entitlement getters must prove empty input, including
+the CodeDirectory special-slot hashes. With a provider present the original
+path runs. Raw XML/DER is checked before reconstitution can discard XML bytes;
+missing bytes with a nonzero signed slot also fail. The option is off by default
+and rejects builds that select a signing monitor. The own fixture builder's `--entitlements PLIST` supports explicit
+negative tests of this limitation.
 
 `[kernel] archives` in `board.toml` lists the archive builders in order. Each entry is a script of the build tree and its arguments. For example:
 

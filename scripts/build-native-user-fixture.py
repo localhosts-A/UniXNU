@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output', type=Path, default=ROOT / 'build/native-user-fixture')
 parser.add_argument('--source', type=Path, help='Own static ARM64 assembly with the fixture checkpoint/result ABI')
+parser.add_argument('--entitlements', type=Path, help='Own plist for explicit unsupported-entitlement negative tests')
 parser.add_argument('--signing-page-size', type=int, choices=[4096, 16384], default=4096,
                     help='CodeDirectory integrity block size; hardware/VM page size stays native 4K')
 parser.add_argument('--probe-file', type=Path,
@@ -105,7 +106,8 @@ subprocess.run(['xcrun', 'ld', '-arch', 'arm64', '-static', '-e', '_start',
 path = out / 'launchd.macho'
 subprocess.run(['xcrun', 'vtool', '-set-build-version', 'ios', '17.0', '17.0',
                 '-replace', '-output', path, out / 'launchd-static.macho'], check=True)
-subprocess.run(['codesign', '--force', '--sign', '-', '--pagesize', str(args.signing_page_size),
+sign_options = ['--entitlements', str(args.entitlements.resolve())] if args.entitlements else []
+subprocess.run(['codesign', '--force', '--sign', '-', *sign_options, '--pagesize', str(args.signing_page_size),
                 '--identifier', 'org.blu-sharky.native4k-fixture', path], check=True)
 subprocess.run(['codesign', '--verify', '--strict', path], check=True)
 details = subprocess.run(['codesign', '--display', '--verbose=4', path],
