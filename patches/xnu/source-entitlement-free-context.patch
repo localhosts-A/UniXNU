@@ -1,22 +1,25 @@
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+index b32e4c3..3a953fe 100644
 --- a/bsd/kern/ubc_subr.c
 +++ b/bsd/kern/ubc_subr.c
-@@ -3929,1 +3929,7 @@
--		amfi->OSEntitlements_invalidate(blob->csb_entitlements);
+@@ -3941,7 +3941,13 @@ cs_blob_cleanup(struct cs_blob *blob)
+ 		blob->csb_native4k_hash_count = 0;
+ 	}
+ 	if (blob->csb_entitlements != NULL) {
 +#if !defined(XNU_SOURCE_ENTITLEMENT_FREE) || !XNU_SOURCE_ENTITLEMENT_FREE
-+		amfi->OSEntitlements_invalidate(blob->csb_entitlements);
+ 		amfi->OSEntitlements_invalidate(blob->csb_entitlements);
 +#else
 +		if (amfi != NULL) {
 +			amfi->OSEntitlements_invalidate(blob->csb_entitlements);
 +		}
 +#endif
-@@ -4351,7 +4357,60 @@
--static errno_t
--accelerate_entitlement_queries(
--	struct cs_blob *cs_blob)
--{
--	kern_return_t ret = KERN_NOT_SUPPORTED;
--
--#if CODE_SIGNING_MONITOR
+ 		osobject_release(blob->csb_entitlements);
+ 		blob->csb_entitlements = NULL;
+ 	}
+@@ -4363,12 +4369,65 @@ register_code_signature_monitor(
+  * This function must be called when the storage for the code signature can
+  * no longer change.
+  */
 +#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
 +#if CODE_SIGNING_MONITOR
 +#error "XNU_SOURCE_ENTITLEMENT_FREE requires no code signing monitor"
@@ -59,12 +62,12 @@
 +}
 +#endif
 +
-+static errno_t
-+accelerate_entitlement_queries(
-+	struct cs_blob *cs_blob)
-+{
-+	kern_return_t ret = KERN_NOT_SUPPORTED;
-+
+ static errno_t
+ accelerate_entitlement_queries(
+ 	struct cs_blob *cs_blob)
+ {
+ 	kern_return_t ret = KERN_NOT_SUPPORTED;
+ 
 +#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
 +	if (amfi == NULL) {
 +		int error = source_entitlement_free_validate(cs_blob);
@@ -76,10 +79,13 @@
 +	}
 +#endif
 +
-+#if CODE_SIGNING_MONITOR
-@@ -4806,2 +4865,10 @@
--	/* Perform 2nd stage reconstitution */
--	error = reconstitute_code_signature_2nd_stage(&tmp_blob);
+ #if CODE_SIGNING_MONITOR
+ 	CEQueryContext_t ce_ctx = NULL;
+ 	const char *signing_id = NULL;
+@@ -4818,6 +4877,14 @@ ubc_cs_blob_add(
+ 	}
+ #endif
+ 
 +#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
 +	/* Validate raw XML/DER before the second stage can discard XML bytes. */
 +	error = source_entitlement_free_validate(&tmp_blob);
@@ -88,5 +94,6 @@
 +	}
 +#endif
 +
-+	/* Perform 2nd stage reconstitution */
-+	error = reconstitute_code_signature_2nd_stage(&tmp_blob);
+ 	/* Perform 2nd stage reconstitution */
+ 	error = reconstitute_code_signature_2nd_stage(&tmp_blob);
+ 	if (error != 0) {

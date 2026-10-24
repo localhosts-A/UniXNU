@@ -12,8 +12,10 @@ class EntitlementFreeTests(unittest.TestCase):
         if not compiler:
             self.skipTest('native C compiler required')
         patch = Path(__file__).resolve().parents[2] / 'patches/xnu/source-entitlement-free-context.patch'
+        # A normal contextual diff retains the unchanged function declaration
+        # as context. Compile the new-side view, not additions alone.
         added = '\n'.join(line[1:] for line in patch.read_text().splitlines()
-                          if line.startswith('+') and not line.startswith('+++'))
+                          if line.startswith(('+', ' ')) and not line.startswith('+++'))
         condition = '#if defined(XNU_SOURCE_ENTITLEMENT_FREE)'
         helper_begin = added.index(condition)
         helper_end = added.index('static errno_t\naccelerate_entitlement_queries(')
