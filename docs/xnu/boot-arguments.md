@@ -26,7 +26,7 @@ The joined line is at most 1000 bytes. DarwinBoot copies it into a 1024-byte buf
 | `kextlog=0xfff` | Verbose kext logging |
 | `-apfs_shared_datavolume` | Uses the shared APFS data volume |
 | `-no_slto_panic` | Suppresses the SLTO panic |
-| `kt_fixed_zones=<n>` | Fixes the kernel trace zone count |
+| `kt_fixed_zones=<n>` | Sets the fixed-size typed kalloc zone budget |
 | `boot-progress=<n>` | Selects the boot progress display level |
 | `cs_debug=<mask>` | Code signing debug output |
 | `amfi_get_out_of_my_way=1` | Runs without AMFI enforcement |

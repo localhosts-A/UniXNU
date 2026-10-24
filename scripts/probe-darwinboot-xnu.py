@@ -9,6 +9,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tomllib
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +107,8 @@ parser.add_argument('--nvram-proxy', action='store_true', help='Supply an empty 
 parser.add_argument('--conflicting-boot-manifest', action='store_true', help='Isolated offline refusal control: supply an untrusted existing identity that owner verification must not overwrite')
 parser.add_argument('--crypto-hash-method', choices=['sha2-384', 'sha1'], help='Set an explicit Image4 hash algorithm in the QEMU DT')
 parser.add_argument('--osenvironment', choices=['ramdisk','recoveryos','main'], help='Set a real /chosen/osenvironment fixture; not a hardware observation')
+parser.add_argument('--kernel-base-args', default='-v serial=3 debug=0x14e kt_fixed_zones=120',
+                    help='Replace the complete offline baseline command line; board tests must supply their real allocation policy')
 parser.add_argument('--kernel-extra-args', default='', help='Append explicit offline kernel boot arguments; characters are restricted')
 parser.add_argument('--amfi-platform-only', action='store_true', help='Require platform code in the offline AMFI policy fixture')
 parser.add_argument('--trust-cache', type=Path, help='Explicit XNU offset-table/version-2 module bundle for owned loader handoff')
@@ -377,9 +380,9 @@ if args.root_match_volume_uuid:
     dt_command += ['--root-match-volume-uuid', str(args.root_match_volume_uuid)]
 subprocess.run(dt_command, check=True)
 import re as _re
-if not _re.fullmatch(r'[A-Za-z0-9_=. +\-]*', args.kernel_extra_args):
-    raise SystemExit('Kernel extra arguments contain unsupported characters')
-kernel_args = ('-v serial=3 debug=0x14e kt_fixed_zones=120 ' + args.kernel_extra_args).strip()
+kernel_args = (args.kernel_base_args + ' ' + args.kernel_extra_args).strip()
+if not _re.fullmatch(r'[A-Za-z0-9_=. +\-]*', kernel_args):
+    raise SystemExit('Kernel arguments contain unsupported characters')
 (esp / 'EFI/UniXNU/unixnu.toml').write_text(f'''version = 1
 [boot]
 timeout = 1
@@ -1184,6 +1187,8 @@ if args.check_commpage:
 if args.live_hid_dir:gdb_command.extend(['--live-hid-dir',str(args.live_hid_dir.resolve())])
 subprocess.run(gdb_command, check=True)
 report = json.loads((output / 'gdb-stop.json').read_text())
+report['kernel_arguments'] = next(entry['args'] for entry in
+    tomllib.loads((esp / 'EFI/UniXNU/unixnu.toml').read_text())['entry'] if entry['id'] == 'source-4k')
 if has_hid_probe:
     report['native_hid'] = {name: int.from_bytes(bytes.fromhex(report['memory'][page_globals['_native_hid_'+name]]),'little',signed=name.endswith('load_status'))
         for name in ('stage','resource_found','load_status','matching_load_status')}
