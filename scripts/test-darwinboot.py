@@ -87,6 +87,8 @@ subprocess.run(['python3', ROOT / 'package/Scripts/qemu-run.py', ESP,
                 '--expect', 'DARWINBOOT-VALIDATION: 33 rejected requests; firmware retained PASS',
                 '--expect', 'DARWINBOOT-VIDEO-VALIDATION: 8 malformed/unsupported GOP field sets refused PASS',
                 '--expect', 'DARWINBOOT: inputs validated; exiting boot services',
+                '--expect', 'DARWINBOOT: ExitBootServices returned status=Success',
+                '--expect', 'DARWINBOOT: entering loader trampoline',
                 *(['--expect', 'QEMU-RAMFB-GEOMETRY: actual SetMode 3048x2032'] if args.gop_high_resolution else []),
                 *(['--expect', 'QEMU-RAMFB-GEOMETRY: REFUSED no GOP'] if args.ramfb_geometry_refusal else []),
                 '--expect', ('DARWINBOOT-FIXTURE: actual GOP boot video after ExitBootServices PASS' if args.gop else
