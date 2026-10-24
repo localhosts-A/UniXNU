@@ -92,7 +92,7 @@ subprocess.run(['python3', ROOT / 'package/Scripts/qemu-run.py', ESP,
                 '--expect', 'DARWINBOOT: trampoline enter',
                 '--expect', 'DARWINBOOT: trampoline framebuffer complete',
                 '--expect', 'DARWINBOOT: trampoline cache clean complete',
-                '--expect', 'DARWINBOOT: trampoline MMU off; branching to kernel',
+                '--expect', 'DARWINBOOT: trampoline ready to disable MMU',
                 *(['--expect', 'QEMU-RAMFB-GEOMETRY: actual SetMode 3048x2032'] if args.gop_high_resolution else []),
                 *(['--expect', 'QEMU-RAMFB-GEOMETRY: REFUSED no GOP'] if args.ramfb_geometry_refusal else []),
                 '--expect', ('DARWINBOOT-FIXTURE: actual GOP boot video after ExitBootServices PASS' if args.gop else
