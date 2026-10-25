@@ -127,6 +127,19 @@ static void test_cdc(void) {
     assert(usb_cdc_init(&cdc, 0, 1, 0, true, "x") == USB_INVALID);
     char unterminated[33]; memset(unterminated, 'a', sizeof(unterminated));
     assert(usb_cdc_init(&cdc, 1, 1, 0, true, unterminated) == USB_INVALID);
+
+    const uint8_t periodic[] = {
+        9,2,25,0,1,1,0,0x80,50,
+        9,4,0,0,1,3,1,1,0,
+        7,5,0x81,3,8,8,10 /* 8-byte payload, two transactions per HS microframe */
+    };
+    assert(usb_parse_configuration(periodic, sizeof(periodic), &config) == USB_OK);
+    assert(config.endpoint_count == 1 && config.endpoints[0].max_packet == 8 &&
+           config.endpoints[0].transactions == 2);
+    uint8_t reserved_transaction_bits[sizeof(periodic)];
+    memcpy(reserved_transaction_bits, periodic, sizeof(periodic));
+    reserved_transaction_bits[23] = 0x18;
+    assert(usb_parse_configuration(reserved_transaction_bits, sizeof(reserved_transaction_bits), &config) == USB_INVALID);
 }
 
 static void *producer(void *ctx) {

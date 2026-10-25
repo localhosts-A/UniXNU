@@ -7,6 +7,7 @@
   LIBRARY_CLASS = UsbCoreLib
 [Sources]
   UsbCore.c
+  UsbHost.c
   UsbMtu3Qmu.c
   UsbMtu3Ep0.c
   UsbMtu3Endpoints.c

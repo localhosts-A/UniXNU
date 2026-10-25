@@ -51,7 +51,11 @@ void usb_dma_free(const struct usb_dma_ops *, struct usb_dma_buffer *);
 
 #define USB_MAX_INTERFACES 16
 #define USB_MAX_ENDPOINTS 32
-struct usb_endpoint { uint8_t address, type, interval; uint16_t max_packet; uint8_t interface_number; };
+struct usb_endpoint {
+    uint8_t address, type, interval;
+    uint16_t max_packet; /* Payload bytes; wMaxPacketSize transaction bits are separate. */
+    uint8_t interface_number, transactions;
+};
 struct usb_interface { uint8_t number, klass, subclass, protocol, endpoint_count; };
 struct usb_configuration {
     uint8_t value, interface_count, endpoint_count;

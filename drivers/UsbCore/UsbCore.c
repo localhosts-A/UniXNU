@@ -111,9 +111,12 @@ int usb_parse_configuration(const uint8_t *bytes, size_t length, struct usb_conf
             if (n < 7 || !seen_interface) return USB_INVALID;
             if (active >= 0) {
                 uint8_t address = bytes[at + 2], number = address & 15, type = bytes[at + 3] & 3;
-                uint16_t packet = le16(bytes + at + 4);
-                if (!number || (address & 0x70) || !type || !(packet & 0x7ff) || (packet & 0x7ff) > 1024 || (packet & 0xe000) ||
-                    (packet & 0x1800) == 0x1800 || (type == 2 && ((packet & 0x1800) || packet > 512)) ||
+                uint16_t encoded_packet = le16(bytes + at + 4);
+                uint16_t packet = encoded_packet & 0x7ff;
+                uint8_t additional_transactions = (uint8_t)((encoded_packet >> 11) & 3);
+                if (!number || (address & 0x70) || !type || !packet || packet > 1024 || (encoded_packet & 0xe000) ||
+                    additional_transactions == 3 || (type == 2 && (additional_transactions || packet > 512)) ||
+                    (type == 1 && (!bytes[at + 6] || bytes[at + 6] > 16)) ||
                     (type == 3 && !bytes[at + 6]) ||
                     value.endpoint_count == USB_MAX_ENDPOINTS) return USB_INVALID;
                 uint16_t *used = address & 0x80 ? &used_in : &used_out;
@@ -122,6 +125,7 @@ int usb_parse_configuration(const uint8_t *bytes, size_t length, struct usb_conf
                 struct usb_endpoint *ep = &value.endpoints[value.endpoint_count++];
                 ep->address = address; ep->type = type; ep->max_packet = packet;
                 ep->interval = bytes[at + 6]; ep->interface_number = value.interfaces[active].number;
+                ep->transactions = (uint8_t)(additional_transactions + 1);
             }
         } else if (kind == 2) return USB_INVALID;
         at += n;
