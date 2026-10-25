@@ -1,0 +1,18 @@
+[Defines]
+  INF_VERSION = 0x00010019
+  BASE_NAME = UsbCoreLib
+  FILE_GUID = 73642352-678D-4C60-A7E9-37986718779B
+  MODULE_TYPE = BASE
+  VERSION_STRING = 0.1
+  LIBRARY_CLASS = UsbCoreLib
+[Sources]
+  UsbCore.c
+  UsbMtu3Qmu.c
+  UsbMtu3Ep0.c
+  UsbMtu3Endpoints.c
+  UsbMtu3Device.c
+[Packages]
+  MdePkg/MdePkg.dec
+  UsbCore/UsbCore.dec
+[BuildOptions]
+  *_*_*_CC_FLAGS = -DUNIXNU_USB_EDK2

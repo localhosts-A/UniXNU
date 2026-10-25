@@ -1,0 +1,9 @@
+[Defines]
+  DEC_SPECIFICATION = 0x00010019
+  PACKAGE_NAME = UsbCore
+  PACKAGE_GUID = E8F20BA6-42AF-4B22-91FD-B613F4EC42A9
+  PACKAGE_VERSION = 0.1
+[Includes]
+  include
+[LibraryClasses]
+  UsbCoreLib|include/UsbCore.h

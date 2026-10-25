@@ -7,6 +7,15 @@ Platform clocks/power/PHY/DMA ownership, host/hub enumeration,
 OS adapters and hardware qualification remain separate work. No firmware/XNU
 USB functionality is enabled by adding these files.
 
+`UsbCore.dec` / `UsbCoreLib.inf` build all five production units with EDK2.
+`UNIXNU_USB_EDK2` selects explicit EDK2 integer/size/bool types through
+`UsbTypes.h`; ordinary host and XNU compilation keeps standard C headers.
+This creates a real AArch64 archive, without installing a controller driver.
+The isolated firmware's `tools/dali/build_usb_libraries.py` builds and checks
+the production archive members and symbol definitions together with the Dali
+platform and UEFI PMIF adapter libraries. Compilation/archiving is distinct
+from EFI image linking, USB enumeration and hardware qualification.
+
 `UsbCore.c` provides bounded MMIO, qualified 32-bit DMA, USB configuration and
 CDC ACM controls, a nonblocking diagnostic ring, boot keyboard/mouse reports,
 BOT/SCSI capacity/read/write/sync and role quiesce. Failed BOT recovery blocks

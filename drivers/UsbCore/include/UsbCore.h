@@ -1,9 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 #ifndef UNIXNU_USB_CORE_H
 #define UNIXNU_USB_CORE_H
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include "UsbTypes.h"
 
 #ifdef __cplusplus
 extern "C" {
