@@ -39,6 +39,10 @@ class UsbCoreTests(unittest.TestCase):
     def test_mtu3_endpoints(self):
         self.run_fixture("usb_endpoints_test.c", "PASS: MTU3 endpoint production", [str(ROOT / "drivers/UsbCore/UsbMtu3Endpoints.c")])
 
+    def test_mtu3_device(self):
+        self.run_fixture("usb_device_test.c", "PASS: MTU3 device production", [str(ROOT / "drivers/UsbCore" / name) for name in
+            ("UsbMtu3Qmu.c", "UsbMtu3Ep0.c", "UsbMtu3Endpoints.c", "UsbMtu3Device.c")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,8 +1,9 @@
 # Portable USB and MTU3 device components
 
 This is shared production code for the Dali firmware and source-XNU adapters.
-The current milestone implements the protocol/ownership layer, MTU3 QMU queues,
-CDC EP0 and nonzero endpoint configuration. Complete controller initialization, host/hub enumeration,
+The current milestone implements the protocol/ownership layer and a combined
+MTU3 USB2 CDC device MAC using QMU, EP0 and nonzero endpoint configuration.
+Platform clocks/power/PHY/DMA ownership, host/hub enumeration,
 OS adapters and hardware qualification remain separate work. No firmware/XNU
 USB functionality is enabled by adding these files.
 
@@ -33,6 +34,25 @@ data toggle. The owner must stop/cancel queues and reset ring ownership first.
 Partial register writes latch a fault until a successful deconfiguration. These
 components do not acquire power/clocks/PHY or provide an OS controller driver.
 
+`UsbMtu3Device.c` composes those components into the USB2 device MAC. The platform
+must own/reset/power the MAC and PHY, select device/sink and establish DMA mapping
+before initialization. Initialization only probes and allocates; start rejects
+inherited active queues and absent VBUS, disables USB3, selects the hardware QMU
+format and enables softconnect without forcing VBUS. A serialized IRQ/timer
+worker handles speed, reset, disconnect, suspend/resume, CDC notification IN1,
+diagnostic bulk IN2 and discard-only OUT2. Log writers never perform MMIO or wait.
+DTR gates output, and packet-aligned chunks request an appended ZLP to complete
+the host read. RX ZLP status is acknowledged without faulting the controller.
+
+Configuration PREPARE stops queues without altering endpoint toggles; only the
+successful status APPLY reconfigures endpoints. Aborted controls can cancel an
+in-flight diagnostic chunk; these bytes are counted as dropped and never replayed.
+The `tx_dma_completed` counter measures QMU completion, not delivery to host
+userspace. Stop masks interrupts and disconnects before bounded queue cancellation.
+A failed stop/cache handoff retains all six DMA allocations; the caller must retry
+or keep them reserved, and cannot change role or power down. Successful stop is
+idempotent. No UEFI/XNU binding or platform qualification is implied by this MAC.
+
 `UsbMtu3Qmu.c` follows the pinned MediaTek descriptor/register definitions and
 supports original and enhanced GPD formats using 32-bit addresses. Its backend
 must prove controller/DMA ownership and initialize the endpoint/FIFO first.
@@ -56,5 +76,6 @@ UndefinedBehaviorSanitizer. They independently model transports/registers,
 including malformed descriptors, concurrent log writers, short/uncertain
 writes, failed recovery, queue wrap, stale high addresses, hardware completion
 corruption, DMA-stop timeout, EP0 abort/status timing, FIFO layouts, endpoint
-halt/toggle and role-transition failures. These results do not
+halt/toggle, combined host-driven CDC/QMU transactions, every startup-write fault,
+VBUS loss/reconnect, cache handoff failures and role-transition failures. These results do not
 qualify MT6991 MMIO, actual QEMU USB devices or hardware USB.
