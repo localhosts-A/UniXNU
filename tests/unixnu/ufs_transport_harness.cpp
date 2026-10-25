@@ -26,6 +26,7 @@ struct Sim {
         big(r+10,45,2);big(r+18,45,2);r[32]=45;r[33]=2;r[34]=q[14];r[35]=enabled;r[37]=wp;
         unsigned exponent=0;while((1U<<exponent)<size)++exponent;
         r[42]=uint8_t(exponent);big(r+43,blocks+(fault==18),8);
+        if(fault==36)r[6]=0xfc;
       } else ++bad;
     } else if(q[0]==1) {
       memcpy(lastCdb,q+16,16);
@@ -83,14 +84,14 @@ extern "C" void ufs_core_case(unsigned scenario,uint64_t *out) {
   if(scenario==18)s->fault=18;
   if(scenario==19)s->enabled=false;
   if(scenario==20)s->wp=true;
-  if(scenario==30||scenario==32||scenario==33)s->fault=scenario;
+  if(scenario==30||scenario==32||scenario==33||scenario==36)s->fault=scenario;
   Dma dma{s->dma,s->pa,UINT64_MAX,DmaBytes};
   if(scenario==28)dma.addressLimit=UINT32_MAX,s->pa=dma.device=0x123450000ULL;
   out[0]=uint32_t(host.start(s->port(),dma));
   if(out[0]){out[9]=s->rings;out[11]=s->bad;delete s;return;}
   out[1]=uint32_t(host.initializeDevice());out[2]=uint32_t(host.probe(2));
   out[12]=host.geometry(2)->blockBytes;out[13]=host.geometry(2)->blocks;out[14]=s->queriesSet;out[29]=s->turs;
-  if(out[2]){out[7]=host.poisoned();out[9]=s->rings;out[11]=s->bad;delete s;return;}
+  if(out[2]){out[7]=host.poisoned();out[9]=s->rings;out[11]=s->bad;out[18]=host.completion().target;delete s;return;}
   uint8_t *buffer=new uint8_t[DataMax];memset(buffer,0xa5,DataMax);
   s->fault=scenario>=4&&scenario<=16?scenario:scenario==26||scenario==27||scenario==31?scenario:0;
   if(scenario==21)s->regs[0x50/4]^=4096;

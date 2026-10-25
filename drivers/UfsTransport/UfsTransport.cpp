@@ -120,6 +120,7 @@ Status Transport::submit(uint32_t direction, uint32_t bytes, uint64_t lba, uint3
     if (r[6] || r[7] || segment) return fail(Status::Protocol);
   } else if (last_.transaction == 0x16) {
     if (r[5] != q[5] || memcmp(r + 12, q + 12, 4)) return fail(Status::Protocol);
+    last_.target = r[6]; // Preserve QUERY result, including INVALID INDEX for absent LUNs.
     if (r[6]) { last_.status = Status::Target; return last_.status; }
     if (last_.opcode == 1) {
       uint16_t length = be16(r + 18);

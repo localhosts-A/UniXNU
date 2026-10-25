@@ -104,6 +104,10 @@ class UfsTransportTests(unittest.TestCase):
         out = self.case(30)
         self.assertEqual((out[1],out[2],out[7],out[14]), (4,2,1,1))
 
+    def test_absent_lun_query_result_is_preserved_without_geometry_or_scsi_retry(self):
+        out = self.case(36)
+        self.assertEqual((out[1],out[2],out[7],out[12],out[13],out[18],out[29]), (0,7,0,0,0,0xfc,0))
+
     def test_frozen_clock_still_has_hard_poll_bound(self):
         out = self.case(31)
         self.assertEqual((out[3],out[4],out[7],out[26],out[20]), (4,1,1,300001,out[9]))

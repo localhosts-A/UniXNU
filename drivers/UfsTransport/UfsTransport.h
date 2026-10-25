@@ -13,6 +13,7 @@ struct Geometry { uint64_t blocks = 0; uint32_t blockBytes = 0; bool valid = fal
 struct Completion {
   Status status = Status::NotReady;
   uint32_t bytes = 0, residual = 0, polls = 0, interrupt = 0, ocs = 15;
+  // target is QUERY response code for transaction 0x16, SCSI status otherwise.
   uint8_t transaction = 0, lun = 0, tag = 0, opcode = 0, target = 0;
   uint8_t senseKey = 0, asc = 0, ascq = 0;
 };
