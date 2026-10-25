@@ -25,6 +25,7 @@ SOURCES = (
 )
 CLASSES = ('IOBlockStorageDevice', 'IOBlockStorageDriver', 'IOStorage', 'IOMedia',
            'IOMediaBSDClient', 'IOGUIDPartitionScheme', 'IOUserBlockStorageDevice', 'SourceStorageFixture')
+TRANSPORT_ABI = '_unixnu_ufs_transport_abi'
 
 
 def digest(path):
@@ -182,7 +183,9 @@ def build(root):
     if not header.is_file() or not implementation.is_file():
         raise ValueError('IIG did not generate both the real interface and implementation')
     includes = [generated, framework, source, root / 'build/storage-abi/include', xnu / 'iokit']
-    inputs = [source / name for name in SOURCES] + [implementation, root / 'scripts/fixtures/source-storage.cpp']
+    transport = root / 'drivers/UfsTransport'
+    inputs = [source / name for name in SOURCES] + [implementation, root / 'scripts/fixtures/source-storage.cpp',
+                                                  transport / 'UfsTransport.cpp']
     compiled, reports = [], []
     for path in inputs:
         obj = out / (path.name + '.o')
@@ -198,11 +201,15 @@ def build(root):
     for name in CLASSES:
         if name + '10gMetaClassE' not in defined:
             raise ValueError('Source archive lacks the defined class: ' + name)
+    if TRANSPORT_ABI not in defined:
+        raise ValueError('Source archive lacks the compiled portable UFS transport')
     report = {'source_revision': revision, 'compile_record': str(record_path.relative_to(root)),
               'compile_record_sha256': digest(record_path), 'definition_sha256': digest(definition),
               'generated_header_sha256': digest(header), 'generated_implementation_sha256': digest(implementation),
               'iig_command': iig_command, 'objects': reports, 'archive_sha256': digest(archive),
               'source_archive_built': True, 'kernel_link_verified': False,
+              'ufs_transport_abi': 1, 'ufs_transport_source_sha256': digest(transport / 'UfsTransport.cpp'),
+              'ufs_transport_header_sha256': digest(transport / 'UfsTransport.h'),
               'storage_runtime_qualified': False, 'physical_ufs_qualified': False}
     (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print('PASS: actual public IOStorageFamily source archive built; kernel link/runtime still require validation')
@@ -214,8 +221,15 @@ def verify_kernel(root, kernel):
     if (report.get('source_revision') != REVISION or report.get('source_archive_built') is not True or
             report.get('archive_sha256') != digest(out / 'libIOStorageFamily.a')):
         raise ValueError('Source storage archive/report mismatch')
+    transport = root / 'drivers/UfsTransport'
+    if (report.get('ufs_transport_abi') != 1 or
+            report.get('ufs_transport_source_sha256') != digest(transport / 'UfsTransport.cpp') or
+            report.get('ufs_transport_header_sha256') != digest(transport / 'UfsTransport.h')):
+        raise ValueError('Portable UFS transport source differs from the built archive')
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', str(kernel)], text=True)
     undefined = subprocess.check_output(['xcrun', 'nm', '-u', str(kernel)], text=True)
+    if TRANSPORT_ABI not in defined or TRANSPORT_ABI in undefined:
+        raise ValueError('Final source kernel lacks a resolved portable UFS transport')
     for name in CLASSES:
         if name + '10gMetaClassE' not in defined or name in undefined:
             raise ValueError('Final source kernel lacks a resolved storage class: ' + name)

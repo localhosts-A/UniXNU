@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import struct
 import tempfile
@@ -11,6 +12,28 @@ SPEC.loader.exec_module(storage)
 
 
 class SourceStorageBuildTests(unittest.TestCase):
+    def test_kernel_verification_rejects_changed_transport_source_or_header_before_tools(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            out = root/'build/source-storage'
+            core = root/'drivers/UfsTransport'
+            out.mkdir(parents=True); core.mkdir(parents=True)
+            archive = out/'libIOStorageFamily.a'
+            archive.write_bytes(b'archive')
+            for name in ('UfsTransport.cpp', 'UfsTransport.h'):
+                (core/name).write_text(name)
+            report = {'source_revision': storage.REVISION, 'source_archive_built': True,
+                      'archive_sha256': storage.digest(archive), 'ufs_transport_abi': 1,
+                      'ufs_transport_source_sha256': storage.digest(core/'UfsTransport.cpp'),
+                      'ufs_transport_header_sha256': storage.digest(core/'UfsTransport.h')}
+            (out/'build-report.json').write_text(json.dumps(report))
+            for name in ('UfsTransport.cpp', 'UfsTransport.h'):
+                path = core/name
+                path.write_text('changed')
+                with self.assertRaisesRegex(ValueError, 'transport source differs'):
+                    storage.verify_kernel(root, root/'absent-kernel')
+                path.write_text(name)
+
     def test_compile_record_keeps_kernel_flags_without_clobbering_kernel_outputs(self):
         record = {'directory': '/build/xnu', 'file': 'IOService.cpp',
                   'arguments': ['clang++', '-target', 'arm64-apple-ios17.0', '-DKERNEL_PRIVATE=1',
