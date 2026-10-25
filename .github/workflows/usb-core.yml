@@ -1,0 +1,36 @@
+name: USB protocol and MTU3 register-model tests
+on:
+  workflow_dispatch:
+  push:
+    paths: &usb-paths
+      - 'drivers/UsbCore/**'
+      - 'tests/usb/**'
+      - '.github/workflows/usb-core.yml'
+  pull_request:
+    paths: *usb-paths
+permissions:
+  contents: read
+jobs:
+  production-c:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [clang, gcc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run production C with ASan and UBSan
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+        run: python3 -m unittest discover -s tests/usb -p 'test_*.py' -v 2>&1 | tee usb-core-test.log
+      - name: Retain protocol/model evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-core-${{ matrix.cc }}
+          path: usb-core-test.log
+          retention-days: 7
