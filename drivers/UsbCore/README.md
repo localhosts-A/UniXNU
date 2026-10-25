@@ -1,13 +1,14 @@
 # Portable USB and MTU3 device components
 
 This is shared production code for the Dali firmware and source-XNU adapters.
-The current milestone implements the protocol/ownership layer and a combined
-MTU3 USB2 CDC device MAC using QMU, EP0 and nonzero endpoint configuration.
-Platform clocks/power/PHY/DMA ownership, host/hub enumeration,
-OS adapters and hardware qualification remain separate work. No firmware/XNU
-USB functionality is enabled by adding these files.
+The current milestone implements the protocol/ownership layer, a USB2 host
+coordinator with external-hub management, and a combined MTU3 CDC device MAC
+using QMU, EP0 and nonzero endpoint configuration. Platform clocks/power/PHY/DMA
+ownership, native controller workers, OS adapters and hardware qualification
+remain separate work. No firmware/XNU USB functionality is enabled by adding
+these files.
 
-`UsbCore.dec` / `UsbCoreLib.inf` build all five production units with EDK2.
+`UsbCore.dec` / `UsbCoreLib.inf` build all six production C units with EDK2.
 `UNIXNU_USB_EDK2` selects explicit EDK2 integer/size/bool types through
 `UsbTypes.h`; ordinary host and XNU compilation keeps standard C headers.
 This creates a real AArch64 archive, without installing a controller driver.
@@ -22,6 +23,18 @@ BOT/SCSI capacity/read/write/sync and role quiesce. Failed BOT recovery blocks
 new commands; uncertain writes are never automatically replayed or repaired by
 a later flush. No VID/PID is implicitly allocated: the OS adapter supplies its
 explicit configured identity to CDC initialization.
+
+`UsbHost.c` enumerates checked USB2 descriptors around a controller contract,
+routes boot HID and BOT, and manages USB2 external hubs. Hub state uses standard
+hub-class requests, validates descriptors and interrupt bitmaps, powers ports,
+resets connected ports on bounded monotonic deadlines, reports attach/detach and
+overcurrent events, and builds child routes with single/multi-TT and think-time
+metadata. Failed child attach callbacks remain retryable after the hardware reset
+deadline; unplug or stop delivers DETACH so the owner can clean partial child
+state. A controller clock callback is required for hub timing. The owner must
+quiesce children before stopping or disconnecting a hub; overcurrent remains
+latched until the owner stops and restarts the hub. This coordinator still does
+not implement an xHCI engine or create OS device services.
 
 `UsbMtu3Ep0.c` handles real EP0 registers/FIFO with 64-byte packets, short/ZLP
 responses, OUT bounds, W1C acknowledgements and a one-second transaction deadline.

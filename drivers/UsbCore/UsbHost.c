@@ -123,6 +123,21 @@ static int discover_classes(struct usb_host_device *device)
                 break;
             }
             if (!binding->endpoint) --device->hid_count;
+        } else if (interface->klass == 9 && interface->subclass == 0 &&
+                   interface->protocol <= 1 && !device->hub_interface.present) {
+            for (uint8_t e = 0; e < configuration->endpoint_count; ++e) {
+                const struct usb_endpoint *endpoint = &configuration->endpoints[e];
+                if (endpoint->interface_number != interface->number ||
+                    endpoint->type != 3 || !(endpoint->address & 0x80) ||
+                    !endpoint->max_packet) continue;
+                device->hub_interface.interface_number = interface->number;
+                device->hub_interface.endpoint = endpoint->address;
+                device->hub_interface.interval = endpoint->interval;
+                device->hub_interface.protocol = interface->protocol;
+                device->hub_interface.max_packet = endpoint->max_packet;
+                device->hub_interface.present = true;
+                break;
+            }
         } else if (interface->klass == 8 && interface->subclass == 6 &&
                    interface->protocol == 0x50 && !device->has_bot) {
             uint8_t input = 0, output = 0;
@@ -147,16 +162,75 @@ static int discover_classes(struct usb_host_device *device)
     return USB_OK;
 }
 
+static int find_multi_tt_endpoint(const uint8_t *bytes, size_t length,
+                                  uint8_t interface_number,
+                                  struct usb_endpoint *endpoint, bool *found)
+{
+    if (!bytes || !endpoint || !found || length < 9) return USB_INVALID;
+    *found = false;
+    size_t total = get_le16(bytes + 2);
+    bool candidate = false, seen = false;
+    uint8_t expected_endpoints = 0;
+    size_t found_endpoints = 0;
+    struct usb_endpoint selected = {0};
+    for (size_t at = 9; at < total;) {
+        uint8_t descriptor_length = bytes[at], kind = bytes[at + 1];
+        if (kind == 4) {
+            candidate = false;
+            if (descriptor_length < 9) return USB_INVALID;
+            if (bytes[at + 2] == interface_number && bytes[at + 3] == 1 &&
+                bytes[at + 5] == 9 && bytes[at + 6] == 0) {
+                if (seen || bytes[at + 7] != 2) return USB_PHASE_ERROR;
+                seen = true;
+                candidate = true;
+                expected_endpoints = bytes[at + 4];
+            }
+        } else if (kind == 5 && candidate) {
+            if (descriptor_length < 7) return USB_INVALID;
+            ++found_endpoints;
+            uint8_t address = bytes[at + 2];
+            uint8_t type = bytes[at + 3] & 3u;
+            uint16_t encoded_packet = get_le16(bytes + at + 4);
+            uint8_t additional = (uint8_t)((encoded_packet >> 11) & 3u);
+            uint16_t packet = encoded_packet & 0x7ffu;
+            if (!(address & 0x80u) || !(address & 0x0fu) || (address & 0x70u) ||
+                type != 3 || !packet || packet > 1024 || (encoded_packet & 0xe000u) ||
+                additional == 3 || !bytes[at + 6]) return USB_PHASE_ERROR;
+            selected.address = address;
+            selected.type = type;
+            selected.max_packet = packet;
+            selected.interval = bytes[at + 6];
+            selected.interface_number = interface_number;
+            selected.transactions = (uint8_t)(additional + 1u);
+        }
+        at += descriptor_length;
+    }
+    if (!seen) return USB_OK;
+    if (expected_endpoints != 1 || found_endpoints != 1) return USB_PHASE_ERROR;
+    *endpoint = selected;
+    *found = true;
+    return USB_OK;
+}
+
 static bool selected_interface(const struct usb_host_device *device, uint8_t number)
 {
     for (uint8_t h = 0; h < device->hid_count; ++h)
         if (device->hid[h].interface_number == number) return true;
+    if (device->hub_interface.present &&
+        device->hub_interface.interface_number == number) return true;
     return device->has_bot && device->bot.interface_number == number;
 }
 
 static bool selected_endpoint(const struct usb_host_device *device,
                               const struct usb_endpoint *endpoint)
-{ return selected_interface(device, endpoint->interface_number); }
+{
+    if (device->hub_interface.present &&
+        device->hub_interface.interface_number == endpoint->interface_number) {
+        return !device->hub_interface.use_multi_tt &&
+               endpoint->address == device->hub_interface.endpoint;
+    }
+    return selected_interface(device, endpoint->interface_number);
+}
 
 static int host_bot_control(void *context, const struct usb_setup *setup,
                             void *data, size_t capacity, size_t *actual,
@@ -276,11 +350,60 @@ int usb_host_enumerate(struct usb_host_device *device, const struct usb_host_ops
     if (result) return abort_enumeration(device, result);
     device->configuration = device->parsed_configuration.value;
     (void)discover_classes(device);
+    struct usb_endpoint multi_tt_endpoint = {0};
+    bool use_multi_tt = false;
+    if (device->hub_interface.present) {
+        if (speed == USB_HOST_HIGH_SPEED) {
+            uint8_t device_protocol = device->device_descriptor[6];
+            if (device_protocol == 1 && device->hub_interface.protocol == 0) {
+                /* High-speed single-TT hubs use interface protocol zero. */
+            } else if (device_protocol == 2 && device->hub_interface.protocol == 1) {
+                bool found = false;
+                result = find_multi_tt_endpoint(bytes, total,
+                                                 device->hub_interface.interface_number,
+                                                 &multi_tt_endpoint, &found);
+                if (result || !found)
+                    return abort_enumeration(device, result ? result : USB_PHASE_ERROR);
+                if (!valid_endpoint_for_speed(speed, &multi_tt_endpoint))
+                    return abort_enumeration(device, USB_UNSUPPORTED);
+                device->hub_interface.multi_tt_endpoint = multi_tt_endpoint.address;
+                device->hub_interface.multi_tt_interval = multi_tt_endpoint.interval;
+                device->hub_interface.multi_tt_max_packet = multi_tt_endpoint.max_packet;
+                device->hub_interface.multi_tt_available = true;
+                device->hub_interface.use_multi_tt = true;
+                use_multi_tt = true;
+            } else {
+                return abort_enumeration(device, USB_UNSUPPORTED);
+            }
+        } else if (speed == USB_HOST_FULL_SPEED &&
+                   device->device_descriptor[6] == 0 &&
+                   device->hub_interface.protocol == 0) {
+            /* Full-speed hubs have no transaction translator interface. */
+        } else {
+            return abort_enumeration(device, USB_UNSUPPORTED);
+        }
+    }
 
     actual = 0;
     result = host_control(device, address, 0, 9, device->configuration, 0,
                           NULL, 0, 0, &actual);
     if (result || actual) return abort_enumeration(device, result ? result : USB_PHASE_ERROR);
+
+    if (use_multi_tt) {
+        actual = 0;
+        result = host_control(device, address, 0x01, 11, 1,
+                              device->hub_interface.interface_number,
+                              NULL, 0, 0, &actual);
+        if (result || actual)
+            return abort_enumeration(device, result ? result : USB_PHASE_ERROR);
+        result = ops->configure_endpoint(ops->context, route, address, speed,
+                                         &multi_tt_endpoint);
+        if (result) return abort_enumeration(device, result);
+        device->hub_interface.endpoint = multi_tt_endpoint.address;
+        device->hub_interface.interval = multi_tt_endpoint.interval;
+        device->hub_interface.max_packet = multi_tt_endpoint.max_packet;
+        device->hub_interface.protocol = 2;
+    }
 
     for (uint8_t e = 0; e < device->parsed_configuration.endpoint_count; ++e) {
         const struct usb_endpoint *endpoint = &device->parsed_configuration.endpoints[e];
@@ -402,5 +525,431 @@ int usb_host_disconnect(struct usb_host_device *device, usb_key_event key_event,
     }
     if (device->has_bot) usb_bot_detach(&device->bot);
     clear_bytes(device, sizeof(*device));
+    return USB_OK;
+}
+
+#define USB_HUB_DESCRIPTOR_TYPE 0x29u
+#define USB_HUB_PORT_CONNECTION 0x0001u
+#define USB_HUB_PORT_ENABLE 0x0002u
+#define USB_HUB_PORT_OVERCURRENT 0x0008u
+#define USB_HUB_PORT_RESET 0x0010u
+#define USB_HUB_PORT_POWER 0x0100u
+#define USB_HUB_PORT_LOW_SPEED 0x0200u
+#define USB_HUB_PORT_HIGH_SPEED 0x0400u
+#define USB_HUB_PORT_C_CONNECTION 0x0001u
+#define USB_HUB_PORT_C_ENABLE 0x0002u
+#define USB_HUB_PORT_C_SUSPEND 0x0004u
+#define USB_HUB_PORT_C_OVERCURRENT 0x0008u
+#define USB_HUB_PORT_C_RESET 0x0010u
+#define USB_HUB_PORT_FEATURE_RESET 4u
+#define USB_HUB_PORT_FEATURE_POWER 8u
+#define USB_HUB_HUB_C_LOCAL_POWER 0x0001u
+#define USB_HUB_HUB_C_OVERCURRENT 0x0002u
+#define USB_HUB_FEATURE_C_LOCAL_POWER 0u
+#define USB_HUB_FEATURE_C_OVERCURRENT 1u
+#define USB_HUB_POWER_NO_SWITCHING 2u
+#define USB_HUB_RESET_MIN_MS 50u
+#define USB_HUB_RESET_TIMEOUT_MS 1000u
+
+static bool host_time_reached(uint32_t now_ms, uint32_t deadline_ms)
+{ return (uint32_t)(now_ms - deadline_ms) < 0x80000000u; }
+
+static int hub_feature(struct usb_host_device *device, uint8_t request_type,
+                      uint8_t request, uint16_t feature, uint16_t port)
+{
+    size_t actual = 0;
+    int result = host_control(device, device->address, request_type, request, feature,
+                              port, NULL, 0, 0, &actual);
+    if (!result && actual) return USB_PHASE_ERROR;
+    return result;
+}
+
+static int hub_get_port_status(struct usb_host_device *device, uint8_t port,
+                               uint16_t *status, uint16_t *change)
+{
+    uint8_t bytes[4] = {0};
+    size_t actual = 0;
+    if (!status || !change) return USB_INVALID;
+    int result = host_control(device, device->address, 0xa3, 0, 0, port,
+                              bytes, sizeof(bytes), sizeof(bytes), &actual);
+    if (result) return result;
+    if (actual != sizeof(bytes)) return USB_PHASE_ERROR;
+    *status = get_le16(bytes);
+    *change = get_le16(bytes + 2);
+    return USB_OK;
+}
+
+static int hub_get_status(struct usb_host_device *device,
+                          uint16_t *status, uint16_t *change)
+{
+    uint8_t bytes[4] = {0};
+    size_t actual = 0;
+    if (!status || !change) return USB_INVALID;
+    int result = host_control(device, device->address, 0xa0, 0, 0, 0,
+                              bytes, sizeof(bytes), sizeof(bytes), &actual);
+    if (result) return result;
+    if (actual != sizeof(bytes)) return USB_PHASE_ERROR;
+    *status = get_le16(bytes);
+    *change = get_le16(bytes + 2);
+    return USB_OK;
+}
+
+static int hub_clear_port_changes(struct usb_host_device *device, uint8_t port,
+                                  uint16_t change)
+{
+    static const struct { uint16_t mask, feature; } features[] = {
+        {USB_HUB_PORT_C_CONNECTION, 16}, {USB_HUB_PORT_C_ENABLE, 17},
+        {USB_HUB_PORT_C_SUSPEND, 18}, {USB_HUB_PORT_C_OVERCURRENT, 19},
+        {USB_HUB_PORT_C_RESET, 20}
+    };
+    for (size_t i = 0; i < sizeof(features) / sizeof(features[0]); ++i) {
+        if (!(change & features[i].mask)) continue;
+        int result = hub_feature(device, 0x23, 1, features[i].feature, port);
+        if (result) return result;
+    }
+    return USB_OK;
+}
+
+static int hub_clear_status_changes(struct usb_host_device *device, uint16_t change)
+{
+    if (change & USB_HUB_HUB_C_LOCAL_POWER) {
+        int result = hub_feature(device, 0x20, 1, USB_HUB_FEATURE_C_LOCAL_POWER, 0);
+        if (result) return result;
+    }
+    if (change & USB_HUB_HUB_C_OVERCURRENT)
+        return hub_feature(device, 0x20, 1, USB_HUB_FEATURE_C_OVERCURRENT, 0);
+    return USB_OK;
+}
+
+static int hub_set_port_power(struct usb_host_device *device,
+                              struct usb_host_hub *hub, uint8_t port,
+                              bool enabled)
+{
+    struct usb_host_hub_port *state = &hub->ports[port - 1];
+    if (state->powered == enabled) return USB_OK;
+    uint16_t power_mode = hub->characteristics & 3u;
+    if (power_mode == USB_HUB_POWER_NO_SWITCHING) {
+        state->powered = true;
+        return enabled ? USB_OK : USB_UNSUPPORTED;
+    }
+    if (enabled) state->powered = true; /* Retain uncertain SET_PORT_POWER for stop retry. */
+    int result = hub_feature(device, 0x23, enabled ? 3 : 1,
+                             USB_HUB_PORT_FEATURE_POWER, port);
+    if (!result) state->powered = enabled;
+    return result;
+}
+
+static int hub_speed_from_status(uint16_t status, enum usb_host_speed *speed)
+{
+    if (!speed) return USB_INVALID;
+    bool low = (status & USB_HUB_PORT_LOW_SPEED) != 0;
+    bool high = (status & USB_HUB_PORT_HIGH_SPEED) != 0;
+    if (low && high) return USB_PHASE_ERROR;
+    *speed = high ? USB_HOST_HIGH_SPEED : low ? USB_HOST_LOW_SPEED : USB_HOST_FULL_SPEED;
+    return USB_OK;
+}
+
+int usb_host_hub_child_route(const struct usb_host_device *device,
+                             const struct usb_host_hub *hub, uint8_t port,
+                             enum usb_host_speed speed, struct usb_host_route *route)
+{
+    if (!device || !hub || !route || !hub->initialized || !device->address ||
+        device->state != USB_HOST_CONFIGURED || port == 0 || port > hub->port_count ||
+        speed < USB_HOST_LOW_SPEED || speed > USB_HOST_HIGH_SPEED ||
+        !valid_route(&device->route)) return USB_INVALID;
+    if (device->route.depth >= USB_HOST_MAX_ROUTE_DEPTH) return USB_RANGE;
+    struct usb_host_route child = device->route;
+    child.hub_address[child.depth] = device->address;
+    child.hub_port[child.depth] = port;
+    ++child.depth;
+    if (device->speed == USB_HOST_HIGH_SPEED && speed != USB_HOST_HIGH_SPEED) {
+        child.tt_hub_address = device->address;
+        child.tt_port = port;
+        child.tt_think_time_ns = hub->tt_think_time_ns;
+        child.multi_tt = hub->multi_tt;
+    }
+    if (!valid_route(&child)) return USB_RANGE;
+    *route = child;
+    return USB_OK;
+}
+
+static int hub_emit(struct usb_host_device *device, struct usb_host_hub *hub,
+                    uint8_t port, enum usb_host_hub_event_kind kind,
+                    enum usb_host_speed speed, usb_host_hub_event callback,
+                    void *event_context)
+{
+    if (!callback) return USB_INVALID;
+    struct usb_host_route route;
+    int result = usb_host_hub_child_route(device, hub, port, speed, &route);
+    if (result) return result;
+    return callback(event_context, kind, port, &route, speed);
+}
+
+int usb_host_hub_start(struct usb_host_device *device, struct usb_host_hub *hub)
+{
+    if (!device || !hub || device->state != USB_HOST_CONFIGURED ||
+        !device->hub_interface.present || !device->address ||
+        !device->ops.interrupt || !device->ops.now_ms || hub->initialized || hub->faulted)
+        return USB_INVALID;
+    uint8_t header[7] = {0};
+    size_t actual = 0;
+    int result = host_control(device, device->address, 0xa0, 6,
+                              (uint16_t)(USB_HUB_DESCRIPTOR_TYPE << 8), 0,
+                              header, sizeof(header), sizeof(header), &actual);
+    if (result) return result;
+    if (actual != sizeof(header) || header[0] < sizeof(header) ||
+        header[1] != USB_HUB_DESCRIPTOR_TYPE || !header[2] ||
+        header[2] > USB_HOST_HUB_MAX_PORTS) return USB_PHASE_ERROR;
+    uint8_t bitmap_bytes = (uint8_t)((header[2] + 8u) / 8u);
+    uint8_t expected = (uint8_t)(7u + 2u * bitmap_bytes);
+    uint16_t characteristics = get_le16(header + 3);
+    uint16_t power_mode = characteristics & 3u;
+    if (header[0] != expected || (characteristics & 0xff00u) || power_mode == 3u)
+        return USB_PHASE_ERROR;
+    if (device->hub_interface.max_packet < bitmap_bytes) return USB_UNSUPPORTED;
+    if ((device->speed == USB_HOST_HIGH_SPEED &&
+         device->hub_interface.protocol != 0 && device->hub_interface.protocol != 2) ||
+        (device->speed == USB_HOST_FULL_SPEED && device->hub_interface.protocol != 0))
+        return USB_UNSUPPORTED;
+
+    uint8_t descriptor[39] = {0};
+    result = host_control(device, device->address, 0xa0, 6,
+                          (uint16_t)(USB_HUB_DESCRIPTOR_TYPE << 8), 0,
+                          descriptor, sizeof(descriptor), expected, &actual);
+    if (result) return result;
+    if (actual != expected || descriptor[0] != expected ||
+        descriptor[1] != USB_HUB_DESCRIPTOR_TYPE || descriptor[2] != header[2] ||
+        get_le16(descriptor + 3) != characteristics) return USB_PHASE_ERROR;
+
+    clear_bytes(hub, sizeof(*hub));
+    hub->initialized = true;
+    hub->scan_all_ports = true;
+    hub->interface_number = device->hub_interface.interface_number;
+    hub->endpoint = device->hub_interface.endpoint;
+    hub->interval = device->hub_interface.interval;
+    hub->protocol = device->hub_interface.protocol;
+    hub->port_count = header[2];
+    hub->bitmap_bytes = bitmap_bytes;
+    hub->power_good_ms = (uint16_t)descriptor[5] * 2u;
+    hub->characteristics = characteristics;
+    hub->multi_tt = device->speed == USB_HOST_HIGH_SPEED && hub->protocol == 2;
+    if (device->speed == USB_HOST_HIGH_SPEED)
+        hub->tt_think_time_ns = (uint16_t)((((characteristics >> 5) & 3u) + 1u) * 666u);
+    uint16_t wait_ms = hub->power_good_ms;
+    if (power_mode != USB_HUB_POWER_NO_SWITCHING && !wait_ms) wait_ms = 2;
+
+    for (uint8_t port = 1; port <= hub->port_count; ++port) {
+        struct usb_host_hub_port *state = &hub->ports[port - 1];
+        if (power_mode == USB_HUB_POWER_NO_SWITCHING) {
+            state->powered = true;
+            continue;
+        }
+        result = hub_set_port_power(device, hub, port, true);
+        if (result) {
+            hub->faulted = true;
+            return result;
+        }
+    }
+    uint32_t power_complete_ms = device->ops.now_ms(device->ops.context);
+    hub->power_ready_ms = power_complete_ms + wait_ms;
+    return USB_OK;
+}
+
+static int hub_begin_reset(struct usb_host_device *device, struct usb_host_hub *hub,
+                           uint8_t port)
+{
+    struct usb_host_hub_port *state = &hub->ports[port - 1];
+    int result = hub_feature(device, 0x23, 3, USB_HUB_PORT_FEATURE_RESET, port);
+    if (result) return result;
+    uint32_t now_ms = device->ops.now_ms(device->ops.context);
+    state->reset_pending = true;
+    state->reset_ready_ms = now_ms + USB_HUB_RESET_MIN_MS;
+    state->reset_deadline_ms = now_ms + USB_HUB_RESET_TIMEOUT_MS;
+    return USB_AGAIN;
+}
+
+static int hub_process_port(struct usb_host_device *device, struct usb_host_hub *hub,
+                            uint8_t port,
+                            usb_host_hub_event callback, void *event_context)
+{
+    struct usb_host_hub_port *state = &hub->ports[port - 1];
+    uint16_t status = 0, change = 0;
+    int result = hub_get_port_status(device, port, &status, &change);
+    if (result) return result;
+
+    if (status & USB_HUB_PORT_OVERCURRENT) {
+        if (!state->overcurrent_latched) {
+            enum usb_host_speed speed = state->speed;
+            if (!state->attached) {
+                result = hub_speed_from_status(status, &speed);
+                if (result) speed = USB_HOST_FULL_SPEED;
+            }
+            result = hub_emit(device, hub, port, USB_HOST_HUB_OVERCURRENT,
+                              speed, callback, event_context);
+            if (result) return result;
+            state->attached = false;
+            state->reset_pending = false;
+            state->attach_pending = false;
+            state->overcurrent_latched = true;
+        }
+        if ((hub->characteristics & 3u) != USB_HUB_POWER_NO_SWITCHING) {
+            result = hub_set_port_power(device, hub, port, false);
+            if (result) return result;
+        }
+        result = hub_clear_port_changes(device, port, change);
+        return result ? result : USB_IO;
+    }
+
+    if (!(status & USB_HUB_PORT_CONNECTION)) {
+        if (state->attached || state->attach_pending) {
+            result = hub_emit(device, hub, port, USB_HOST_HUB_DETACH,
+                              state->speed, callback, event_context);
+            if (result) return result;
+            state->attached = false;
+            state->attach_pending = false;
+        }
+        state->reset_pending = false;
+        state->attach_pending = false;
+        state->reset_failed = false;
+        result = hub_clear_port_changes(device, port, change);
+        return result;
+    }
+
+    if (state->overcurrent_latched || !state->powered) return USB_IO;
+    if (change & USB_HUB_PORT_C_CONNECTION) {
+        if (state->attached || state->attach_pending) {
+            result = hub_emit(device, hub, port, USB_HOST_HUB_DETACH,
+                              state->speed, callback, event_context);
+            if (result) return result;
+            state->attached = false;
+            state->attach_pending = false;
+        }
+        state->reset_failed = false;
+        state->reset_pending = false;
+        state->attach_pending = false;
+    }
+    result = hub_clear_port_changes(device, port, change);
+    if (result) return result;
+    if (state->attached) return USB_OK;
+    if (state->reset_failed) return USB_TIMEOUT;
+    if (state->attach_pending) {
+        result = hub_emit(device, hub, port, USB_HOST_HUB_ATTACH,
+                          state->speed, callback, event_context);
+        if (result) return result;
+        state->attached = true;
+        state->attach_pending = false;
+        return USB_OK;
+    }
+    if (!state->reset_pending) return hub_begin_reset(device, hub, port);
+    uint32_t now_ms = device->ops.now_ms(device->ops.context);
+    if (!host_time_reached(now_ms, state->reset_ready_ms)) return USB_AGAIN;
+    if (host_time_reached(now_ms, state->reset_deadline_ms)) {
+        state->reset_pending = false;
+        state->reset_failed = true;
+        return USB_TIMEOUT;
+    }
+    if (status & USB_HUB_PORT_RESET) {
+        return USB_AGAIN;
+    }
+    state->reset_pending = false;
+    if (!(status & USB_HUB_PORT_ENABLE)) {
+        state->reset_failed = true;
+        return USB_IO;
+    }
+    enum usb_host_speed speed;
+    result = hub_speed_from_status(status, &speed);
+    if (result) {
+        state->reset_failed = true;
+        return result;
+    }
+    state->speed = speed;
+    state->attach_pending = true;
+    result = hub_emit(device, hub, port, USB_HOST_HUB_ATTACH,
+                      speed, callback, event_context);
+    if (result) return result;
+    state->attached = true;
+    state->attach_pending = false;
+    return USB_OK;
+}
+
+int usb_host_hub_poll(struct usb_host_device *device, struct usb_host_hub *hub,
+                      uint32_t timeout_ms,
+                      usb_host_hub_event callback, void *event_context)
+{
+    if (!device || !hub || !hub->initialized || device->state != USB_HOST_CONFIGURED ||
+        device->address == 0 || !device->ops.now_ms || !timeout_ms || timeout_ms > 10000)
+        return USB_INVALID;
+    if (hub->faulted) return USB_IO;
+    uint32_t now_ms = device->ops.now_ms(device->ops.context);
+    if (!host_time_reached(now_ms, hub->power_ready_ms)) return USB_AGAIN;
+
+    uint8_t bitmap[USB_HOST_HUB_MAX_BITMAP_BYTES] = {0};
+    int interrupt_result = USB_OK;
+    if (!hub->scan_all_ports) {
+        size_t actual = 0;
+        interrupt_result = device->ops.interrupt(device->ops.context, &device->route,
+                                                  device->address, hub->endpoint,
+                                                  bitmap, hub->bitmap_bytes,
+                                                  &actual, timeout_ms);
+        if (interrupt_result && interrupt_result != USB_AGAIN &&
+            interrupt_result != USB_TIMEOUT) return interrupt_result;
+        if (!interrupt_result && actual != hub->bitmap_bytes)
+            return USB_PHASE_ERROR;
+    }
+    bool hub_status_changed = hub->scan_all_ports ||
+        (!interrupt_result && (bitmap[0] & 1u) != 0);
+    if (hub_status_changed) {
+        uint16_t status = 0, change = 0;
+        int result = hub_get_status(device, &status, &change);
+        if (result) return result;
+        result = hub_clear_status_changes(device, change);
+        if (result) return result;
+        if (status & USB_HUB_HUB_C_OVERCURRENT) {
+            hub->faulted = true;
+            return USB_IO;
+        }
+    }
+
+    int first_error = USB_OK;
+    bool pending_reset = false;
+    for (uint8_t port = 1; port <= hub->port_count; ++port) {
+        struct usb_host_hub_port *state = &hub->ports[port - 1];
+        bool changed = hub->scan_all_ports ||
+            (!interrupt_result && (bitmap[port / 8u] & (uint8_t)(1u << (port % 8u))) != 0);
+        if (!changed && !state->reset_pending && !state->attach_pending) continue;
+        int result = hub_process_port(device, hub, port, callback, event_context);
+        if (result == USB_AGAIN) pending_reset = true;
+        else if (result && !first_error) first_error = result;
+    }
+    hub->scan_all_ports = false;
+    if (first_error) return first_error;
+    if (pending_reset) return USB_AGAIN;
+    if (interrupt_result) return interrupt_result;
+    return USB_OK;
+}
+
+int usb_host_hub_stop(struct usb_host_device *device, struct usb_host_hub *hub,
+                      usb_host_hub_event callback, void *event_context)
+{
+    if (!device || !hub) return USB_INVALID;
+    if (!hub->initialized) return USB_OK;
+    if (device->state != USB_HOST_CONFIGURED || !device->address) return USB_DISCONNECTED;
+    for (uint8_t port = 1; port <= hub->port_count; ++port) {
+        struct usb_host_hub_port *state = &hub->ports[port - 1];
+        if (state->attached || state->attach_pending) {
+            int result = hub_emit(device, hub, port, USB_HOST_HUB_DETACH,
+                                  state->speed, callback, event_context);
+            if (result) return result;
+            state->attached = false;
+            state->attach_pending = false;
+        }
+        state->attach_pending = false;
+        if (state->powered && (hub->characteristics & 3u) != USB_HUB_POWER_NO_SWITCHING) {
+            int result = hub_set_port_power(device, hub, port, false);
+            if (result) return result;
+        }
+        state->reset_pending = false;
+    }
+    clear_bytes(hub, sizeof(*hub));
     return USB_OK;
 }

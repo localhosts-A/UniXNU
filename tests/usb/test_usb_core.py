@@ -34,6 +34,10 @@ class UsbCoreTests(unittest.TestCase):
         self.run_fixture("usb_host_test.c", "PASS: USB production host enumeration",
                          production=[str(ROOT / "drivers/UsbCore/UsbHost.c")])
 
+    def test_host_hub(self):
+        self.run_fixture("usb_hub_test.c", "PASS: USB production hub",
+                         production=[str(ROOT / "drivers/UsbCore/UsbHost.c")])
+
     def test_mtu3_qmu(self):
         self.run_fixture("usb_qmu_test.c", "PASS: MTU3 QMU production", [str(ROOT / "drivers/UsbCore/UsbMtu3Qmu.c")])
 
