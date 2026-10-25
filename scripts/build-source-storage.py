@@ -24,7 +24,7 @@ SOURCES = (
     'IOPartitionScheme.cpp', 'IOStorage.cpp',
 )
 CLASSES = ('IOBlockStorageDevice', 'IOBlockStorageDriver', 'IOStorage', 'IOMedia',
-           'IOMediaBSDClient', 'IOGUIDPartitionScheme', 'IOUserBlockStorageDevice')
+           'IOMediaBSDClient', 'IOGUIDPartitionScheme', 'IOUserBlockStorageDevice', 'SourceStorageFixture')
 
 
 def digest(path):
@@ -177,7 +177,7 @@ def build(root):
     if not header.is_file() or not implementation.is_file():
         raise ValueError('IIG did not generate both the real interface and implementation')
     includes = [generated, source, root / 'build/storage-abi/include', xnu / 'iokit']
-    inputs = [source / name for name in SOURCES] + [implementation]
+    inputs = [source / name for name in SOURCES] + [implementation, root / 'scripts/fixtures/source-storage.cpp']
     compiled, reports = [], []
     for path in inputs:
         obj = out / (path.name + '.o')

@@ -1,7 +1,7 @@
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -35,3 +35,25 @@
+@@ -35,3 +35,32 @@
  const char * gIOKernelConfigTables =
      "("
 +#if defined(XNU_SOURCE_STORAGE_FAMILY) && XNU_SOURCE_STORAGE_FAMILY
@@ -24,6 +24,13 @@ diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 +    "     'IOMatchCategory' = IOMediaBSDClient;"
 +    "     'IOResourceMatch' = IOBSD;"
 +    "     'IOProbeScore'    = 30000:32;"
++    "   },"
++    "   {"
++    "     'IOClass'         = SourceStorageFixture;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'unixnu,source-storage-fixture';"
++    "     'IOMatchCategory' = SourceStorageFixture;"
++    "     'IOProbeScore'    = 1000:32;"
 +    "   },"
 +#endif
      "   {"
