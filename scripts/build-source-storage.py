@@ -77,6 +77,10 @@ def compile_command(record, source, output, includes):
     command += ['-o', str(output.resolve())]
     for path in includes:
         command += ['-I', str(path.resolve())]
+    if source.name == 'IOMediaBSDClient.cpp':
+        # Pinned upstream lines 2908-2909 use the obsolete register keyword.
+        # Accept that inert spelling without changing XNU's C++ dialect/ABI.
+        command.append('-Wno-register')
     return command
 
 
