@@ -17,6 +17,9 @@ parser.add_argument('--packed-ramdisk', action='store_true', help='Exercise real
 parser.add_argument('--gop', action='store_true', help='Exercise the actual QEMU ramfb UEFI GOP handoff')
 parser.add_argument('--gop-high-resolution', action='store_true', help='Exercise real QEMU ramfb 3048x2032 allocation and mode programming')
 parser.add_argument('--ramfb-geometry-refusal', action='store_true', help='Load the geometry fixture without a GOP and require a clean refusal')
+parser.add_argument('--output-dir', type=Path, help='Independent test artifact directory')
+parser.add_argument('--without-native-handoff-protocol', action='store_true',
+                    help='Exercise the loader path when no native USB host is installed')
 args = parser.parse_args()
 if args.ramfb_geometry_refusal and (args.gop or args.gop_high_resolution):
     parser.error('The refusal control requires no GOP device')
@@ -24,7 +27,8 @@ if args.gop_high_resolution:
     args.gop = True
 subprocess.run(['python3', ROOT / 'scripts/test-darwinboot-entry.py',
                 '--uefi-efi', package_efi(ROOT, args.uefi_efi)], check=True)
-OUTPUT = ROOT / ('build/darwinboot-test' if not args.memory_size else f'build/darwinboot-test-{args.memory_size >> 20}m')
+OUTPUT = (args.output_dir.resolve() if args.output_dir else
+          ROOT / ('build/darwinboot-test' if not args.memory_size else f'build/darwinboot-test-{args.memory_size >> 20}m'))
 if args.gop:
     OUTPUT = OUTPUT.with_name(OUTPUT.name + '-gop')
 if args.packed_ramdisk:
@@ -33,6 +37,8 @@ if args.gop_high_resolution:
     OUTPUT = OUTPUT.with_name(OUTPUT.name + '-3048x2032')
 if args.ramfb_geometry_refusal:
     OUTPUT = OUTPUT.with_name(OUTPUT.name + '-geometry-refusal')
+if args.without_native_handoff_protocol:
+    OUTPUT = OUTPUT.with_name(OUTPUT.name + '-without-native-handoff')
 ESP = OUTPUT / 'esp'
 PAYLOADS = ESP / 'EFI/UniXNU/Payloads'
 
@@ -54,7 +60,8 @@ if args.packed_ramdisk:
     packed.replace(raw)
 (ESP / 'EFI/BOOT').mkdir(exist_ok=True)
 shutil.copyfile(package_efi(ROOT, args.uefi_efi), ESP / 'EFI/BOOT/BOOTAA64.EFI')
-for name in ('DarwinBoot', 'DarwinBootValidation'):
+driver_names = ['DarwinBoot'] + ([] if args.without_native_handoff_protocol else ['DarwinBootValidation'])
+for name in driver_names:
     shutil.copyfile(ROOT / f'build/DarwinBoot/DEBUG_CLANGPDB/AARCH64/{name}.efi', PAYLOADS / f'{name}.efi')
 (ESP / 'EFI/UniXNU/unixnu.toml').write_text('''version = 1
 [boot]
@@ -64,8 +71,9 @@ default = "synthetic"
 autoload = false
 [[driver]]
 path = "Payloads/DarwinBoot.efi"
-[[driver]]
+''' + ('' if args.without_native_handoff_protocol else '''[[driver]]
 path = "Payloads/DarwinBootValidation.efi"
+''') + '''
 [[entry]]
 id = "synthetic"
 title = "Synthetic Darwin ABI entry"
@@ -84,8 +92,11 @@ subprocess.run(['python3', ROOT / 'package/Scripts/qemu-run.py', ESP,
                 '--log', OUTPUT / 'qemu.log', '--cpus', '1', *([] if args.gop else ['--no-gop']), '--timeout', '25',
                 '--finish-on-expect',
                 '--expect', 'DARWINBOOT: loader v2 installed EL1',
-                '--expect', 'DARWINBOOT-VALIDATION: 33 rejected requests; firmware retained PASS',
-                '--expect', 'DARWINBOOT-VIDEO-VALIDATION: 8 malformed/unsupported GOP field sets refused PASS',
+                *([] if args.without_native_handoff_protocol else [
+                    '--expect', 'DARWINBOOT-VALIDATION: 33 rejected requests; firmware retained PASS',
+                    '--expect', 'DARWINBOOT-VALIDATION: mock native USB handoff callback PASS',
+                    '--expect', 'DARWINBOOT-VIDEO-VALIDATION: 8 malformed/unsupported GOP field sets refused PASS']),
+                '--expect', 'DARWINBOOT: USB host handoff scan complete before final GetMemoryMap',
                 '--expect', 'DARWINBOOT: inputs validated; exiting boot services',
                 '--expect', 'DARWINBOOT: ExitBootServices returned status=Success',
                 '--expect', 'DARWINBOOT: entering loader trampoline',
@@ -98,3 +109,12 @@ subprocess.run(['python3', ROOT / 'package/Scripts/qemu-run.py', ESP,
                 '--expect', ('DARWINBOOT-FIXTURE: actual GOP boot video after ExitBootServices PASS' if args.gop else
                              'DARWINBOOT-FIXTURE: boot_args, RAMDisk, TrustCache, zero-fill and MMU-off entry PASS'),
                 '--reject', r'DARWINBOOT[^\n]*FAIL', '--reject', 'ASSERT'], check=True)
+log = (OUTPUT / 'qemu.log').read_text(errors='replace')
+handoff_marker = 'DARWINBOOT-VALIDATION: mock native USB handoff callback PASS'
+scan_marker = 'DARWINBOOT: USB host handoff scan complete before final GetMemoryMap'
+exit_marker = 'DARWINBOOT: inputs validated; exiting boot services'
+if args.without_native_handoff_protocol:
+    if (handoff_marker in log) or not (log.index(scan_marker) < log.index(exit_marker)):
+        raise SystemExit('DarwinBoot did not safely skip native USB handoff when no host protocol was installed')
+elif log.count(handoff_marker) != 1 or not (log.index(handoff_marker) < log.index(scan_marker) < log.index(exit_marker)):
+    raise SystemExit('DarwinBoot did not call each native USB handoff protocol once before final-map preparation')

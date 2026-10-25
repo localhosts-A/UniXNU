@@ -33,6 +33,9 @@
   ## Optional loader for `type = "xnu"` entries. DarwinBoot implements it.
   gUniXNULoaderProtocolGuid   = { 0x0f0a492e, 0x5a6a, 0x49f6, { 0xa1, 0xbf, 0x74, 0x3c, 0x87, 0xab, 0x1c, 0xfe } }
 
+  ## Optional native Dali USB host quiesce callback before the final memory map.
+  gDaliUsbNativeHostHandoffProtocolGuid = { 0x28fb0d50, 0xe819, 0x497d, { 0x90, 0x53, 0xdc, 0xb1, 0x2e, 0xa9, 0x41, 0xfd } }
+
 [PcdsFixedAtBuild]
   ## DEBUG() level used for UniXNU's own log lines. Platforms whose debug
   #  output shares the screen with the menu can lower it to DEBUG_VERBOSE.
