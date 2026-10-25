@@ -50,7 +50,7 @@ def parser():
     f.add_argument('--update', action='store_true', help='ignore the lock and move to the newest ref')
     sub.add_parser('tree', parents=[c], help='assemble the build tree')
     b = sub.add_parser('build', parents=[c], help='build kernel, package and firmware')
-    b.add_argument('steps', nargs='*', choices=STEPS + OPTIONAL_STEPS + ('all', 'prelink'), default=['all'])
+    b.add_argument('steps', nargs='*', choices=STEPS + OPTIONAL_STEPS + ('all', 'prelink'))
     b.add_argument('--source-only', action='store_true',
                    help='build and validate the native XNU Mach-O without kernelcache prelink (kernel step only)')
     i = sub.add_parser('bootimg', parents=[c], help='pack the boot image from the firmware volume and a device tree')
@@ -116,7 +116,7 @@ def cmd_fetch(ctx):
 
 def build_steps(steps, source_only=False):
     """Resolve build steps, keeping the no-IPSW source-only path explicit."""
-    steps = list(steps)
+    steps = list(steps or ['all'])
     if source_only:
         if any(step not in ('all', 'kernel') for step in steps):
             raise Error('--source-only can only be used with the kernel step')

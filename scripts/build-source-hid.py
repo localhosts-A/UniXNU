@@ -145,7 +145,7 @@ def build():
     macos_sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
     include, sdk_inputs = prepare_headers(source_tree, OUT, macos_sdk)
     xnu = ROOT / '.cache/xnu-work'
-    includes = [include, source_tree, source_tree / 'IOHIDFamily',
+    includes = [include, source_tree, source_tree / 'IOHIDFamily', source_tree / 'IOHIDSystem',
                 source_tree / 'IOHIDSystem/IOKit/hidsystem', source_tree / 'IOHIDSystem/IOHIDDescriptorParser',
                 xnu / 'iokit', ROOT / 'build/storage-abi/include',
                 macos_sdk / 'System/Library/Frameworks/Kernel.framework/Headers']
