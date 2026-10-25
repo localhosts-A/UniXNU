@@ -159,13 +159,15 @@ def build(root):
     header = generated / 'IOUserBlockStorageDevice.h'
     implementation = generated / 'IOUserBlockStorageDevice.iig.cpp'
     # Same public IIG generation route as XNU iokit/DriverKit/Makefile:6-7,62.
+    # IIG owns its frontend architecture; a clang -target conflicts with it.
+    # The generated implementation is compiled with the actual kernel CPO flags.
     iig_command = [iig, '--def', str(definition), '--header', str(header),
                    '--impl', str(implementation), '--framework-name', 'BlockStorageDeviceDriverKit', '--',
                    '-I' + str(xnu / 'iokit'), '-I' + str(xnu / 'osfmk'),
                    '-I' + str(xnu / 'bsd'), '-I' + str(objects / 'bsd'),
                    '-I' + str(xnu / 'EXTERNAL_HEADERS'),
                    '-isysroot', sdk, '-x', 'c++', '-std=gnu++2b',
-                   '-target', 'arm64-apple-ios17.0', '-D__IIG=1',
+                   '-D__IIG=1',
                    '-DDRIVERKIT_PRIVATE=1', '-DPRIVATE_WIFI_ONLY=1', *include_flags(record)]
     run_logged(iig_command, directory, out / 'iig.log')
     if not header.is_file() or not implementation.is_file():
