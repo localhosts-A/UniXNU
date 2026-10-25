@@ -15,7 +15,7 @@ class EntitlementFreeTests(unittest.TestCase):
         iokit = path.read_text().split('diff --git a/iokit/bsddev/IOKitBSDInit.cpp', 1)[1]
         new_side = '\n'.join(line[1:] for line in iokit.splitlines()
                              if line.startswith(('+', ' ')) and not line.startswith('+++'))
-        function = new_side[new_side.index('extern "C" boolean_t\nIOTaskHasEntitlement('):]
+        function = new_side[new_side.index('extern "C" boolean_t\nIOTaskHasStringEntitlement('):]
         source = r'''
 #include <cstddef>
 #include <cstdint>
@@ -30,12 +30,33 @@ static task_t current_task() { return (void*)2; }
 static proc_t get_bsdtask_info(task_t task) { return task; }
 static unsigned provider_calls;
 static int provider_result;
+struct OSObject {};
+struct OSString : OSObject {};
+static OSString provider_object;
+static char provider_string[] = "owned-value";
+static unsigned released_objects;
+static char *copyOSStringAsCString(OSString *value) { assert(value == &provider_object); return provider_string; }
+#define OSDynamicCast(type,obj) static_cast<type*>(obj)
+#define OSSafeReleaseNULL(obj) do { (obj) = nullptr; released_objects++; } while (0)
 static int provider_query(proc_t proc, const char *name) {
     assert(proc == (void*)2 && name != nullptr);
     provider_calls++;
     return provider_result;
 }
-struct Provider { struct { int (*queryEntitlementBooleanWithProc)(proc_t, const char*); } OSEntitlements; };
+static int provider_string_query(proc_t proc, const char *name, const char *value) {
+    assert(value != nullptr);
+    return provider_query(proc, name);
+}
+static int provider_copy_query(proc_t proc, const char *name, void **value) {
+    int result = provider_query(proc, name);
+    if (result == KERN_SUCCESS) *value = &provider_object;
+    return result;
+}
+struct Provider { struct {
+    int (*queryEntitlementBooleanWithProc)(proc_t, const char*);
+    int (*queryEntitlementStringWithProc)(proc_t, const char*, const char*);
+    int (*copyEntitlementAsOSObjectWithProc)(proc_t, const char*, void**);
+} OSEntitlements; };
 static Provider *amfi;
 static uint64_t source_entitlement_free_query_denials;
 #define os_atomic_inc(p,order) (++*(p))
@@ -44,19 +65,30 @@ int main() {
     const char *name = "com.apple.private.custom-x18-abi";
     assert(!IOTaskHasEntitlement(kernel_task, name));
     assert(!IOTaskHasEntitlement((void*)2, nullptr));
+    assert(!IOTaskHasStringEntitlement(kernel_task, name, "value"));
+    assert(!IOTaskHasStringEntitlement((void*)2, name, nullptr));
+    assert(IOTaskGetEntitlement(kernel_task, name) == nullptr);
+    assert(IOTaskGetEntitlement((void*)2, nullptr) == nullptr);
     assert(provider_calls == 0 && source_entitlement_free_query_denials == 0);
 #if XNU_SOURCE_ENTITLEMENT_FREE
     assert(!IOTaskHasEntitlement((void*)2, name));
     assert(!IOTaskHasEntitlement(nullptr, "com.apple.private.uexc"));
-    assert(provider_calls == 0 && source_entitlement_free_query_denials == 2);
+    assert(!IOTaskHasStringEntitlement((void*)2, name, "value"));
+    assert(IOTaskGetEntitlement(nullptr, name) == nullptr);
+    assert(provider_calls == 0 && source_entitlement_free_query_denials == 4);
 #endif
     const auto denied = source_entitlement_free_query_denials;
-    Provider provider = {{provider_query}};
+    Provider provider = {{provider_query, provider_string_query, provider_copy_query}};
     amfi = &provider;
     assert(IOTaskHasEntitlement((void*)2, name));
+    assert(IOTaskHasStringEntitlement(nullptr, name, "value"));
+    assert(IOTaskGetEntitlement((void*)2, name) == provider_string);
+    assert(released_objects == 1);
     provider_result = 5;
     assert(!IOTaskHasEntitlement(nullptr, name));
-    assert(provider_calls == 2 && source_entitlement_free_query_denials == denied);
+    assert(!IOTaskHasStringEntitlement((void*)2, name, "value"));
+    assert(IOTaskGetEntitlement(nullptr, name) == nullptr);
+    assert(provider_calls == 6 && released_objects == 1 && source_entitlement_free_query_denials == denied);
 }
 '''
         with tempfile.TemporaryDirectory() as temporary:

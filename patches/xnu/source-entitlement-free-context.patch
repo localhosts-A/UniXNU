@@ -110,7 +110,40 @@ diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 +#endif
 +
  extern "C" {
-@@ -1533,23 +1538,31 @@
+@@ -1502,24 +1507,32 @@
+ extern "C" boolean_t
+ IOTaskHasStringEntitlement(task_t task, const char *entitlement, const char *value)
+ {
+ 	if (task == NULL) {
+ 		task = current_task();
+ 	}
+ 
+ 	/* Validate input arguments */
+ 	if (task == kernel_task || entitlement == NULL || value == NULL) {
+ 		return false;
+ 	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+ 
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++	/* An absent provider cannot supply the requested entitlement value. */
++	if (amfi == NULL) {
++		os_atomic_inc(&source_entitlement_free_query_denials, relaxed);
++		return false;
++	}
++#endif
++
+ 	kern_return_t ret = amfi->OSEntitlements.queryEntitlementStringWithProc(
+ 		proc,
+ 		entitlement,
+ 		value);
+ 
+ 	if (ret == KERN_SUCCESS) {
+ 		return true;
+ 	}
+ 
+ 	return false;
+ }
+@@ -1533,23 +1546,31 @@
  extern "C" boolean_t
  IOTaskHasEntitlement(task_t task, const char *entitlement)
  {
@@ -141,4 +174,50 @@ diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
  	}
  
  	return false;
+ }
+@@ -1563,37 +1584,45 @@
+ extern "C" char*
+ IOTaskGetEntitlement(task_t task, const char *entitlement)
+ {
+ 	void *entitlement_object = NULL;
+ 	char *return_value = NULL;
+ 
+ 	if (task == NULL) {
+ 		task = current_task();
+ 	}
+ 
+ 	/* Validate input arguments */
+ 	if (task == kernel_task || entitlement == NULL) {
+ 		return NULL;
+ 	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+ 
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++	/* No provider means no object or string entitlement can be returned. */
++	if (amfi == NULL) {
++		os_atomic_inc(&source_entitlement_free_query_denials, relaxed);
++		return NULL;
++	}
++#endif
++
+ 	kern_return_t ret = amfi->OSEntitlements.copyEntitlementAsOSObjectWithProc(
+ 		proc,
+ 		entitlement,
+ 		&entitlement_object);
+ 
+ 	if (ret != KERN_SUCCESS) {
+ 		return NULL;
+ 	}
+ 	assert(entitlement_object != NULL);
+ 
+ 	OSObject *os_object = (OSObject*)entitlement_object;
+ 	OSString *os_string = OSDynamicCast(OSString, os_object);
+ 
+ 	/* Get a C string version of the OSString */
+ 	return_value = copyOSStringAsCString(os_string);
+ 
+ 	/* Free the OSObject which was given to us */
+ 	OSSafeReleaseNULL(os_object);
+ 
+ 	return return_value;
  }
