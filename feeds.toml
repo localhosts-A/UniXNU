@@ -69,3 +69,10 @@ kind = "refer"
 git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
 ref = "main"
 commit = "e45fbe30a7879e0b16e26dddb78538f1b00e0bff"
+
+[[source]]
+name = "IOHIDFamily"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOHIDFamily.git"
+ref = "IOHIDFamily-2031.120.4"
+commit = "b126cf696bf1c6eede740b92d3bfca7e62d09c06"

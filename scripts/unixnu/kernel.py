@@ -104,6 +104,9 @@ def build(ctx, modules):
     if ctx.need_config().get('XNU_SOURCE_STORAGE_FAMILY'):
         run(['python3', ctx.tree / 'scripts/build-source-storage.py', '--verify-kernel', source_output(ctx)],
             cwd=ctx.tree, env=env, log_file=ctx.logs / 'source-storage-link.log')
+    if ctx.need_config().get('XNU_SOURCE_HID_FAMILY'):
+        run(['python3', ctx.tree / 'scripts/build-source-hid.py', '--verify-kernel', source_output(ctx)],
+            cwd=ctx.tree, env=env, log_file=ctx.logs / 'source-hid-link.log')
 
 
 def source_output(ctx):

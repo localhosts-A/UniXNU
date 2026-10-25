@@ -1,0 +1,22 @@
+diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.cpp
+--- a/IOHIDFamily/IOHIDEventService.cpp
++++ b/IOHIDFamily/IOHIDEventService.cpp
+@@ -58,7 +58,6 @@
+ #include <stdatomic.h>
+ 
+ #include "IOHIDEventServiceUserClient.h"
+-#include "IOHIDEventServiceFastPathUserClient.h"
+ 
+ extern "C" int  kern_stack_snapshot_with_reason(char *reason);
+ extern "C" kern_return_t sysdiagnose_notify_user(uint32_t keycode);
+@@ -2424,10 +2423,6 @@
+         
+         client = OSTypeAlloc(IOHIDEventServiceUserClient);
+     
+-    } else if (type == kIOHIDEventServiceFastPathUserClientType) {
+-    
+-        client = OSTypeAlloc(IOHIDEventServiceFastPathUserClient);
+-    
+     } else {
+     
+         return super::newUserClient(owningTask, securityID, type, properties, handler);
