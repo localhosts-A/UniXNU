@@ -31,6 +31,7 @@ struct mock_controller {
     unsigned fail_power_on_at, fail_power_off_at;
     unsigned events[3], attach_attempts, fail_attach_count;
     uint32_t current_ms;
+    uint32_t power_request_advance_ms, reset_request_advance_ms;
     uint8_t device_protocol, interface_protocol;
     enum usb_host_speed device_speed, event_speed;
     uint16_t reset_speed_bits;
@@ -134,7 +135,9 @@ static int control(void *context, const struct usb_host_route *route, uint8_t ad
                 if (m->fail_power_on_applied) m->port_status[port] |= 0x0100u;
                 return USB_TIMEOUT;
             }
-            m->port_status[port] |= 0x0100u; return USB_OK;
+            m->port_status[port] |= 0x0100u;
+            m->current_ms += m->power_request_advance_ms;
+            return USB_OK;
         }
         if (setup->value == 8 && clear) {
             ++m->power_off;
@@ -149,6 +152,7 @@ static int control(void *context, const struct usb_host_route *route, uint8_t ad
                 m->port_status[port] |= (uint16_t)(0x0003u | m->reset_speed_bits);
                 m->port_change[port] |= 0x0010u;
             }
+            m->current_ms += m->reset_request_advance_ms;
             return USB_OK;
         }
         if (clear && setup->value >= 16 && setup->value <= 20) {
@@ -507,6 +511,35 @@ static void test_attach_retry_cleanup_on_unplug(void)
     assert(usb_host_disconnect(&device, NULL, NULL, NULL) == USB_OK);
 }
 
+static void test_control_request_clock_accounting_and_restart(void)
+{
+    struct mock_controller m; init_mock(&m);
+    struct usb_host_device device = {0}; struct usb_host_hub hub = {0};
+    enumerate_hub(&m, &device, 0);
+    m.power_request_advance_ms = 5;
+    m.reset_request_advance_ms = 100;
+    m.port_status[0] = 0x0001u; m.port_change[0] = 1;
+    assert(start_hub_at(&m, &device, &hub, 100) == USB_OK);
+    assert(m.current_ms == 120 && hub.power_ready_ms == 140);
+    assert(poll_hub_at(&m, &device, &hub, 139, on_event) == USB_AGAIN);
+    assert(!m.interrupts && !m.resets);
+    assert(poll_hub_at(&m, &device, &hub, 140, on_event) == USB_AGAIN);
+    assert(m.current_ms == 240 && m.resets == 1);
+    assert(hub.ports[0].reset_ready_ms == 290 && hub.ports[0].reset_deadline_ms == 1240);
+    assert(poll_hub_at(&m, &device, &hub, 289, on_event) == USB_AGAIN);
+    assert(poll_hub_at(&m, &device, &hub, 290, on_event) == USB_OK);
+    assert(hub.ports[0].attached && m.events[USB_HOST_HUB_ATTACH] == 1);
+
+    assert(usb_host_hub_stop(&device, &hub, on_event, &m) == USB_OK);
+    assert(!hub.initialized && m.events[USB_HOST_HUB_DETACH] == 1);
+    m.port_status[0] = 0; m.port_change[0] = 0;
+    assert(start_hub_at(&m, &device, &hub, 300) == USB_OK);
+    assert(hub.initialized && hub.power_ready_ms == 340);
+    assert(poll_hub_at(&m, &device, &hub, 340, on_event) == USB_OK);
+    assert(usb_host_hub_stop(&device, &hub, on_event, &m) == USB_OK);
+    assert(usb_host_disconnect(&device, NULL, NULL, NULL) == USB_OK);
+}
+
 static void test_reset_timeout_and_single_tt_route(void)
 {
     struct mock_controller m; init_mock(&m);
@@ -563,6 +596,7 @@ int main(void)
     test_bitmap_edges_max_ports_and_clock_wrap();
     test_power_failure_retains_cleanup_state();
     test_attach_retry_cleanup_on_unplug();
+    test_control_request_clock_accounting_and_restart();
     test_reset_timeout_and_single_tt_route();
     puts("PASS: USB production hub descriptor, power, bitmap, reset, fault and TT routing");
     return 0;
