@@ -16,7 +16,7 @@ index b32e4c3..3a953fe 100644
  		osobject_release(blob->csb_entitlements);
  		blob->csb_entitlements = NULL;
  	}
-@@ -4363,12 +4369,65 @@ register_code_signature_monitor(
+@@ -4363,12 +4369,66 @@ register_code_signature_monitor(
   * This function must be called when the storage for the code signature can
   * no longer change.
   */
@@ -28,6 +28,7 @@ index b32e4c3..3a953fe 100644
 +uint64_t source_entitlement_free_accepts;
 +uint64_t source_entitlement_free_refusals;
 +uint64_t source_entitlement_free_entitlement_refusals;
++uint64_t source_entitlement_free_query_denials;
 +
 +static errno_t
 +source_entitlement_free_validate(struct cs_blob *cs_blob)
@@ -82,7 +83,7 @@ index b32e4c3..3a953fe 100644
  #if CODE_SIGNING_MONITOR
  	CEQueryContext_t ce_ctx = NULL;
  	const char *signing_id = NULL;
-@@ -4818,6 +4877,14 @@ ubc_cs_blob_add(
+@@ -4818,6 +4878,14 @@ ubc_cs_blob_add(
  	}
  #endif
  
@@ -97,3 +98,47 @@ index b32e4c3..3a953fe 100644
  	/* Perform 2nd stage reconstitution */
  	error = reconstitute_code_signature_2nd_stage(&tmp_blob);
  	if (error != 0) {
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -37,3 +37,8 @@
+ #include <libkern/c++/OSAllocation.h>
+ 
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++#include <os/atomic_private.h>
++extern "C" uint64_t source_entitlement_free_query_denials;
++#endif
++
+ extern "C" {
+@@ -1533,23 +1538,31 @@
+ extern "C" boolean_t
+ IOTaskHasEntitlement(task_t task, const char *entitlement)
+ {
+ 	if (task == NULL) {
+ 		task = current_task();
+ 	}
+ 
+ 	/* Validate input arguments */
+ 	if (task == kernel_task || entitlement == NULL) {
+ 		return false;
+ 	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+ 
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++	/* Without a provider this development profile grants no entitlement. */
++	if (amfi == NULL) {
++		os_atomic_inc(&source_entitlement_free_query_denials, relaxed);
++		return false;
++	}
++#endif
++
+ 	kern_return_t ret = amfi->OSEntitlements.queryEntitlementBooleanWithProc(
+ 		proc,
+ 		entitlement);
+ 
+ 	if (ret == KERN_SUCCESS) {
+ 		return true;
+ 	}
+ 
+ 	return false;
+ }

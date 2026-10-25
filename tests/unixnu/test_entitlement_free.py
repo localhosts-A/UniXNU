@@ -7,6 +7,67 @@ import unittest
 
 
 class EntitlementFreeTests(unittest.TestCase):
+    def test_actual_task_query_denies_absent_provider_and_preserves_real_provider(self):
+        compiler = shutil.which('clang++') or shutil.which('c++')
+        if not compiler:
+            self.skipTest('native C++ compiler required')
+        path = Path(__file__).resolve().parents[2] / 'patches/xnu/source-entitlement-free-context.patch'
+        iokit = path.read_text().split('diff --git a/iokit/bsddev/IOKitBSDInit.cpp', 1)[1]
+        new_side = '\n'.join(line[1:] for line in iokit.splitlines()
+                             if line.startswith(('+', ' ')) and not line.startswith('+++'))
+        function = new_side[new_side.index('extern "C" boolean_t\nIOTaskHasEntitlement('):]
+        source = r'''
+#include <cstddef>
+#include <cstdint>
+#include <cassert>
+using boolean_t = bool;
+using task_t = void*;
+using proc_t = void*;
+using kern_return_t = int;
+static const int KERN_SUCCESS = 0;
+static task_t kernel_task = (void*)1;
+static task_t current_task() { return (void*)2; }
+static proc_t get_bsdtask_info(task_t task) { return task; }
+static unsigned provider_calls;
+static int provider_result;
+static int provider_query(proc_t proc, const char *name) {
+    assert(proc == (void*)2 && name != nullptr);
+    provider_calls++;
+    return provider_result;
+}
+struct Provider { struct { int (*queryEntitlementBooleanWithProc)(proc_t, const char*); } OSEntitlements; };
+static Provider *amfi;
+static uint64_t source_entitlement_free_query_denials;
+#define os_atomic_inc(p,order) (++*(p))
+''' + function + r'''
+int main() {
+    const char *name = "com.apple.private.custom-x18-abi";
+    assert(!IOTaskHasEntitlement(kernel_task, name));
+    assert(!IOTaskHasEntitlement((void*)2, nullptr));
+    assert(provider_calls == 0 && source_entitlement_free_query_denials == 0);
+#if XNU_SOURCE_ENTITLEMENT_FREE
+    assert(!IOTaskHasEntitlement((void*)2, name));
+    assert(!IOTaskHasEntitlement(nullptr, "com.apple.private.uexc"));
+    assert(provider_calls == 0 && source_entitlement_free_query_denials == 2);
+#endif
+    const auto denied = source_entitlement_free_query_denials;
+    Provider provider = {{provider_query}};
+    amfi = &provider;
+    assert(IOTaskHasEntitlement((void*)2, name));
+    provider_result = 5;
+    assert(!IOTaskHasEntitlement(nullptr, name));
+    assert(provider_calls == 2 && source_entitlement_free_query_denials == denied);
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            source_path = Path(temporary) / 'task-query.cpp'
+            source_path.write_text(source)
+            for enabled in (0, 1):
+                output = Path(temporary) / f'task-query-{enabled}'
+                subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                                f'-DXNU_SOURCE_ENTITLEMENT_FREE={enabled}', source_path, '-o', output], check=True)
+                subprocess.run([output], check=True)
+
     def test_production_guard_and_default_monitor_provider_paths(self):
         compiler = shutil.which('clang') or shutil.which('cc')
         if not compiler:

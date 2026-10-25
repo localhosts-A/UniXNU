@@ -238,6 +238,7 @@ fi
 if [ -d "$MOCKFS_OBJECT_DIR" ]; then
   if [ "$(cat "$MOCKFS_OBJECT_DIR/.source-entitlement-free-mode" 2>/dev/null || echo 0)" != "$ENTITLEMENT_FREE_MODE" ]; then
     rm -f "$MOCKFS_OBJECT_DIR/ubc_subr.o"
+    rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOKitBSDInit.cpo"
   fi
   printf '%s\n' "$ENTITLEMENT_FREE_MODE" > "$MOCKFS_OBJECT_DIR/.source-entitlement-free-mode"
 fi
@@ -378,7 +379,7 @@ if [ "$OWNER_BOOT_MANIFEST" = 1 ] && [ "$OWNER_CACHE_STARTUP" != 1 ]; then
   echo 'Owner boot metadata requires real authenticated owner root/cache startup' >&2
   exit 1
 fi
-EXTRA_MAKE_ARGS+=("IOKitBSDInit.cpo_CFLAGS_ADD=-DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST")
+EXTRA_MAKE_ARGS+=("IOKitBSDInit.cpo_CFLAGS_ADD=-DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_SOURCE_ENTITLEMENT_FREE=$ENTITLEMENT_FREE_MODE")
 OWNER_MANIFEST_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-boot-manifest-mode
 if [ "$(cat "$OWNER_MANIFEST_STAMP" 2>/dev/null || echo 0)" != "$OWNER_BOOT_MANIFEST" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOKitBSDInit.cpo"
