@@ -33,7 +33,7 @@ class SourceHidTests(unittest.TestCase):
                 cli.prepare(ctx, ['kernel'])
             self.assertEqual('IOHIDFamily' in fetch.call_args.kwargs['only'], enabled)
 
-    def test_missing_sdk_generated_declarations_are_a_hard_error(self):
+    def test_missing_pinned_generated_declarations_are_a_hard_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             family = root / 'source/IOHIDFamily'
@@ -41,8 +41,8 @@ class SourceHidTests(unittest.TestCase):
             family.mkdir(parents=True)
             system.mkdir(parents=True)
             (family / 'IOHIDDeviceTypes.h').write_text('/* fixture declaration */\n')
-            with self.assertRaisesRegex(ValueError, 'Missing exported generated HID declaration'):
-                HID.prepare_headers(root / 'source', root / 'out', root / 'absent-sdk')
+            with self.assertRaisesRegex(ValueError, 'Missing pinned generated HID declaration'):
+                HID.prepare_headers(root / 'source', root / 'out', root / 'absent-sdk', root / 'absent-headers')
             self.assertFalse((family / 'IOHIDEventTypes.h').exists())
 
     def test_header_staging_does_not_modify_fixed_source(self):
@@ -50,21 +50,21 @@ class SourceHidTests(unittest.TestCase):
             root = Path(temporary)
             family = root / 'source/IOHIDFamily'
             system = root / 'source/IOHIDSystem/IOKit/hidsystem'
-            sdk_headers = root / 'sdk/System/Library/Frameworks/Kernel.framework/Headers/IOKit/hid'
+            event_headers = root / 'event-source/IOHIDFamily'
             family.mkdir(parents=True)
             system.mkdir(parents=True)
-            sdk_headers.mkdir(parents=True)
+            event_headers.mkdir(parents=True)
             (root / 'sdk/usr/include').mkdir(parents=True)
             (root / 'sdk/usr/include/TargetConditionals.h').write_text('/* fixture SDK */\n')
             (family / 'IOHIDDeviceTypes.h').write_text('/* fixture types */\n')
             for name in HID.GENERATED_EVENT_HEADERS:
-                (sdk_headers / name).write_text('/* fixture generated declaration ' + name + ' */\n')
-            include, imported = HID.prepare_headers(root / 'source', root / 'out', root / 'sdk')
-            self.assertEqual(len(imported), 4)
+                (event_headers / name).write_text('/* fixture generated declaration ' + name + ' */\n')
+            include, imported = HID.prepare_headers(root / 'source', root / 'out', root / 'sdk', event_headers)
+            self.assertEqual(len(imported), 5)
             for name in HID.GENERATED_EVENT_HEADERS:
                 self.assertFalse((family / name).exists())
-                self.assertEqual((include / 'IOKit/hid' / name).read_bytes(), (sdk_headers / name).read_bytes())
-                self.assertEqual((include / 'IOKit/hidevent' / name).read_bytes(), (sdk_headers / name).read_bytes())
+                self.assertEqual((include / 'IOKit/hid' / name).read_bytes(), (event_headers / name).read_bytes())
+                self.assertEqual((include / 'IOKit/hidevent' / name).read_bytes(), (event_headers / name).read_bytes())
 
 if __name__ == '__main__':
     unittest.main()

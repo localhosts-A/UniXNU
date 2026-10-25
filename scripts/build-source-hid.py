@@ -17,6 +17,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = 'b126cf696bf1c6eede740b92d3bfca7e62d09c06'
 SOURCE = ROOT / 'refer/IOHIDFamily'
+EVENT_SOURCE = ROOT / 'refer/IOHIDEventHeaders'
+EVENT_REVISION = '2365347f5147a1e2a46de21acd08d27fe0906e85'
 OUT = ROOT / 'build/source-hid'
 ARCHIVE = OUT / 'libIOHIDFamily.a'
 PHASE = '84D292320CC90C8E00698218'
@@ -24,7 +26,8 @@ IIG_NAMES = ('IOHIDInterface', 'IOHIDDevice', 'IOHIDEventService')
 CLASSES = ('IOHIDDevice', 'IOHIDInterface', 'IOHIDElementPrivate',
            'IOHIDElementContainer', 'IOHIDDeviceElementContainer',
            'IOHIDEvent', 'IOHIDEventService', 'IOHIDEventDriver')
-GENERATED_EVENT_HEADERS = ('IOHIDEventTypes.h', 'IOHIDEventStructDefs.h', 'IOHIDEventMacroDefs.h')
+GENERATED_EVENT_HEADERS = ('IOHIDEventTypes.h', 'IOHIDEventFieldDefs.h',
+                           'IOHIDEventStructDefs.h', 'IOHIDEventMacroDefs.h')
 PRIVATE_SOURCE = 'IOHIDEventServiceFastPathUserClient.cpp'
 PUBLIC_PATCH = ROOT / 'scripts/patches/iohidfamily-public.patch'
 
@@ -64,7 +67,7 @@ def embedded_sources(source=SOURCE):
         result.append(found[0])
     return result
 
-def prepare_headers(source, out, macos_sdk):
+def prepare_headers(source, out, macos_sdk, event_headers=None):
     include = out / 'include'
     (include / 'IOKit').mkdir(parents=True, exist_ok=True)
     mappings = {'hid': source / 'IOHIDFamily', 'hidevent': source / 'IOHIDFamily',
@@ -80,15 +83,16 @@ def prepare_headers(source, out, macos_sdk):
     types = source / 'IOHIDFamily/IOHIDDeviceTypes.h'
     shutil.copyfile(types, framework / types.name)
     imported = []
-    # Apple's public import omits generated event declarations. Consume the real
-    # exported kernel SDK declarations with provenance, never invented layouts.
-    sdk_hid = macos_sdk / 'System/Library/Frameworks/Kernel.framework/Headers/IOKit/hid'
+    # 2031 omits these generated declarations and the public SDK omits them too.
+    # Import the real, separately pinned 1915 declarations. Compatibility with
+    # the 2031 implementation is a compile/runtime gate, never an assumption.
+    event_headers = event_headers or EVENT_SOURCE / 'IOHIDFamily'
     for name in GENERATED_EVENT_HEADERS:
         destination = include / 'IOKit/hid' / name
         if not destination.is_file():
-            original = sdk_hid / name
+            original = event_headers / name
             if not original.is_file():
-                raise ValueError('Missing exported generated HID declaration: ' + str(original))
+                raise ValueError('Missing pinned generated HID declaration: ' + str(original))
             shutil.copyfile(original, destination)
             imported.append({'source': str(original), 'sha256': digest(original)})
         shutil.copyfile(destination, include / 'IOKit/hidevent' / name)
@@ -96,6 +100,12 @@ def prepare_headers(source, out, macos_sdk):
     shutil.copyfile(conditions, include / conditions.name)
     imported.append({'source': str(conditions), 'sha256': digest(conditions)})
     return include, imported
+
+def verify_event_headers(source):
+    revision = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
+    if revision != EVENT_REVISION or subprocess.check_output(['git', '-C', source, 'status', '--porcelain'], text=True).strip():
+        raise ValueError('Generated HID declarations must use their clean fixed source pin')
+    return revision
 
 def c_record(objects):
     preferred = objects / 'osfmk/DEVELOPMENT/startup.o.json'
@@ -112,21 +122,24 @@ def audit_inputs(source):
     if revision != REVISION or subprocess.check_output(['git', '-C', source, 'status', '--porcelain'], text=True).strip():
         raise ValueError('HID input audit requires the clean fixed source revision')
     inputs = embedded_sources(source)
+    header_source = source.parent / 'IOHIDEventHeaders'
+    header_revision = verify_event_headers(header_source)
     sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
-    _, imported = prepare_headers(source, OUT / 'input-audit', sdk)
+    _, imported = prepare_headers(source, OUT / 'input-audit', sdk, header_source / 'IOHIDFamily')
     OUT.mkdir(parents=True, exist_ok=True)
-    report = {'source_revision': revision, 'sdk_inputs': imported,
+    report = {'source_revision': revision, 'event_header_revision': header_revision, 'declaration_inputs': imported,
               'source_units': [{'path': str(p.relative_to(source)), 'sha256': digest(p)} for p in inputs],
               'unavailable_private_source': PRIVATE_SOURCE, 'source_archive_built': False,
               'hardware_qualified': False}
     (OUT / 'input-audit.json').write_text(json.dumps(report, indent=2) + '\n')
-    print('PASS: pinned HID public source/IIG inputs and exported SDK declarations present; not a compile result')
+    print('PASS: pinned HID public source/IIG/declaration inputs present; compatibility is not yet compiled')
 
 def build():
     revision = subprocess.check_output(['git', '-C', SOURCE, 'rev-parse', 'HEAD'], text=True).strip()
     if revision != REVISION or subprocess.check_output(['git', '-C', SOURCE, 'status', '--porcelain'], text=True).strip():
         raise ValueError('IOHIDFamily must be a clean checkout of the fixed revision')
     inputs = embedded_sources()
+    header_revision = verify_event_headers(EVENT_SOURCE)
     helper = storage_helpers()
     objects = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
     cpp_path, cpp = helper.compiler_record(objects)
@@ -196,9 +209,10 @@ def build():
     for name in CLASSES:
         if name + '10gMetaClassE' not in defined:
             raise ValueError('Source HID archive lacks the real class: ' + name)
-    report = {'source_revision': revision, 'embedded_phase': PHASE, 'objects': rows, 'iig': generated_rows,
+    report = {'source_revision': revision, 'event_header_revision': header_revision,
+              'embedded_phase': PHASE, 'objects': rows, 'iig': generated_rows,
               'public_port_patch_sha256': digest(PUBLIC_PATCH), 'unavailable_private_source': PRIVATE_SOURCE,
-              'sdk_inputs': sdk_inputs, 'c_compile_record_sha256': digest(c_path),
+              'declaration_inputs': sdk_inputs, 'c_compile_record_sha256': digest(c_path),
               'cpp_compile_record_sha256': digest(cpp_path), 'archive_sha256': digest(ARCHIVE),
               'source_archive_built': True, 'kernel_link_verified': False,
               'hid_runtime_qualified': False, 'hardware_qualified': False}

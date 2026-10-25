@@ -76,3 +76,10 @@ kind = "refer"
 git = "https://github.com/apple-oss-distributions/IOHIDFamily.git"
 ref = "IOHIDFamily-2031.120.4"
 commit = "b126cf696bf1c6eede740b92d3bfca7e62d09c06"
+
+[[source]]
+name = "IOHIDEventHeaders"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOHIDFamily.git"
+ref = "IOHIDFamily-1915.140.3"
+commit = "2365347f5147a1e2a46de21acd08d27fe0906e85"
