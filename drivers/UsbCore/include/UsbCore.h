@@ -79,9 +79,14 @@ struct usb_setup { uint8_t type, request; uint16_t value, index, length; };
 int usb_setup_decode(const void *, size_t, struct usb_setup *);
 enum usb_control_effect {
     USB_CONTROL_NONE, USB_CONTROL_ADDRESS, USB_CONTROL_CONFIGURATION,
-    USB_CONTROL_CLEAR_HALT, USB_CONTROL_SET_HALT
+    USB_CONTROL_CLEAR_HALT, USB_CONTROL_SET_HALT,
+    USB_CONTROL_LINE_CODING, USB_CONTROL_LINES
 };
-struct usb_control_reply { size_t length; enum usb_control_effect effect; uint8_t argument; };
+struct usb_control_reply {
+    size_t length;
+    enum usb_control_effect effect;
+    uint8_t argument, line_coding[7];
+};
 struct usb_cdc {
     uint16_t vendor, product, revision;
     bool high_speed;

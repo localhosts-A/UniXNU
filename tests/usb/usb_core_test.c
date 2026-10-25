@@ -102,11 +102,13 @@ static void test_cdc(void) {
     configure(&cdc);
     uint8_t coding[7] = {0,0xc2,1,0,0,0,8};
     assert(request(&cdc, 0x21, 0x20, 0, 0, 7, coding, 7, NULL, 0, &reply) == USB_OK);
+    usb_cdc_commit_control(&cdc, &reply);
     assert(request(&cdc, 0xa1, 0x21, 0, 0, 7, NULL, 0, data, sizeof(data), &reply) == USB_OK && !memcmp(data, coding, 7));
     coding[6] = 9;
     assert(request(&cdc, 0x21, 0x20, 0, 0, 7, coding, 7, NULL, 0, &reply) == USB_STALL && cdc.line_coding[6] == 8);
     assert(request(&cdc, 0x21, 0x22, 3, 0, 0, coding, 1, NULL, 0, &reply) == USB_INVALID && !cdc.control_lines);
-    assert(request(&cdc, 0x21, 0x22, 3, 0, 0, NULL, 0, NULL, 0, &reply) == USB_OK && cdc.control_lines == 3);
+    assert(request(&cdc, 0x21, 0x22, 3, 0, 0, NULL, 0, NULL, 0, &reply) == USB_OK && !cdc.control_lines);
+    usb_cdc_commit_control(&cdc, &reply); assert(cdc.control_lines == 3);
     assert(request(&cdc, 2, 3, 0, 0x82, 0, NULL, 0, NULL, 0, &reply) == USB_OK);
     usb_cdc_commit_control(&cdc, &reply);
     assert(request(&cdc, 0x82, 0, 0, 0x82, 2, NULL, 0, data, sizeof(data), &reply) == USB_OK && data[0] == 1);

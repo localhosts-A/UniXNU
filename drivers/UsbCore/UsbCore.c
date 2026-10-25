@@ -278,9 +278,10 @@ int usb_cdc_control(struct usb_cdc *cdc, const struct usb_setup *s, const void *
         if (out_size != 7) return USB_STALL;
         const uint8_t *p = out_data;
         if (!le32(p) || p[4] > 2 || p[5] > 4 || !((p[6] >= 5 && p[6] <= 8) || p[6] == 16)) return USB_STALL;
-        copy(cdc->line_coding, p, 7);
+        reply->effect = USB_CONTROL_LINE_CODING;
+        copy(reply->line_coding, p, 7);
     } else if (s->type == 0x21 && s->request == 0x22 && !s->index && !s->length && !(s->value & ~3u) && cdc->configuration) {
-        cdc->control_lines = s->value;
+        reply->effect = USB_CONTROL_LINES; reply->argument = (uint8_t)s->value;
     } else if (s->type == 0x21 && s->request == 0x23 && !s->index && !s->length && cdc->configuration) {
         /* Logging has no UART break line; an ACM SEND_BREAK is acknowledged. */
     } else if (s->type == 0x81 && s->request == 10 && !s->value && s->index <= 1 && s->length == 1 && cdc->configuration) {
@@ -301,7 +302,10 @@ void usb_cdc_commit_control(struct usb_cdc *cdc, const struct usb_control_reply 
     else if (reply->effect == USB_CONTROL_CONFIGURATION) {
         cdc->configuration = reply->argument;
         cdc->control_lines = 0; cdc->halted_in = cdc->halted_out = 0;
-    } else if (reply->effect == USB_CONTROL_CLEAR_HALT || reply->effect == USB_CONTROL_SET_HALT) {
+    } else if (reply->effect == USB_CONTROL_LINE_CODING) {
+        copy(cdc->line_coding, reply->line_coding, 7);
+    } else if (reply->effect == USB_CONTROL_LINES) cdc->control_lines = reply->argument;
+    else if (reply->effect == USB_CONTROL_CLEAR_HALT || reply->effect == USB_CONTROL_SET_HALT) {
         uint16_t *halted = reply->argument & 0x80 ? &cdc->halted_in : &cdc->halted_out;
         uint16_t mask = (uint16_t)(1u << (reply->argument & 15));
         if (reply->effect == USB_CONTROL_CLEAR_HALT) *halted &= (uint16_t)~mask;
