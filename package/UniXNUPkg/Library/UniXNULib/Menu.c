@@ -63,7 +63,7 @@ DrawCountdown (
   IN UNIXNU_UI      *Ui,
   IN UNIXNU_CONFIG  *Config,
   IN INTN       RemainingMs,
-  IN BOOLEAN    HasInput
+  IN BOOLEAN    Confirmation
   )
 {
   CHAR16  Line[128];
@@ -77,17 +77,18 @@ DrawCountdown (
       (UINT32)((RemainingMs + 999) / 1000)
       );
   } else {
-    UnicodeSPrint (Line, sizeof (Line), L"Select an entry");
+    UnicodeSPrint (Line, sizeof (Line), Confirmation ? L"Choose an option" : L"Select an entry");
   }
 
   UniXNUUiDrawStatus (Ui, 0, Line);
 }
 
-UINTN
-UniXNUMenuRun (
+STATIC UINTN
+RunMenu (
   IN UNIXNU_UI      *Ui,
   IN UNIXNU_CONFIG  *Config,
-  IN BOOLEAN    Countdown
+  IN BOOLEAN    Countdown,
+  IN BOOLEAN    Confirmation
   )
 {
   EFI_STATUS     Status;
@@ -106,10 +107,16 @@ UniXNUMenuRun (
   UINTN          RotateAccum;
   INTN           LastShownSecond;
   UINTN          Count;
+  UNIXNU_MENU_POINTER Pointer;
 
   Count    = Config->EntryCount;
+  if (Count == 0 || Config->DefaultIndex >= Count) { return 0; }
   Selected = Config->DefaultIndex;
-  HasInput = (CountInputDevices () > 0);
+  UniXNUUiDrawFrame (Ui, Config);
+  if (FixedPcdGetBool (PcdUniXNUPointerInputEnabled)) { UniXNUUiSelectEntry (Ui, Config, Selected, Selected); }
+  for (Index = 0; Index < Count; Index++) { UniXNUUiDrawEntry (Ui, Config, Index, Index == Selected); }
+  HasInput = UniXNUMenuPointerInit (Ui, &Pointer) || (CountInputDevices () > 0);
+  UniXNUMenuPointerHide (Ui, &Pointer);
 
   if (!Countdown) {
     RemainingMs = HasInput ? -1 : (INTN)Config->FallbackTimeout * 1000;
@@ -124,15 +131,12 @@ UniXNUMenuRun (
     RotateMs = DEFAULT_ROTATE_SEC * 1000;
   }
 
-  UniXNUUiDrawFrame (Ui, Config);
-  for (Index = 0; Index < Count; Index++) {
-    UniXNUUiDrawEntry (Ui, Config, Index, Index == Selected);
-  }
-
   UniXNUUiDrawStatus (
     Ui,
     1,
-    HasInput ? L"Up/Down: select    Enter: boot    1-9: boot entry    Esc: stop timer"
+    Confirmation ? L"Up/Down: choose    Enter: confirm    Esc: cancel    Click: choose"
+      : Pointer.Available ? L"Up/Down: select    Enter: boot    Mouse: point and click"
+      : HasInput ? L"Up/Down: select    Enter: boot    1-9: boot entry    Esc: stop timer"
              : L"No input device: the default entry boots when the timer ends"
     );
   if (Ui->Notice[0] != L'\0') {
@@ -151,15 +155,18 @@ UniXNUMenuRun (
 
   if (RemainingMs == 0) {
     UniXNULog ("menu: timeout 0, booting default");
+    UniXNUMenuPointerClose (Ui, &Pointer);
     return Config->DefaultIndex;
   }
 
   Status = gBS->CreateEvent (EVT_TIMER, TPL_CALLBACK, NULL, NULL, &Timer);
   if (EFI_ERROR (Status)) {
+    UniXNUMenuPointerClose (Ui, &Pointer);
     return Config->DefaultIndex;
   }
 
-  gBS->SetTimer (Timer, TimerPeriodic, EFI_TIMER_PERIOD_MILLISECONDS (TICK_MS));
+  Status = gBS->SetTimer (Timer, TimerPeriodic, EFI_TIMER_PERIOD_MILLISECONDS (TICK_MS));
+  if (EFI_ERROR (Status)) { gBS->CloseEvent (Timer); UniXNUMenuPointerClose (Ui, &Pointer); return Config->DefaultIndex; }
 
   EventCount = 0;
   Events[EventCount++] = Timer;
@@ -170,21 +177,69 @@ UniXNUMenuRun (
   UserActive      = FALSE;
   RotateAccum     = 0;
   LastShownSecond = -2;
+  if (Pointer.Enabled) {
+    UINTN Left = Ui->Portrait ? Ui->Margin : Ui->MenuLeft;
+    UINTN Width = Ui->Portrait ? Ui->Width - 2 * Ui->Margin : Ui->MenuWidth;
+    UINTN Height = Ui->Portrait ? Ui->CardHeight : Ui->RowHeight - Ui->Scale;
+    UniXNULog ("menu: pointer-ready x=%u y=%u step=%u rows=%u first=%u cx=%u cy=%u confirm=%u",
+      (UINT32)(Left + Width / 2), (UINT32)(Ui->MenuTop + Height / 2), (UINT32)Ui->RowHeight,
+      (UINT32)Ui->VisibleRows, (UINT32)Ui->FirstVisible, (UINT32)Pointer.X, (UINT32)Pointer.Y, Confirmation);
+  }
   for ( ; ;) {
     INTN  Second = (RemainingMs < 0) ? -1 : (RemainingMs + 999) / 1000;
 
     if (Second != LastShownSecond) {
-      DrawCountdown (Ui, Config, RemainingMs, HasInput);
+      UniXNUMenuPointerHide (Ui, &Pointer);
+      DrawCountdown (Ui, Config, RemainingMs, Confirmation);
       LastShownSecond = Second;
     }
 
+    UniXNUMenuPointerDraw (Ui, &Pointer);
     Status = gBS->WaitForEvent (EventCount, Events, &Signaled);
+    UniXNUMenuPointerHide (Ui, &Pointer);
     if (EFI_ERROR (Status)) {
       break;
     }
 
     Previous = Selected;
-    if (Signaled == 0) {
+    UINTN Hover, Click; INT32 Scroll;
+    BOOLEAN MouseActive = UniXNUMenuPointerPoll (Ui, Count, &Pointer, &Hover, &Click, &Scroll);
+    BOOLEAN KeyActive = gST->ConIn != NULL && !EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key));
+    if (KeyActive || MouseActive) {
+      if (!UserActive) {
+        UserActive = TRUE; RemainingMs = -1; Selected = Config->DefaultIndex;
+      }
+      if (MouseActive) {
+        if (Scroll > 0) { Selected = (Selected + Count - 1) % Count; }
+        else if (Scroll < 0) { Selected = (Selected + 1) % Count; }
+        else if (Hover != MAX_UINTN) { Selected = Hover; }
+        if (Click != MAX_UINTN) {
+          Selected = Click; UniXNULog ("menu: click, choosing %u confirm=%u", (UINT32)Selected, Confirmation); break;
+        }
+      }
+    }
+    if (KeyActive) {
+      if (Confirmation) {
+        if (Key.ScanCode == SCAN_UP) { Selected = (Selected + Count - 1) % Count; }
+        else if (Key.ScanCode == SCAN_DOWN) { Selected = (Selected + 1) % Count; }
+        else if (Key.UnicodeChar == CHAR_CARRIAGE_RETURN || Key.UnicodeChar == CHAR_LINEFEED) { break; }
+        else { Selected = Config->DefaultIndex; break; }
+      } else if ((Key.ScanCode == SCAN_UP) || (Key.UnicodeChar == L'k')) {
+        Selected = (Selected + Count - 1) % Count;
+      } else if ((Key.ScanCode == SCAN_DOWN) || (Key.UnicodeChar == L'j')) {
+        Selected = (Selected + 1) % Count;
+      } else if (Key.ScanCode == SCAN_HOME) {
+        Selected = 0;
+      } else if (Key.ScanCode == SCAN_END) {
+        Selected = Count - 1;
+      } else if ((Key.UnicodeChar >= L'1') && (Key.UnicodeChar <= L'9') && ((UINTN)(Key.UnicodeChar - L'1') < Count)) {
+        Selected = Key.UnicodeChar - L'1';
+        UniXNULog ("menu: key %c, booting %u", Key.UnicodeChar, (UINT32)Selected); break;
+      } else if ((Key.UnicodeChar == CHAR_CARRIAGE_RETURN) || (Key.UnicodeChar == CHAR_LINEFEED) ||
+                 (Key.UnicodeChar == L' ') || (Key.ScanCode == SCAN_RIGHT) || (Key.ScanCode == SCAN_SUSPEND)) {
+        UniXNULog ("menu: enter, booting %u", (UINT32)Selected); break;
+      }
+    } else if (!MouseActive && Signaled == 0) {
       if (RemainingMs > 0) {
         RemainingMs -= TICK_MS;
         if (RemainingMs <= 0) {
@@ -201,50 +256,22 @@ UniXNUMenuRun (
           Selected    = (Selected + 1) % Count;
         }
       }
-    } else {
-      if (EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
-        continue;
-      }
-
-      if (!UserActive) {
-        //
-        // The first key takes over: no more countdown or rotation, and the
-        // highlight returns to the default before the key applies.
-        //
-        UserActive  = TRUE;
-        RemainingMs = -1;
-        Selected    = Config->DefaultIndex;
-      }
-
-      if ((Key.ScanCode == SCAN_UP) || (Key.UnicodeChar == L'k')) {
-        Selected = (Selected + Count - 1) % Count;
-      } else if ((Key.ScanCode == SCAN_DOWN) || (Key.UnicodeChar == L'j')) {
-        Selected = (Selected + 1) % Count;
-      } else if (Key.ScanCode == SCAN_HOME) {
-        Selected = 0;
-      } else if (Key.ScanCode == SCAN_END) {
-        Selected = Count - 1;
-      } else if ((Key.UnicodeChar >= L'1') && (Key.UnicodeChar <= L'9') && ((UINTN)(Key.UnicodeChar - L'1') < Count)) {
-        Selected = Key.UnicodeChar - L'1';
-        UniXNULog ("menu: key %c, booting %u", Key.UnicodeChar, (UINT32)Selected);
-        break;
-      } else if ((Key.UnicodeChar == CHAR_CARRIAGE_RETURN) || (Key.UnicodeChar == CHAR_LINEFEED) ||
-                 (Key.UnicodeChar == L' ') || (Key.ScanCode == SCAN_RIGHT) || (Key.ScanCode == SCAN_SUSPEND))
-      {
-        UniXNULog ("menu: enter, booting %u", (UINT32)Selected);
-        break;
-      }
     }
 
     if (Selected != Previous) {
-      UniXNUUiDrawEntry (Ui, Config, Previous, FALSE);
-      UniXNUUiDrawEntry (Ui, Config, Selected, TRUE);
+      if (FixedPcdGetBool (PcdUniXNUPointerInputEnabled)) { UniXNUUiSelectEntry (Ui, Config, Previous, Selected); }
+      else { UniXNUUiDrawEntry (Ui, Config, Previous, FALSE); UniXNUUiDrawEntry (Ui, Config, Selected, TRUE); }
     }
   }
 
+  UniXNUMenuPointerClose (Ui, &Pointer);
   gBS->SetTimer (Timer, TimerCancel, 0);
   gBS->CloseEvent (Timer);
   return Selected;
+}
+
+UINTN UniXNUMenuRun (UNIXNU_UI *Ui, UNIXNU_CONFIG *Config, BOOLEAN Countdown) {
+  return RunMenu (Ui, Config, Countdown, FALSE);
 }
 
 BOOLEAN
@@ -261,6 +288,38 @@ UniXNUMenuConfirm (
   CHAR16         Line[160];
 
   *Choice = 0;
+  if (Entry->ConfirmCount > 0 && Entry->ConfirmTitles == NULL) { return FALSE; }
+  UNIXNU_MENU_POINTER Pointer;
+  BOOLEAN Mouse = UniXNUMenuPointerInit (Ui, &Pointer);
+  UniXNUMenuPointerHide (Ui, &Pointer);
+  if (Pointer.Enabled && (Mouse || CountInputDevices () > 0)) {
+    UINTN Count = Entry->ConfirmCount > 0 ? Entry->ConfirmCount : 1;
+    if (Count >= MAX_UINTN / sizeof (UNIXNU_ENTRY) - 1) { UniXNUMenuPointerClose (Ui, &Pointer); return FALSE; }
+    UNIXNU_ENTRY *Entries = AllocateZeroPool ((Count + 1) * sizeof *Entries);
+    if (Entries == NULL) { UniXNUMenuPointerClose (Ui, &Pointer); return FALSE; }
+    for (UINTN I = 0; I < Count; I++) {
+      Entries[I].Title = Entry->ConfirmCount > 0 ? Entry->ConfirmTitles[I] : L"Confirm"; Entries[I].Type = UniXNUEntryChoice;
+    }
+    Entries[Count].Title = L"Cancel"; Entries[Count].Type = UniXNUEntryChoice;
+    UNIXNU_CONFIG Config; ZeroMem (&Config, sizeof Config);
+    Config.Title = Entry->Confirm; Config.SourceLabel = L"Confirmation"; Config.Entries = Entries;
+    Config.EntryCount = Count + 1; Config.DefaultIndex = Count; Config.Timeout = -1; Config.FallbackTimeout = 1;
+    UNIXNU_UI Question = *Ui; Question.Info[0] = Question.Notice[0] = L'\0';
+    // Drain the entry-selecting key/press; the new pointer context still needs
+    // its own observed release before accepting a fresh complete click.
+    gBS->Stall (500000);
+    if (gST->ConIn != NULL) { while (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {} }
+    UINTN Hover, Click; INT32 Scroll;
+    UniXNUMenuPointerPoll (Ui, 0, &Pointer, &Hover, &Click, &Scroll);
+    UniXNUMenuPointerClose (Ui, &Pointer);
+    UINTN Selected = RunMenu (&Question, &Config, FALSE, TRUE);
+    FreePool (Entries);
+    if (Selected >= Count) { return FALSE; }
+    *Choice = Selected;
+    UniXNULog ("menu: confirmed '%a' choice %u", Entry->Id != NULL ? Entry->Id : "?", (UINT32)*Choice);
+    return TRUE;
+  }
+  UniXNUMenuPointerClose (Ui, &Pointer);
   if ((gST->ConIn == NULL) || (CountInputDevices () == 0)) {
     UniXNULog ("menu: confirmation needs an input device, cancelled");
     return FALSE;

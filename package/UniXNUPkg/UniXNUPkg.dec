@@ -44,3 +44,6 @@
   ## FV file name (GUID) of the UniXNU application that UniXNUDxe
   #  registers as a boot option. Defaults to UniXNU.inf's FILE_GUID.
   gUniXNUPkgTokenSpaceGuid.PcdUniXNUApplicationFile|{ GUID("9B665204-A133-47A2-9396-9E2B370A4E25") }|VOID*|0x00000003
+
+  ## Opt-in relative pointer input in the graphics menu and confirmations.
+  gUniXNUPkgTokenSpaceGuid.PcdUniXNUPointerInputEnabled|FALSE|BOOLEAN|0x00000004

@@ -26,6 +26,7 @@
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/SimpleTextIn.h>
 #include <Protocol/SimpleTextOut.h>
+#include <Protocol/SimplePointer.h>
 
 #define UNIXNU_VERSION_STRING  "0.1.0"
 
@@ -194,7 +195,8 @@ typedef enum {
   UniXNUEntryEfi,
   UniXNUEntryLinux,
   UniXNUEntryAction,
-  UniXNUEntryXnu
+  UniXNUEntryXnu,
+  UniXNUEntryChoice ///< Temporary confirmation item; never a boot entry.
 } UNIXNU_ENTRY_TYPE;
 
 typedef enum {
@@ -512,11 +514,41 @@ typedef struct {
   UINTN                           MenuWidth;
   UINTN                           FooterTop;
   UINTN                           VisibleRows;
+  UINTN                           FirstVisible;     ///< Absolute index of the first displayed entry.
   UINTN                           TextColumns;      ///< Text mode only.
   UINTN                           TextRows;
   CHAR16                          Info[96];         ///< Injection summary line.
   CHAR16                          Notice[96];       ///< Result of the last boot attempt.
 } UNIXNU_UI;
+
+#define UNIXNU_POINTER_SIDE  16
+typedef struct {
+  BOOLEAN                       Enabled;
+  BOOLEAN                       Available;
+  BOOLEAN                       SeenUp;
+  BOOLEAN                       Down;
+  BOOLEAN                       Drawn;
+  EFI_HANDLE                    Owner;
+  EFI_EVENT                     NotifyEvent;
+  volatile BOOLEAN              Changed; ///< Install/reinstall invalidates button history, even if a handle is reused.
+  UINTN                         X;
+  UINTN                         Y;
+  UINTN                         Armed;
+  UINTN                         SavedX;
+  UINTN                         SavedY;
+  UINTN                         SavedWidth;
+  UINTN                         SavedHeight;
+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Saved[UNIXNU_POINTER_SIDE * UNIXNU_POINTER_SIDE];
+} UNIXNU_MENU_POINTER;
+
+BOOLEAN UniXNUMenuPointerInit (IN UNIXNU_UI *Ui, OUT UNIXNU_MENU_POINTER *Pointer);
+VOID UniXNUMenuPointerHide (IN UNIXNU_UI *Ui, IN OUT UNIXNU_MENU_POINTER *Pointer);
+VOID UniXNUMenuPointerClose (IN UNIXNU_UI *Ui, IN OUT UNIXNU_MENU_POINTER *Pointer);
+VOID UniXNUMenuPointerDraw (IN UNIXNU_UI *Ui, IN OUT UNIXNU_MENU_POINTER *Pointer);
+BOOLEAN UniXNUMenuPointerPoll (IN UNIXNU_UI *Ui, IN UINTN Count, IN OUT UNIXNU_MENU_POINTER *Pointer,
+  OUT UINTN *Hover, OUT UINTN *Click, OUT INT32 *Scroll);
+UINTN UniXNUUiHitTest (IN UNIXNU_UI *Ui, IN UINTN Count, IN UINTN X, IN UINTN Y);
+VOID UniXNUUiSelectEntry (IN UNIXNU_UI *Ui, IN UNIXNU_CONFIG *Config, IN UINTN Previous, IN UINTN Selected);
 
 /**
   Decide whether the menu uses the portrait layout. Landscape never does and

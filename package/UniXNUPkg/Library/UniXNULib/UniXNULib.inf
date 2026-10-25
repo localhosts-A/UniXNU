@@ -23,6 +23,7 @@
   Logo.c
   Main.c
   Menu.c
+  MenuPointer.c
   Slice.c
   Toml.c
   Ui.c
@@ -63,8 +64,12 @@
   gEfiSerialIoProtocolGuid          ## SOMETIMES_CONSUMES
   gEfiSimpleFileSystemProtocolGuid  ## SOMETIMES_CONSUMES
   gEfiSimpleTextInProtocolGuid      ## SOMETIMES_CONSUMES
+  gEfiSimplePointerProtocolGuid     ## SOMETIMES_CONSUMES
   gUniXNULoaderProtocolGuid   ## SOMETIMES_CONSUMES
 
 [Pcd]
   gUniXNUPkgTokenSpaceGuid.PcdUniXNUDebugLevel
   gUniXNUPkgTokenSpaceGuid.PcdUniXNUConfigPath
+
+[FixedPcd]
+  gUniXNUPkgTokenSpaceGuid.PcdUniXNUPointerInputEnabled

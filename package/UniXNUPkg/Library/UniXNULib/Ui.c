@@ -199,6 +199,8 @@ TypeTag (
       return L"xnu";
     case UniXNUEntryAction:
       return L"action";
+    case UniXNUEntryChoice:
+      return L"";
     default:
       return L"efi";
   }
@@ -573,7 +575,7 @@ DrawEntryPortrait (
   Fch   = UNIXNU_GLYPH_HEIGHT * Fs;
   Pad   = Ch / 2;
   X     = Ui->Margin;
-  Y     = Ui->MenuTop + Index * Ui->RowHeight;
+  Y     = Ui->MenuTop + (Index - Ui->FirstVisible) * Ui->RowHeight;
   Width = Ui->Width - 2 * Ui->Margin;
   Bg    = Selected ? mAccent : mRow;
 
@@ -603,8 +605,10 @@ DrawEntryPortrait (
   TextX = X + Pad + Badge + Pad;
   TextW = (X + Width > TextX + Pad) ? X + Width - Pad - TextX : 0;
   FitText (Entry->Title, TextW / (UNIXNU_GLYPH_WIDTH * Ui->Scale), Fit);
-  DrawText (Ui, TextX, Y + Pad, Fit, Ui->Scale, mText, Bg, 0);
-  DrawText (Ui, TextX, Y + Ui->CardHeight - Pad - Fch, TypeTag (Entry), Fs, Selected ? mText : mDim, Bg, 0);
+  DrawText (Ui, TextX, Entry->Type == UniXNUEntryChoice ? Y + (Ui->CardHeight - Ch) / 2 : Y + Pad, Fit, Ui->Scale, mText, Bg, 0);
+  if (Entry->Type != UniXNUEntryChoice) {
+    DrawText (Ui, TextX, Y + Ui->CardHeight - Pad - Fch, TypeTag (Entry), Fs, Selected ? mText : mDim, Bg, 0);
+  }
 }
 
 STATIC
@@ -711,6 +715,7 @@ UniXNUUiDrawFrame (
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  *Buffer;
   CHAR16                         Line[128];
 
+  Ui->FirstVisible = 0;
   if (Ui->Mode == UniXNUUiText) {
     gST->ConOut->EnableCursor (gST->ConOut, FALSE);
     gST->ConOut->ClearScreen (gST->ConOut);
@@ -825,7 +830,7 @@ UniXNUUiDrawEntry (
   CONST CHAR16                   *Tag;
   CHAR16                         Line[160];
 
-  if (Index >= Ui->VisibleRows) {
+  if (Index < Ui->FirstVisible || Index - Ui->FirstVisible >= Ui->VisibleRows) {
     return;
   }
 
@@ -834,7 +839,7 @@ UniXNUUiDrawEntry (
     UnicodeSPrint (Line, sizeof (Line), L" %c %u. %s  [%s]", Selected ? L'>' : L' ', (UINT32)Index + 1, Entry->Title, TypeTag (Entry));
     TextPrintAt (
       Ui,
-      Ui->MenuTop + Index,
+      Ui->MenuTop + Index - Ui->FirstVisible,
       Selected ? (EFI_WHITE | EFI_BACKGROUND_RED) : (EFI_LIGHTGRAY | EFI_BACKGROUND_BLACK),
       Line
       );
@@ -852,7 +857,7 @@ UniXNUUiDrawEntry (
 
   Cw  = UNIXNU_GLYPH_WIDTH * Ui->Scale;
   Ch  = UNIXNU_GLYPH_HEIGHT * Ui->Scale;
-  Y   = Ui->MenuTop + Index * Ui->RowHeight;
+  Y   = Ui->MenuTop + (Index - Ui->FirstVisible) * Ui->RowHeight;
   Pad = (Ui->RowHeight - Ch) / 2;
   Bg  = Selected ? mAccent : mRow;
   Tag = TypeTag (Entry);
