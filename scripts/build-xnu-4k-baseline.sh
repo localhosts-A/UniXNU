@@ -237,12 +237,13 @@ if [ "$ENTITLEMENT_FREE_MODE" = 1 ] && { [ "$MOCKFS_MODE" != 1 ] ||
 fi
 if [ -d "$MOCKFS_OBJECT_DIR" ]; then
   if [ "$(cat "$MOCKFS_OBJECT_DIR/.source-entitlement-free-mode" 2>/dev/null || echo 0)" != "$ENTITLEMENT_FREE_MODE" ]; then
-    rm -f "$MOCKFS_OBJECT_DIR/ubc_subr.o"
+    rm -f "$MOCKFS_OBJECT_DIR/ubc_subr.o" "$MOCKFS_OBJECT_DIR/mach_loader.o"
     rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOKitBSDInit.cpo"
   fi
   printf '%s\n' "$ENTITLEMENT_FREE_MODE" > "$MOCKFS_OBJECT_DIR/.source-entitlement-free-mode"
 fi
 EXTRA_MAKE_ARGS+=("ubc_subr.o_CFLAGS_ADD=-DXNU_NATIVE_CS_HASH_CACHE=$CS_HASH_CACHE_MODE -DXNU_SOURCE_ENTITLEMENT_FREE=$ENTITLEMENT_FREE_MODE")
+EXTRA_MAKE_ARGS+=("mach_loader.o_CFLAGS_ADD=-DXNU_SOURCE_ENTITLEMENT_FREE=$ENTITLEMENT_FREE_MODE")
 EXTRA_CFLAGS=${XNU_EXTRA_CFLAGS:--Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding}
 OWNER_ROOT_PROBE=${XNU_VERIFIED_ROOT_PROBE:-0}
 if [ "$OWNER_ROOT_PROBE" != 0 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then

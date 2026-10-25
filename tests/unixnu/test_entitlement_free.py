@@ -7,12 +7,88 @@ import unittest
 
 
 class EntitlementFreeTests(unittest.TestCase):
+    def test_actual_loader_keeps_signature_failures_and_requires_a_signature(self):
+        compiler = shutil.which('clang') or shutil.which('cc')
+        if not compiler:
+            self.skipTest('native C compiler required')
+        patch = Path(__file__).resolve().parents[2] / 'patches/xnu/source-entitlement-free-context.patch'
+        loader = patch.read_text().split('diff --git a/bsd/kern/mach_loader.c', 1)[1]
+        new_side = '\n'.join(line[1:] for line in loader.splitlines()
+                             if line.startswith(('+', ' ')) and not line.startswith('+++'))
+        helper = new_side[new_side.index('static boolean_t\nload_code_signature_enforced('):]
+        helper = helper[:helper.index('\n}\n') + len('\n}\n')]
+        failure = new_side[new_side.index('\t\t\t\tif (ret != LOAD_SUCCESS) {'):]
+        failure = failure[:failure.index('\n\t\t\t\tif (got_code_signatures) {')]
+        missing = new_side[new_side.index('\t\tif (!got_code_signatures &&'):]
+        missing = missing[:missing.index('\n\t\t}') + len('\n\t\t}')]
+        invalid_page = new_side[new_side.index('\t\t\t\t\t\t\tif (load_code_signature_enforced() ||'):]
+        invalid_page = invalid_page[:invalid_page.index('\n\t\t\t\t\t\t\tresult->csflags')]
+        source = r'''
+#include <assert.h>
+typedef int boolean_t;
+#define TRUE 1
+#define FALSE 0
+#define LOAD_SUCCESS 0
+#define LOAD_FAILURE 1
+#define CS_HARD 1
+#define CS_KILL 2
+#define CS_ENFORCEMENT 4
+#define printf(...) ((void)0)
+static int enforcement;
+static boolean_t cs_process_global_enforcement(void) { return enforcement; }
+''' + helper + r'''
+static int load_for_test(int signature_command, int signature_result) {
+    int ret = LOAD_SUCCESS;
+    boolean_t got_code_signatures = FALSE;
+    if (signature_command) {
+        ret = signature_result;
+''' + failure + r'''
+    }
+    if (ret == LOAD_SUCCESS) {
+''' + missing + r'''
+    }
+    return ret;
+}
+static int reject_invalid_page(unsigned flags) {
+    int ret = LOAD_SUCCESS;
+    struct { unsigned csflags; } state = { flags }, *result = &state;
+''' + invalid_page + r'''
+    return ret;
+}
+int main(void) {
+    for (enforcement = 0; enforcement <= 1; enforcement++) {
+        const int strict = XNU_SOURCE_ENTITLEMENT_FREE || enforcement;
+        assert(load_for_test(1, LOAD_SUCCESS) == LOAD_SUCCESS);
+        /* EPERM has already become LOAD_FAILURE here. No failed signature
+         * may become executable unsigned code in the restricted profile.
+         */
+        for (int failure = 1; failure <= 8; failure++) {
+            assert(load_for_test(1, failure) == (strict ? failure : LOAD_SUCCESS));
+        }
+        assert(load_for_test(0, LOAD_SUCCESS) == (strict ? LOAD_FAILURE : LOAD_SUCCESS));
+        assert(reject_invalid_page(0) == (strict ? LOAD_FAILURE : LOAD_SUCCESS));
+        for (unsigned flag = CS_HARD; flag <= CS_ENFORCEMENT; flag *= 2) {
+            assert(reject_invalid_page(flag) == LOAD_FAILURE);
+        }
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'loader.c'
+            path.write_text(source)
+            for enabled in (0, 1):
+                output = Path(temporary) / f'loader-{enabled}'
+                subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror',
+                                '-Wno-unused-function', f'-DXNU_SOURCE_ENTITLEMENT_FREE={enabled}',
+                                path, '-o', output], check=True)
+                subprocess.run([output], check=True)
+
     def test_actual_task_query_denies_absent_provider_and_preserves_real_provider(self):
         compiler = shutil.which('clang++') or shutil.which('c++')
         if not compiler:
             self.skipTest('native C++ compiler required')
         path = Path(__file__).resolve().parents[2] / 'patches/xnu/source-entitlement-free-context.patch'
-        iokit = path.read_text().split('diff --git a/iokit/bsddev/IOKitBSDInit.cpp', 1)[1]
+        iokit = path.read_text().split('diff --git a/iokit/bsddev/IOKitBSDInit.cpp', 1)[1].split('diff --git ', 1)[0]
         new_side = '\n'.join(line[1:] for line in iokit.splitlines()
                              if line.startswith(('+', ' ')) and not line.startswith('+++'))
         function = new_side[new_side.index('extern "C" boolean_t\nIOTaskHasStringEntitlement('):]

@@ -221,3 +221,61 @@ diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
  
  	return return_value;
  }
+diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -756,6 +756,19 @@ pie_required(
+ 	return FALSE;
+ }
+ 
++static boolean_t
++load_code_signature_enforced(void)
++{
++#if defined(XNU_SOURCE_ENTITLEMENT_FREE) && XNU_SOURCE_ENTITLEMENT_FREE
++	/* This restricted source profile must not turn a rejected signature into
++	 * executable unsigned code when process-global enforcement is disabled.
++	 */
++	return TRUE;
++#else
++	return cs_process_global_enforcement();
++#endif
++}
++
+ /*
+  * The file size of a mach-o file is limited to 32 bits; this is because
+  * this is the limit on the kalloc() of enough bytes for a mach_header and
+@@ -1304,16 +1317,16 @@ parse_machfile(
+ 				if (ret != LOAD_SUCCESS) {
+ 					printf("proc %d: load code signature error %d "
+ 					    "for file \"%s\"\n",
+ 					    proc_getpid(p), ret, vp->v_name);
+ 					/*
+ 					 * Allow injections to be ignored on devices w/o enforcement enabled
+ 					 */
+-					if (!cs_process_global_enforcement()) {
++					if (!load_code_signature_enforced()) {
+ 						ret = LOAD_SUCCESS; /* ignore error */
+ 					}
+ 				} else {
+ 					got_code_signatures = TRUE;
+ 				}
+ 
+ 				if (got_code_signatures) {
+ 					unsigned tainted = CS_VALIDATE_TAINTED;
+@@ -1342,6 +1355,6 @@ parse_machfile(
+-							if (cs_process_global_enforcement() ||
++							if (load_code_signature_enforced() ||
+ 							    (result->csflags & (CS_HARD | CS_KILL | CS_ENFORCEMENT))) {
+ 								ret = LOAD_FAILURE;
+ 							}
+ 							result->csflags &= ~CS_VALID;
+ 						}
+@@ -1468,7 +1481,7 @@ parse_machfile(
+ 	if (ret == LOAD_SUCCESS) {
+-		if (!got_code_signatures && cs_process_global_enforcement()) {
++		if (!got_code_signatures && load_code_signature_enforced()) {
+ 			ret = LOAD_FAILURE;
+ 		}
+ 
+ 		/* Make sure if we need dyld, we got it */
+ 		if (result->needs_dynlinker && !dlp) {
