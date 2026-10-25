@@ -20,3 +20,72 @@ diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.c
      } else {
      
          return super::newUserClient(owningTask, securityID, type, properties, handler);
+diff --git a/IOHIDFamily/IOHIDDeviceTypes.h b/IOHIDFamily/IOHIDDeviceTypes.h
+--- a/IOHIDFamily/IOHIDDeviceTypes.h
++++ b/IOHIDFamily/IOHIDDeviceTypes.h
+@@ -27,7 +27,8 @@
+ 
+ #include <TargetConditionals.h>
+ 
+-#if TARGET_OS_DRIVERKIT
++// IIG defines KERNEL as an annotation, so its types must use DriverKit.
++#if TARGET_OS_DRIVERKIT || __IIG
+ #include <DriverKit/IOTypes.h>
+ #include <DriverKit/IOReturn.h>
+ #else
+diff --git a/IOHIDFamily/IOHIDEvent.cpp b/IOHIDFamily/IOHIDEvent.cpp
+--- a/IOHIDFamily/IOHIDEvent.cpp
++++ b/IOHIDFamily/IOHIDEvent.cpp
+@@ -907,7 +907,7 @@
+     event->position.z       = z;
+     event->pressure         = tipPressure;
+     event->auxPressure      = auxPressure;
+-    event->angle.twist      = twist;
++    event->twist            = twist;
+ 
+ 
+     // Let's assume no tip pressure means finger
+@@ -1356,6 +1356,11 @@
+         IOFixed                         bottomM4,
+         IOOptionBits                    options)
+ {
++    // The pinned public 1915 event schema has no M1-M4 fields. Refuse
++    // nonzero unsupported buttons rather than truncating or inventing layout.
++    if (bottomM1 || bottomM2 || bottomM3 || bottomM4) {
++        return NULL;
++    }
+     IOHIDEvent *me = standardGameControllerEvent(timeStamp, dpadUp, dpadDown, dpadLeft, dpadRight, faceX, faceY, faceA, faceB, shoulderL1, shoulderR1, options);
+     IOHIDGameControllerEventData *event = NULL;
+     __IOHIDGameControllerEventData *extData = NULL;
+@@ -1371,11 +1376,6 @@
+     event->joystick.y   = joystickY;
+     event->joystick.z   = joystickZ;
+     event->joystick.rz  = joystickRz;
+-
+-    extData->bottom.m1 = bottomM1;
+-    extData->bottom.m2 = bottomM2;
+-    extData->bottom.m3 = bottomM3;
+-    extData->bottom.m4 = bottomM4;
+ 
+     extData->thumbstickButtonLeft = thumbstickButtonLeft;
+     extData->thumbstickButtonRight = thumbstickButtonRight;
+diff --git a/IOHIDFamily/IOHIDEventData.h b/IOHIDFamily/IOHIDEventData.h
+--- a/IOHIDFamily/IOHIDEventData.h
++++ b/IOHIDFamily/IOHIDEventData.h
+@@ -232,7 +232,6 @@
+         value  = (((IOHIDDigitizerEventData*)event)->eventMask & kIOHIDDigitizerEventEstimatedAltitude) ? kIOHIDDigitizerEventUpdateAltitudeMask : 0; \
+         value |= (((IOHIDDigitizerEventData*)event)->eventMask & kIOHIDDigitizerEventEstimatedAzimuth) ? kIOHIDDigitizerEventUpdateAzimuthMask : 0;   \
+         value |= (((IOHIDDigitizerEventData*)event)->eventMask & kIOHIDDigitizerEventEstimatedPressure) ? kIOHIDDigitizerEventUpdatePressureMask : 0; \
+-        value |= (((IOHIDDigitizerEventData*)event)->eventMask & kIOHIDDigitizerEventEstimatedRoll) ? kIOHIDDigitizerEventUpdateRollMask : 0; \
+         break;                                                                                                               \
+     }                                                                                                                        \
+     _IOHIDUnknowDefaultField(event, field)
+@@ -245,8 +244,6 @@
+                                                    ((value & kIOHIDDigitizerEventUpdateAzimuthMask) ? kIOHIDDigitizerEventEstimatedAzimuth : 0); \
+         ((IOHIDDigitizerEventData*)event)->eventMask = (((IOHIDDigitizerEventData*)event)->eventMask & ~kIOHIDDigitizerEventEstimatedPressure) | \
+                                                  ((value & kIOHIDDigitizerEventUpdatePressureMask) ? kIOHIDDigitizerEventEstimatedPressure : 0); \
+-        ((IOHIDDigitizerEventData*)event)->eventMask = (((IOHIDDigitizerEventData*)event)->eventMask & ~kIOHIDDigitizerEventEstimatedRoll) | \
+-                                                 ((value & kIOHIDDigitizerEventUpdateRollMask) ? kIOHIDDigitizerEventEstimatedRoll : 0);     \
+         break;                                                                                                               \
+     }                                                                                                                        \
+     _IOHIDUnknowDefaultField(event, field)

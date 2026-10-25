@@ -19,6 +19,10 @@ REVISION = 'b126cf696bf1c6eede740b92d3bfca7e62d09c06'
 SOURCE = ROOT / 'refer/IOHIDFamily'
 EVENT_SOURCE = ROOT / 'refer/IOHIDEventHeaders'
 EVENT_REVISION = '2365347f5147a1e2a46de21acd08d27fe0906e85'
+# Public 2031 omits its schema/generator. This explicit source port retains
+# the published 1915 event layout; it does not claim the private 2031 event ABI.
+EVENT_SCHEMA = 'IOHIDFamily-1915.140.3'
+UNSUPPORTED_EVENTS = ('game-controller-bottom-M1-M4', 'digitizer-estimated-roll')
 OUT = ROOT / 'build/source-hid'
 ARCHIVE = OUT / 'libIOHIDFamily.a'
 PHASE = '84D292320CC90C8E00698218'
@@ -84,8 +88,8 @@ def prepare_headers(source, out, macos_sdk, event_headers=None):
     shutil.copyfile(types, framework / types.name)
     imported = []
     # 2031 omits these generated declarations and the public SDK omits them too.
-    # Import the real, separately pinned 1915 declarations. Compatibility with
-    # the 2031 implementation is a compile/runtime gate, never an assumption.
+    # Import the real, separately pinned 1915 declarations used by the explicit
+    # source port. Compile/link/runtime remain separate validation gates.
     event_headers = event_headers or EVENT_SOURCE / 'IOHIDFamily'
     for name in GENERATED_EVENT_HEADERS:
         destination = include / 'IOKit/hid' / name
@@ -127,7 +131,9 @@ def audit_inputs(source):
     sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
     _, imported = prepare_headers(source, OUT / 'input-audit', sdk, header_source / 'IOHIDFamily')
     OUT.mkdir(parents=True, exist_ok=True)
-    report = {'source_revision': revision, 'event_header_revision': header_revision, 'declaration_inputs': imported,
+    report = {'source_revision': revision, 'event_header_revision': header_revision,
+              'event_schema': EVENT_SCHEMA, 'unsupported_event_features': list(UNSUPPORTED_EVENTS),
+              'public_port_patch_sha256': digest(PUBLIC_PATCH), 'declaration_inputs': imported,
               'source_units': [{'path': str(p.relative_to(source)), 'sha256': digest(p)} for p in inputs],
               'unavailable_private_source': PRIVATE_SOURCE, 'source_archive_built': False,
               'hardware_qualified': False}
@@ -182,12 +188,15 @@ def build():
                    '-I' + str(objects / 'bsd'), '-I' + str(xnu / 'EXTERNAL_HEADERS'),
                    '-I' + str(include), '-I' + str(source_tree), '-isysroot', sdk,
                    '-x', 'c++', '-std=gnu++2b', '-D__IIG=1', '-DDRIVERKIT_PRIVATE=1',
-                   '-DPRIVATE_WIFI_ONLY=1', *helper.include_flags(cpp)]
+                   '-DPRIVATE_WIFI_ONLY=1', '-DXNU_PLATFORM_iPhoneOS=1', *helper.include_flags(cpp)]
+        # Preserve the exact frontend invocation even when generation fails.
+        (OUT / (name + '.iig-command.json')).write_text(json.dumps(command, indent=2) + '\n')
         helper.run_logged(command, Path(cpp['directory']), OUT / (name + '.iig.log'))
         if not header.is_file() or not implementation.is_file():
             raise ValueError('IIG did not produce the real HID bridge: ' + name)
         generated_rows.append({'definition': str(definition.relative_to(ROOT)), 'definition_sha256': digest(definition),
-                               'header_sha256': digest(header), 'implementation_sha256': digest(implementation)})
+                               'header_sha256': digest(header), 'implementation_sha256': digest(implementation),
+                               'command': command})
     compiled, rows = [], []
     for source in [p for p in inputs if p.suffix != '.iig'] + [generated / (name + '.iig.cpp') for name in IIG_NAMES]:
         record = c if source.suffix == '.c' else cpp
@@ -210,6 +219,7 @@ def build():
         if name + '10gMetaClassE' not in defined:
             raise ValueError('Source HID archive lacks the real class: ' + name)
     report = {'source_revision': revision, 'event_header_revision': header_revision,
+              'event_schema': EVENT_SCHEMA, 'unsupported_event_features': list(UNSUPPORTED_EVENTS),
               'embedded_phase': PHASE, 'objects': rows, 'iig': generated_rows,
               'public_port_patch_sha256': digest(PUBLIC_PATCH), 'unavailable_private_source': PRIVATE_SOURCE,
               'declaration_inputs': sdk_inputs, 'c_compile_record_sha256': digest(c_path),
