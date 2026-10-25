@@ -26,6 +26,14 @@ def paths(ctx):
     return out, out / 'payload.img', out / 'payload.json'
 
 
+def adt_profile_flags(config):
+    """Pass profile-gated platform resources to the ADT generator."""
+    enabled = config.get('XNU_NATIVE_USB_HOST', False)
+    if not isinstance(enabled, bool):
+        raise Error('XNU_NATIVE_USB_HOST must be a parsed boolean configuration value')
+    return ['--usb-host'] if enabled else []
+
+
 def check_args(arguments):
     for value in arguments:
         if not re.fullmatch(r'[A-Za-z0-9_.\-]+(=[A-Za-z0-9_.,/\-]+)?', value):
@@ -151,6 +159,7 @@ def build(ctx, kernel=None):
                       ('chip_id', '--chip-id'), ('cpu_regs', '--cpu-regs'), ('psci_method', '--psci-method')):
         if adt.get(key) is not None:
             command += [flag, str(adt[key])]
+    command += adt_profile_flags(ctx.config)
     if seed:
         command += ['--unique-chip-id', seed]
     if data:
