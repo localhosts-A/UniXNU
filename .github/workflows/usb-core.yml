@@ -5,6 +5,8 @@ on:
     paths: &usb-paths
       - 'drivers/UsbCore/**'
       - 'tests/usb/**'
+      - 'tests/uefi/**'
+      - 'package/UniXNUPkg/**'
       - '.github/workflows/usb-core.yml'
   pull_request:
     paths: *usb-paths
@@ -33,4 +35,40 @@ jobs:
         with:
           name: usb-core-${{ matrix.cc }}
           path: usb-core-test.log
+          retention-days: 7
+  menu-production-c:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [clang, gcc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: microsoft/mu_basecore
+          ref: 3c9c7b2e211e62d2a954ad760a36fe05adc43aa3
+          path: .inputs/usb-menu-edk2
+          sparse-checkout: MdePkg/Include
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fingerprint exact menu/header inputs
+        env:
+          DALI_USB_EDK2: .inputs/usb-menu-edk2
+        run: python3 tests/uefi/fingerprint_menu_inputs.py > usb-menu-inputs.json
+      - name: Run enabled and disabled production menu with ASan and UBSan
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+          DALI_USB_EDK2: .inputs/usb-menu-edk2
+        run: python3 -m unittest discover -s tests/uefi -p 'test_menu_pointer.py' -v 2>&1 | tee usb-menu-test.log
+      - name: Retain menu model evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-menu-${{ matrix.cc }}
+          path: |
+            usb-menu-test.log
+            usb-menu-inputs.json
           retention-days: 7
