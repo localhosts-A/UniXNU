@@ -175,6 +175,18 @@ fi
 if [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
   PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_NATIVE_UFS=1"
 fi
+SOURCE_STORAGE_FAMILY=${XNU_SOURCE_STORAGE_FAMILY:-0}
+if [ "$SOURCE_STORAGE_FAMILY" != 0 ] && [ "$SOURCE_STORAGE_FAMILY" != 1 ]; then
+  echo 'XNU_SOURCE_STORAGE_FAMILY must be 0 or 1' >&2
+  exit 1
+fi
+if [ "$SOURCE_STORAGE_FAMILY" = 1 ]; then
+  if [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ] || [ "$CRYPTO_BOOTSTRAP_MODE" != source ]; then
+    echo 'Source IOStorageFamily requires the source-only crypto link profile' >&2
+    exit 1
+  fi
+  PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_SOURCE_STORAGE_FAMILY=1"
+fi
 NATIVE_VIRTIO_CONSOLE=${XNU_NATIVE_VIRTIO_CONSOLE:-0}
 if [ "$NATIVE_VIRTIO_CONSOLE" != 0 ] && [ "$NATIVE_VIRTIO_CONSOLE" != 1 ]; then
   echo 'XNU_NATIVE_VIRTIO_CONSOLE must be 0 or 1' >&2
@@ -598,6 +610,12 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$UFS_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $UFS_ARCHIVE"
   fi
+  if [ "$SOURCE_STORAGE_FAMILY" = 1 ]; then
+    STORAGE_ARCHIVE=$ROOT/build/source-storage/libIOStorageFamily.a
+    test -f "$STORAGE_ARCHIVE"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$STORAGE_ARCHIVE"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $STORAGE_ARCHIVE"
+  fi
   if [ "${XNU_NATIVE_ADRENO:-0}" = 1 ]; then
     # NativeAdreno plus its kits (scripts/build-native-adreno-kits.py). No personality is installed: the
     # board probe calls NativeAdrenoGmuContextBringup directly once it has powered the GPU CX domain.
@@ -753,6 +771,7 @@ python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-a
   "$NATIVE_OFFLINE_GPU" "$ROOT/build/native-offline-gpu/libNativeOfflineGPU.late.a" \
   "$SHENG_PMGR" "$ROOT/build/sheng-platform-power/libShengPlatformPower.a" \
   "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/native-adreno/libNativeAdreno.a" \
+  "$SOURCE_STORAGE_FAMILY" "$ROOT/build/source-storage/libIOStorageFamily.a" \
   "${XNU_EXTRA_KERNEL_ARCHIVE_DEPENDENCIES:-}" <<'PY'
 import hashlib
 from pathlib import Path

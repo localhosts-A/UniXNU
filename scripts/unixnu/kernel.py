@@ -101,6 +101,9 @@ def build(ctx, modules):
             log_file=ctx.logs / 'storage-headers.log')
     build_archives(ctx, env)
     run(['bash', script], cwd=ctx.tree, env=env, log_file=ctx.logs / 'kernel.log')
+    if ctx.need_config().get('XNU_SOURCE_STORAGE_FAMILY'):
+        run(['python3', ctx.tree / 'scripts/build-source-storage.py', '--verify-kernel', source_output(ctx)],
+            cwd=ctx.tree, env=env, log_file=ctx.logs / 'source-storage-link.log')
 
 
 def source_output(ctx):

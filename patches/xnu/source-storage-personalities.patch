@@ -1,0 +1,29 @@
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -35,3 +35,25 @@
+ const char * gIOKernelConfigTables =
+     "("
++#if defined(XNU_SOURCE_STORAGE_FAMILY) && XNU_SOURCE_STORAGE_FAMILY
++    "   {"
++    "     'IOClass'         = IOBlockStorageDriver;"
++    "     'IOProviderClass' = IOBlockStorageDevice;"
++    "     'IOPropertyMatch' = { 'device-type' = Generic; };"
++    "   },"
++    "   {"
++    "     'IOClass'         = IOGUIDPartitionScheme;"
++    "     'IOProviderClass' = IOMedia;"
++    "     'IOMatchCategory' = IOStorage;"
++    "     'IOProbeScore'    = 4000:32;"
++    "     'Content Mask'    = GUID_partition_scheme;"
++    "     'IOPropertyMatch' = { 'Whole' = .true.; };"
++    "   },"
++    "   {"
++    "     'IOClass'         = IOMediaBSDClient;"
++    "     'IOProviderClass' = IOMedia;"
++    "     'IOMatchCategory' = IOMediaBSDClient;"
++    "     'IOResourceMatch' = IOBSD;"
++    "     'IOProbeScore'    = 30000:32;"
++    "   },"
++#endif
+     "   {"
