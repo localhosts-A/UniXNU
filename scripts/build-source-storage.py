@@ -153,6 +153,11 @@ def build(root):
     out = root / 'build/source-storage'
     generated = out / 'generated'
     generated.mkdir(parents=True, exist_ok=True)
+    # IIG includes its own header through the declared framework namespace.
+    # Remove the old flat output so a cached build cannot prefer a stale header.
+    (generated / 'IOUserBlockStorageDevice.h').unlink(missing_ok=True)
+    framework = generated / 'BlockStorageDeviceDriverKit'
+    framework.mkdir(exist_ok=True)
     archive = out / 'libIOStorageFamily.a'
     archive.unlink(missing_ok=True)
     (out / 'build-report.json').unlink(missing_ok=True)
@@ -160,7 +165,7 @@ def build(root):
     sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
     iig = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--find', 'iig'], text=True).strip()
     definition = source / 'BlockStorageDeviceDriverKit/IOUserBlockStorageDevice.iig'
-    header = generated / 'IOUserBlockStorageDevice.h'
+    header = framework / 'IOUserBlockStorageDevice.h'
     implementation = generated / 'IOUserBlockStorageDevice.iig.cpp'
     # Same public IIG generation route as XNU iokit/DriverKit/Makefile:6-7,62.
     # IIG owns its frontend architecture; a clang -target conflicts with it.
@@ -176,7 +181,7 @@ def build(root):
     run_logged(iig_command, directory, out / 'iig.log')
     if not header.is_file() or not implementation.is_file():
         raise ValueError('IIG did not generate both the real interface and implementation')
-    includes = [generated, source, root / 'build/storage-abi/include', xnu / 'iokit']
+    includes = [generated, framework, source, root / 'build/storage-abi/include', xnu / 'iokit']
     inputs = [source / name for name in SOURCES] + [implementation, root / 'scripts/fixtures/source-storage.cpp']
     compiled, reports = [], []
     for path in inputs:
