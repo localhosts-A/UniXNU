@@ -136,6 +136,10 @@ int usb_bot_reset(struct usb_bot *);
 int usb_bot_command(struct usb_bot *, const uint8_t *cdb, size_t cdb_size,
                     bool input, void *data, size_t size, size_t *completed);
 int usb_bot_capacity(struct usb_bot *);
+/* Reads SCSI MODE SENSE(6) write-protect state. Unsupported mode pages follow
+ * the common disk policy and report writable; transport/protocol errors fail.
+ */
+int usb_bot_read_only(struct usb_bot *, bool *read_only);
 int usb_bot_read(struct usb_bot *, uint64_t lba, uint32_t blocks, void *, size_t);
 int usb_bot_write(struct usb_bot *, uint64_t lba, uint32_t blocks, const void *, size_t);
 int usb_bot_sync(struct usb_bot *);

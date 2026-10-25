@@ -442,6 +442,34 @@ int usb_bot_capacity(struct usb_bot *bot)
     bot->blocks = last + 1; bot->block_size = size;
     return USB_OK;
 }
+int usb_bot_read_only(struct usb_bot *bot, bool *read_only)
+{
+    if (!bot || !read_only || !bot->present) return USB_INVALID;
+    uint8_t command[6] = {0x1a, 0, 0x3f, 0, 4, 0};
+    uint8_t header[4] = {0};
+    size_t actual = 0;
+    int result = usb_bot_command(bot, command, sizeof(command), true,
+                                 header, sizeof(header), &actual);
+    if (result == USB_COMMAND_FAILED) {
+        /* Some devices implement page 0 but reject the all-pages selector. */
+        command[2] = 0;
+        zero(header, sizeof(header));
+        actual = 0;
+        result = usb_bot_command(bot, command, sizeof(command), true,
+                                 header, sizeof(header), &actual);
+        if (result == USB_COMMAND_FAILED) {
+            /* Match the conservative SCSI disk policy: failed WP probing is
+             * treated as writable; actual writes still return BOT status.
+             */
+            *read_only = false;
+            return USB_OK;
+        }
+    }
+    if (result) return result;
+    if (actual < 3) return USB_PHASE_ERROR;
+    *read_only = (header[2] & 0x80) != 0;
+    return USB_OK;
+}
 static int bot_rw(struct usb_bot *bot, bool write, uint64_t lba, uint32_t blocks, void *data, size_t size)
 {
     if (!bot || !bot->present) return USB_DISCONNECTED;

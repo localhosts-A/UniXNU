@@ -194,6 +194,8 @@ struct disk {
     uint8_t media[4096], cdb[16]; uint32_t tag, size, residue; uint64_t lba;
     unsigned phase, commands, writes, resets, clears, syncs;
     bool input, partial_write, bad_tag, reset_fail, csw_stall, disconnected, capacity_bad;
+    bool read_only, reject_mode_all, reject_mode_page0, short_mode_sense;
+    uint8_t status;
 };
 static int control(void *ctx, const struct usb_setup *setup, void *data, size_t size, size_t *actual, uint32_t timeout) {
     struct disk *d = ctx; (void)data; assert(!size && timeout && setup->type == 0x21 && setup->request == 0xff && setup->index == 2);
@@ -209,13 +211,24 @@ static int bulk(void *ctx, uint8_t ep, void *buffer, size_t size, size_t *actual
     if (!d->phase) {
         assert(ep == 2 && size == 31 && get32(p) == 0x43425355 && p[14] <= 16 && p[13] == 0);
         ++d->commands; d->tag = get32(p + 4); d->size = get32(p + 8); d->input = p[12] == 0x80;
-        memcpy(d->cdb, p + 15, 16); d->residue = 0; d->phase = d->size ? 1 : 2; *actual = size;
+        memcpy(d->cdb, p + 15, 16); d->residue = 0; d->status = 0; d->phase = d->size ? 1 : 2; *actual = size;
         if (d->cdb[0] == 0x35) ++d->syncs;
         return USB_OK;
     }
     if (d->phase == 1) {
         assert(size == d->size && ep == (d->input ? 0x81 : 2));
         if (d->cdb[0] == 0x25) { assert(size == 8); setbe32(p, 7); setbe32(p + 4, d->capacity_bad ? 768 : 512); }
+        else if (d->cdb[0] == 0x1a) {
+            assert(d->input && size == 4 && d->cdb[1] == 0 && d->cdb[3] == 0 &&
+                   d->cdb[4] == 4 && d->cdb[5] == 0);
+            bool reject = d->cdb[2] == 0x3f ? d->reject_mode_all :
+                          d->cdb[2] == 0 ? d->reject_mode_page0 : true;
+            if (reject) { d->residue = 4; d->status = 1; }
+            else { memset(p, 0, 4); p[2] = d->read_only ? 0x80 : 0; }
+            *actual = reject ? 0 : d->short_mode_sense ? 2 : 4;
+            d->phase = 2;
+            return USB_OK;
+        }
         else if (d->cdb[0] == 0x28 || d->cdb[0] == 0x2a || d->cdb[0] == 0x88 || d->cdb[0] == 0x8a) {
             bool cdb16 = d->cdb[0] == 0x88 || d->cdb[0] == 0x8a;
             d->lba = cdb16 ? ((uint64_t)getbe32(d->cdb + 2) << 32) | getbe32(d->cdb + 6) : getbe32(d->cdb + 2);
@@ -231,12 +244,28 @@ static int bulk(void *ctx, uint8_t ep, void *buffer, size_t size, size_t *actual
     assert(d->phase == 2 && ep == 0x81 && size == 13);
     if (d->csw_stall) { d->csw_stall = false; return USB_STALL; }
     memset(p, 0, size); set32(p, 0x53425355); set32(p + 4, d->bad_tag ? d->tag + 1 : d->tag); set32(p + 8, d->residue);
+    p[12] = d->status;
+    d->status = 0;
     d->phase = 0; *actual = size; return USB_OK;
 }
 static void test_bot(void) {
     struct disk disk = {0}; struct usb_bot bot; struct usb_transport transport = {&disk, control, bulk, clear};
     assert(usb_bot_init(&bot, &transport, 2, 0x81, 2, 0) == USB_OK);
     assert(usb_bot_capacity(&bot) == USB_OK && bot.blocks == 8 && bot.block_size == 512);
+    bool read_only = false;
+    disk.read_only = true;
+    assert(usb_bot_read_only(&bot, &read_only) == USB_OK && read_only);
+    disk.read_only = false;
+    assert(usb_bot_read_only(&bot, &read_only) == USB_OK && !read_only);
+    disk.reject_mode_all = true; disk.read_only = true;
+    assert(usb_bot_read_only(&bot, &read_only) == USB_OK && read_only);
+    disk.reject_mode_page0 = true; read_only = true;
+    assert(usb_bot_read_only(&bot, &read_only) == USB_OK && !read_only);
+    disk.reject_mode_all = disk.reject_mode_page0 = false;
+    disk.short_mode_sense = true; read_only = true;
+    assert(usb_bot_read_only(&bot, &read_only) == USB_PHASE_ERROR && read_only);
+    disk.short_mode_sense = false;
+    assert(usb_bot_read_only(NULL, &read_only) == USB_INVALID && read_only);
     disk.capacity_bad = true;
     assert(usb_bot_capacity(&bot) == USB_RANGE && !bot.blocks && !bot.block_size);
     disk.capacity_bad = false;
@@ -249,12 +278,15 @@ static void test_bot(void) {
     assert(usb_bot_write(&bot, 8, 1, data, sizeof(data)) == USB_RANGE && disk.commands == commands);
     assert(usb_bot_read(&bot, UINT64_MAX, 1, data, sizeof(data)) == USB_RANGE && disk.commands == commands);
     assert(usb_bot_write(&bot, 0, 2, data, sizeof(data)) == USB_RANGE && disk.commands == commands);
-    disk.csw_stall = true; assert(usb_bot_read(&bot, 2, 1, readback, 512) == USB_OK && disk.clears == 1);
+    unsigned reset_base = disk.resets, clear_base = disk.clears;
+    disk.csw_stall = true;
+    assert(usb_bot_read(&bot, 2, 1, readback, 512) == USB_OK && disk.clears == clear_base + 1);
     disk.bad_tag = true;
-    assert(usb_bot_read(&bot, 2, 1, readback, 512) == USB_PHASE_ERROR && disk.resets == 1 && disk.clears == 3);
+    assert(usb_bot_read(&bot, 2, 1, readback, 512) == USB_PHASE_ERROR &&
+           disk.resets == reset_base + 1 && disk.clears == clear_base + 3);
     disk.bad_tag = false; disk.partial_write = true; unsigned writes = disk.writes;
     assert(usb_bot_write(&bot, 2, 1, data, sizeof(data)) == USB_TIMEOUT);
-    assert(disk.writes == writes + 1 && bot.write_uncertain && disk.resets == 2); /* Never replay. */
+    assert(disk.writes == writes + 1 && bot.write_uncertain && disk.resets == reset_base + 2); /* Never replay. */
     disk.partial_write = false; assert(usb_bot_sync(&bot) == USB_IO && disk.syncs == 2);
     disk.bad_tag = true; disk.reset_fail = true;
     assert(usb_bot_read(&bot, 2, 1, readback, 512) == USB_PHASE_ERROR && bot.needs_reset);

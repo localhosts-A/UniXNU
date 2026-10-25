@@ -19,10 +19,13 @@ from EFI image linking, USB enumeration and hardware qualification.
 
 `UsbCore.c` provides bounded MMIO, qualified 32-bit DMA, USB configuration and
 CDC ACM controls, a nonblocking diagnostic ring, boot keyboard/mouse reports,
-BOT/SCSI capacity/read/write/sync and role quiesce. Failed BOT recovery blocks
-new commands; uncertain writes are never automatically replayed or repaired by
-a later flush. No VID/PID is implicitly allocated: the OS adapter supplies its
-explicit configured identity to CDC initialization.
+BOT/SCSI capacity/read/write/sync, write-protect probing and role quiesce. The
+write-protect probe reads the MODE SENSE(6) device-specific header, tries page
+`0x3f` then page `0`, and treats two rejected pages as writable while preserving
+transport/protocol errors. Failed BOT recovery blocks new commands; uncertain
+writes are never automatically replayed or repaired by a later flush. No VID/PID
+is implicitly allocated: the OS adapter supplies its explicit configured
+identity to CDC initialization.
 
 `UsbHost.c` enumerates checked USB2 descriptors around a controller contract,
 routes boot HID and BOT, and manages USB2 external hubs. Hub state uses standard
@@ -44,8 +47,10 @@ before issuing SYNCHRONIZE CACHE; failure remains retryable but keeps new I/O
 closed. A permanently uncertain BOT write remains unsafe after a later flush and
 requires device teardown/reinitialization. Detach requires the host owner to prove
 the device endpoint/slot and DMA are stopped, even after a disconnect has marked
-the medium offline. The XNU `IOBlockStorageDevice` service and host-child owner still
-need to bind this interface to actual endpoint operations.
+the medium offline. The Dali tree contains a concrete XNU
+`IOBlockStorageDevice` service that consumes this interface; a production host
+child owner still needs to publish it and bind BOT operations to a real xHCI
+endpoint/DMA implementation.
 
 `UsbMtu3Ep0.c` handles real EP0 registers/FIFO with 64-byte packets, short/ZLP
 responses, OUT bounds, W1C acknowledgements and a one-second transaction deadline.
