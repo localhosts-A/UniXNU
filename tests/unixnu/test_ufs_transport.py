@@ -22,6 +22,7 @@ class UfsTransportTests(unittest.TestCase):
                         str(Path(__file__).with_name('ufs_transport_harness.cpp')), '-o', str(library)], check=True)
         cls.lib = ctypes.CDLL(str(library))
         cls.lib.ufs_core_case.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64)]
+        cls.lib.ufs_identity_case.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint8)]
 
     @classmethod
     def tearDownClass(cls):
@@ -116,3 +117,17 @@ class UfsTransportTests(unittest.TestCase):
     def test_wide_capacity_write16_uses_same_lun_and_policy(self):
         out = self.case(35)
         self.assertEqual((out[3],out[8],out[15],out[17],out[19]), (0,0x8a,2,2,0))
+
+    def test_device_identity_uses_serial_descriptor_and_rejects_missing_or_malformed(self):
+        def identity(fault=0):
+            out = (ctypes.c_uint64*8)(); raw = (ctypes.c_uint8*256)()
+            self.lib.ufs_identity_case(fault, out, raw)
+            return list(out), bytes(raw[:out[3]])
+        out, raw = identity()
+        self.assertEqual((out[0],out[1],out[2],out[3],out[6]), (0,0,0,8,0))
+        self.assertEqual(raw, bytes((0x1f,0x3a,6,5,0,ord('D'),0,ord('A'))))
+        for fault in (37,39):
+            out, _ = identity(fault)
+            self.assertEqual((out[2],out[6]), (6,1))
+        out, _ = identity(38)
+        self.assertEqual((out[2],out[6]), (3,0))

@@ -43,6 +43,9 @@ public:
   Transport &operator=(const Transport &) = delete;
   Status start(const Port &, const Dma &);
   Status initializeDevice();
+  // Read the UFS device descriptor's manufacturer ID and serial string as raw
+  // descriptor bytes. Callers should hash this buffer; never log the serial.
+  Status readDeviceIdentity(uint8_t *buffer, uint32_t capacity, uint32_t &bytes);
   Status probe(uint8_t lun);
   Status read(uint8_t lun, uint64_t lba, uint32_t blocks, void *destination);
   Status write(uint8_t lun, uint64_t lba, uint32_t blocks, const void *source);

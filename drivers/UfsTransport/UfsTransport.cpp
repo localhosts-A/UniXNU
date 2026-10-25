@@ -178,6 +178,39 @@ Status Transport::initializeDevice() {
   }
   return fail(Status::Timeout);
 }
+Status Transport::readDeviceIdentity(uint8_t *buffer, uint32_t capacity, uint32_t &bytes) {
+  bytes = 0;
+  if (!buffer || capacity < 4) return Status::Argument;
+  if (!initialized_ || !ready_ || closed_ || poisoned_) return Status::NotReady;
+
+  // UFS 4.0 Device Descriptor: SerialName is byte 22 and ManufacturerId is
+  // bytes 24..25. The string descriptor is returned verbatim so a platform can
+  // hash it without interpreting potentially malformed UTF-16 data.
+  Status status = query(1, 0, 0, 255);
+  if (status != Status::Success) return status;
+  const auto device = cpu() + UcdOffset + ResponseOffset + 32;
+  uint8_t serialIndex = device[22];
+  if (device[0] < 26 || device[1] != 0) return fail(Status::Protocol);
+  if (!serialIndex || serialIndex == 0xff) return Status::Denied;
+  uint8_t manufacturer[2] = {device[24], device[25]};
+
+  status = query(1, 5, serialIndex, 255);
+  if (status != Status::Success) return status;
+  const auto serial = cpu() + UcdOffset + ResponseOffset + 32;
+  uint8_t length = serial[0];
+  if (length < 4 || serial[1] != 5 || ((length - 2) & 1) || uint32_t(length) + 2 > capacity) return fail(Status::Protocol);
+  uint8_t nonzero = 0;
+  for (uint32_t i = 2; i < length; ++i) nonzero |= serial[i];
+  if (!nonzero) return Status::Denied;
+
+  // Binding input = big-endian ManufacturerId + complete serial descriptor.
+  // Keeping the descriptor header/index in the digest prevents aliasing a
+  // different UFS string slot; only the digest should leave the platform.
+  buffer[0] = manufacturer[0]; buffer[1] = manufacturer[1];
+  memcpy(buffer + 2, serial, length);
+  bytes = uint32_t(length) + 2;
+  return Status::Success;
+}
 Status Transport::probe(uint8_t lun) {
   if (lun >= 8) return Status::Argument;
   if (!initialized_) return Status::NotReady;

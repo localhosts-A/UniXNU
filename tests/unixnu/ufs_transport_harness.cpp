@@ -22,11 +22,19 @@ struct Sim {
       if(q[12]==6) {++queriesSet;if(q[13]!=1||q[5]!=0x81)++bad;}
       else if(q[12]==5) {if(q[13]!=1||q[5]!=1)++bad;if(fault==30)r[23]=1;}
       else if(q[12]==1) {
-        if(q[13]!=2||q[14]>=8||q[19]!=255||q[18]||q[5]!=1)++bad;
-        big(r+10,45,2);big(r+18,45,2);r[32]=45;r[33]=2;r[34]=q[14];r[35]=enabled;r[37]=wp;
-        unsigned exponent=0;while((1U<<exponent)<size)++exponent;
-        r[42]=uint8_t(exponent);big(r+43,blocks+(fault==18),8);
-        if(fault==36)r[6]=0xfc;
+        if(q[19]!=255||q[18]||q[5]!=1)++bad;
+        if(q[13]==0&&q[14]==0) {
+          big(r+10,45,2);big(r+18,45,2);r[32]=45;r[33]=fault==37?1:0;
+          r[54]=fault==38?0:7;r[56]=0x1f;r[57]=0x3a;
+        } else if(q[13]==5&&q[14]==7) {
+          big(r+10,6,2);big(r+18,6,2);r[32]=fault==39?5:6;r[33]=5;
+          r[34]=0;r[35]='D';r[36]=0;r[37]='A';
+        } else if(q[13]==2&&q[14]<8) {
+          big(r+10,45,2);big(r+18,45,2);r[32]=45;r[33]=2;r[34]=q[14];r[35]=enabled;r[37]=wp;
+          unsigned exponent=0;while((1U<<exponent)<size)++exponent;
+          r[42]=uint8_t(exponent);big(r+43,blocks+(fault==18),8);
+          if(fault==36)r[6]=0xfc;
+        } else ++bad;
       } else ++bad;
     } else if(q[0]==1) {
       memcpy(lastCdb,q+16,16);
@@ -110,4 +118,13 @@ extern "C" void ufs_core_case(unsigned scenario,uint64_t *out) {
   out[20]=s->rings;out[21]=host.releaseAllowed();host.close();out[22]=host.releaseAllowed();s->regs[0x34/4]=0;out[23]=host.releaseAllowed();s->regs[0x34/4]=1;out[24]=host.releaseAllowed();
   if(host.poisoned()){out[27]=uint32_t(host.completion().status);host.synchronize(2);out[28]=uint32_t(host.completion().status);out[31]=s->rings;}
   out[25]=s->bad;delete[]buffer;delete s;
+}
+extern "C" void ufs_identity_case(unsigned fault,uint64_t *out,uint8_t *identity) {
+  auto s=new Sim;Transport host;s->fault=fault;
+  Dma dma{s->dma,s->pa,UINT64_MAX,DmaBytes};
+  out[0]=uint32_t(host.start(s->port(),dma));
+  out[1]=uint32_t(host.initializeDevice());
+  uint32_t bytes=0;out[2]=uint32_t(host.readDeviceIdentity(identity,256,bytes));
+  out[3]=bytes;out[4]=s->rings;out[5]=s->bad;out[6]=host.poisoned();
+  delete s;
 }
