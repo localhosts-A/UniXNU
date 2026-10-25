@@ -141,6 +141,45 @@ int usb_bot_write(struct usb_bot *, uint64_t lba, uint32_t blocks, const void *,
 int usb_bot_sync(struct usb_bot *);
 void usb_bot_detach(struct usb_bot *);
 
+/* Serialized block requests for IOStorage-style consumers. The caller owns the
+ * BOT, bounce memory, and lock; all three must outlive this adapter. Copy
+ * callbacks move bytes between a possibly segmented storage buffer and the
+ * contiguous BOT bounce area. Offsets are byte offsets from the request start.
+ */
+struct usb_block_buffer {
+    void *context;
+    uint64_t length;
+    int (*copy_to)(void *, uint64_t offset, void *destination, size_t length);
+    int (*copy_from)(void *, uint64_t offset, const void *source, size_t length);
+};
+struct usb_block_io {
+    struct usb_bot *bot;
+    void *lock_context;
+    int (*lock)(void *);
+    void (*unlock)(void *);
+    void *bounce;
+    size_t bounce_size;
+    bool online;
+    bool accepting;
+    bool quiesced;
+    bool detached;
+};
+int usb_block_io_init(struct usb_block_io *, struct usb_bot *, void *bounce, size_t bounce_size,
+                      void *lock_context, int (*lock)(void *), void (*unlock)(void *));
+int usb_block_io_transfer(struct usb_block_io *, bool write, uint64_t lba, uint64_t blocks,
+                          const struct usb_block_buffer *, uint64_t *completed_bytes);
+int usb_block_io_sync(struct usb_block_io *);
+/* Quiesce rejects new I/O before issuing SYNCHRONIZE CACHE. A failed sync leaves
+ * the adapter closed to new work; retry when the failure is recoverable. BOT's
+ * persistent write_uncertain state requires teardown/reinitialization and never
+ * becomes safe merely because a later SYNCHRONIZE CACHE command succeeds.
+ */
+int usb_block_io_quiesce(struct usb_block_io *);
+/* Detach only after the host owner has proved that this device's endpoint/slot
+ * stopped and all controller DMA references are gone. Idempotent after success.
+ */
+int usb_block_io_detach(struct usb_block_io *, bool controller_stopped);
+
 /* Switching is synchronous in a serialized worker. Each callback has its own
  * bounded deadline. An error leaves STOPPED; starting the opposite role is never
  * attempted after failed sync/cancel/stop or uncertain VBUS state. */

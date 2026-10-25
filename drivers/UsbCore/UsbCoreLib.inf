@@ -8,6 +8,7 @@
 [Sources]
   UsbCore.c
   UsbHost.c
+  UsbStorage.c
   UsbMtu3Qmu.c
   UsbMtu3Ep0.c
   UsbMtu3Endpoints.c

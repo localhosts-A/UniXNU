@@ -8,7 +8,7 @@ ownership, native controller workers, OS adapters and hardware qualification
 remain separate work. No firmware/XNU USB functionality is enabled by adding
 these files.
 
-`UsbCore.dec` / `UsbCoreLib.inf` build all six production C units with EDK2.
+`UsbCore.dec` / `UsbCoreLib.inf` build all seven production C units with EDK2.
 `UNIXNU_USB_EDK2` selects explicit EDK2 integer/size/bool types through
 `UsbTypes.h`; ordinary host and XNU compilation keeps standard C headers.
 This creates a real AArch64 archive, without installing a controller driver.
@@ -35,6 +35,17 @@ state. A controller clock callback is required for hub timing. The owner must
 quiesce children before stopping or disconnecting a hub; overcurrent remains
 latched until the owner stops and restarts the hub. This coordinator still does
 not implement an xHCI engine or create OS device services.
+
+`UsbStorage.c` serializes block requests around a BOT device using caller-owned
+lock and bounce-buffer callbacks. It chunks large `IOStorage` requests to the
+BOT 32-bit transfer limit, checks block and byte ranges, reports only fully
+completed chunks, and never retries a failed write. Quiesce closes admission
+before issuing SYNCHRONIZE CACHE; failure remains retryable but keeps new I/O
+closed. A permanently uncertain BOT write remains unsafe after a later flush and
+requires device teardown/reinitialization. Detach requires the host owner to prove
+the device endpoint/slot and DMA are stopped, even after a disconnect has marked
+the medium offline. The XNU `IOBlockStorageDevice` service and host-child owner still
+need to bind this interface to actual endpoint operations.
 
 `UsbMtu3Ep0.c` handles real EP0 registers/FIFO with 64-byte packets, short/ZLP
 responses, OUT bounds, W1C acknowledgements and a one-second transaction deadline.
