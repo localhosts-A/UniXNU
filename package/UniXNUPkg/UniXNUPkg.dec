@@ -33,6 +33,9 @@
   ## Optional loader for `type = "xnu"` entries. DarwinBoot implements it.
   gUniXNULoaderProtocolGuid   = { 0x0f0a492e, 0x5a6a, 0x49f6, { 0xa1, 0xbf, 0x74, 0x3c, 0x87, 0xab, 0x1c, 0xfe } }
 
+  ## Optional storage ownership handoff before the loader's final memory map.
+  gUniXNUStorageQuiesceProtocolGuid = { 0x7b5cf50b, 0xae2b, 0x4ed6, { 0x8b, 0x8c, 0x9a, 0x8a, 0xc9, 0xd6, 0x11, 0x6f } }
+
 [PcdsFixedAtBuild]
   ## DEBUG() level used for UniXNU's own log lines. Platforms whose debug
   #  output shares the screen with the menu can lower it to DEBUG_VERBOSE.
