@@ -26,6 +26,10 @@ def main():
              ('resources', ['NativeMaliResources.cpp']),
              ('csf', ['NativeMaliCsf.cpp']),
              ('hardware', ['NativeMaliHardware.cpp']),
+             ('platform', ['NativeMaliPlatform.cpp', 'NativeMaliResources.cpp']),
+             ('boot', ['NativeMaliBoot.cpp', 'NativeMaliSha256.cpp', 'NativeMaliCsf.cpp', 'NativeMaliHardware.cpp',
+                       'NativeMaliPlatform.cpp', 'NativeMaliResources.cpp', 'NativeMaliMmu.cpp',
+                       'NativeMaliFirmware.cpp', 'NativeMaliFirmwareMemory.cpp', 'NativeMaliFirmwareSetup.cpp']),
              ('firmware-memory', ['NativeMaliMmu.cpp', 'NativeMaliFirmware.cpp',
                                   'NativeMaliFirmwareMemory.cpp', 'NativeMaliFirmwareSetup.cpp'])]
     report = {'schema': 1, 'compiler': subprocess.check_output([compiler, '--version'], text=True),

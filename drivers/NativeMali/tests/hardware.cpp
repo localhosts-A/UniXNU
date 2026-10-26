@@ -27,12 +27,12 @@ struct Registers {
         else if (off == 0x1004) r.words[0x1000] &= ~value;
         else if (off == 0x2004) r.words[0x2000] &= ~value;
         else r.words[off] = value;
-        if (off == 0x30 && value == 0x101 && r.resetCompletes) r.words[0x20] |= 1u << 8;
+        if (off == 0x30 && value == 0x101 && r.resetCompletes) { r.words[0x20] |= 1u << 8; r.words[0x704] = 0; }
         if (off == 0x30 && value == 0x3304 && r.flushCompletes) r.words[0x20] |= 1u << 17;
         if (off == 0x1a0 || off == 0x1a4) r.words[off - 0x40] |= value;
         if (off == 0x190 || off == 0x194) r.words[off - 0x40] |= value;
-        if (off == 0x700 && value == 2 && r.bootCompletes) r.words[0x1000] |= Hardware::GlobalInterrupt;
-        if (off == 0x700 && value == 0 && r.haltCompletes) r.words[0x704] |= 2;
+        if (off == 0x700 && value == 2) { r.words[0x704] = 1; if (r.bootCompletes) r.words[0x1000] |= Hardware::GlobalInterrupt; }
+        if (off == 0x700 && value == 0 && r.haltCompletes) r.words[0x704] = 0;
         return true;
     }
     static void delay(void *cookie, uint32_t us) { static_cast<Registers *>(cookie)->delays += us; }

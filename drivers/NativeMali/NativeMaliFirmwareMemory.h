@@ -41,6 +41,7 @@ public:
     bool read32(uint32_t virtualAddress, uint32_t *);
     bool write32(uint32_t virtualAddress, uint32_t);
     bool prepared() const { return prepared_; }
+    bool ownsStorage() const { return prepared_ || count_; }
     size_t pageCount() const { return prepared_ ? totalPages_ : 0; }
     size_t skippedProtected() const { return skipped_; }
 private:

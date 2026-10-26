@@ -56,6 +56,11 @@ HardwareResult Hardware::softReset(uint32_t us) {
     if (result != HardwareResult::Ok) return result;
     if (!write(0x24, 1u << 8) || !write(0x1004, 0xffffffff) || !write(0x2004, 0xffffffff))
         return HardwareResult::Access;
+    // AUTO may survive some reset paths. Explicitly disable the MCU and require
+    // its disabled status before allowing DMA memory to be reclaimed.
+    if (!write(0x700,0)) return HardwareResult::Access;
+    const auto stopped = wait(0x704,0xffffffff,0,us);
+    if (stopped != HardwareResult::Ok) return stopped;
     configured_ = touched_ = 0; running_ = false; reset_ = true; return HardwareResult::Ok;
 }
 HardwareResult Hardware::powerL2(uint32_t us) {
@@ -141,7 +146,7 @@ HardwareResult Hardware::haltMcu(uint32_t us) {
     if (!attached_ || !running_) return HardwareResult::State;
     if (!timeoutValid(us)) return HardwareResult::Invalid;
     if (!write(0x700, 0)) return HardwareResult::Access;
-    const auto result = wait(0x704, 2, 2, us);
+    const auto result = wait(0x704, 0xffffffff, 0, us);
     if (result == HardwareResult::Ok) running_ = false;
     return result;
 }
