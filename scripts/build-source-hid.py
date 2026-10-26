@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Compile pinned public IOHIDFamily-Embedded sources with the source XNU ABI.
+"""Compile pinned public IOHIDFamily sources with the source XNU ABI.
 
 Real IIG definitions produce the DriverKit bridge; no original kernelcache,
 replacement class declarations or absolute-address symbol bindings are used.
+The Embedded source phase is extended only by the real system-event support
+units required by keyboard, pointing, and IOHIDSystem event delivery.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -38,10 +40,40 @@ UNSUPPORTED_HID_FEATURES = (
 OUT = ROOT / 'build/source-hid'
 ARCHIVE = OUT / 'libIOHIDFamily.a'
 PHASE = '84D292320CC90C8E00698218'
+SYSTEM_SUPPORT_PHASE = '848E563B0CC55C7800D5BE22'
 IIG_NAMES = ('IOHIDInterface', 'IOHIDDevice', 'IOHIDEventService')
 CLASSES = ('IOHIDDevice', 'IOHIDInterface', 'IOHIDElementPrivate',
            'IOHIDElementContainer', 'IOHIDDeviceElementContainer',
-           'IOHIDEvent', 'IOHIDEventService', 'IOHIDEventDriver')
+           'IOHIDEvent', 'IOHIDEventService', 'IOHIDEventDriver',
+           'IOHIDKeyboard', 'IOHIDConsumer', 'IOHIDPointing', 'IOHIDSystem',
+           'IOHIKeyboard', 'IOHIPointing')
+# These real units belong to the pinned IOHIDFamily target's Sources phase.
+# The Embedded variant omits the system keyboard/pointer shims even though its
+# event/device units still reference them. Keep this list explicit so new files
+# cannot silently enter the source-only archive through a recursive glob.
+SYSTEM_SUPPORT_SOURCES = (
+    'IOHIDFamily/IOHIDConsumer.cpp',
+    'IOHIDFamily/IOHIDKeyboard.cpp',
+    'IOHIDFamily/IOHIDPointing.cpp',
+    'IOHIDFamily/Cosmo_USB2ADB.c',
+    'IOHIDSystem/IOFixed64.cpp',
+    'IOHIDSystem/IOFixedPoint64.cpp',
+    'IOHIDSystem/IOHIDDeviceShim.cpp',
+    'IOHIDFamily/IOHIDEventServiceQueue.cpp',
+    'IOHIDSystem/IOHIDKeyboardDevice.cpp',
+    'IOHIDSystem/IOHIDKeyboardEventDevice.cpp',
+    'IOHIDSystem/IOHIDPointingDevice.cpp',
+    'IOHIDSystem/IOHIDPointingEventDevice.cpp',
+    'IOHIDSystem/IOHIDPrivate.cpp',
+    'IOHIDSystem/IOHIDSystem.cpp',
+    'IOHIDSystem/IOHIDSystemCursorHelper.cpp',
+    'IOHIDSystem/IOHIDUserClient.cpp',
+    'IOHIDSystem/IOHIDWorkLoop.cpp',
+    'IOHIDSystem/IOHIDevice.cpp',
+    'IOHIDSystem/IOHIKeyboard.cpp',
+    'IOHIDSystem/IOHIKeyboardMapper.cpp',
+    'IOHIDSystem/IOHIPointing.cpp',
+)
 GENERATED_EVENT_HEADERS = ('IOHIDEventTypes.h', 'IOHIDEventFieldDefs.h',
                            'IOHIDEventStructDefs.h', 'IOHIDEventMacroDefs.h')
 PRIVATE_SOURCE = 'IOHIDEventServiceFastPathUserClient.cpp'
@@ -83,6 +115,26 @@ def embedded_sources(source=SOURCE):
         if len(found) != 1:
             raise ValueError('Cannot resolve exact Embedded source: ' + name)
         result.append(found[0])
+    return result
+
+def system_support_sources(source=SOURCE):
+    """Resolve a reviewed support closure from the exact pinned family target."""
+    project = (source / 'IOHIDFamily.xcodeproj/project.pbxproj').read_text()
+    match = re.search(r'\b' + SYSTEM_SUPPORT_PHASE + r' /\* Sources \*/ = \{(.*?)\n\s*\};', project, re.S)
+    if not match or 'isa = PBXSourcesBuildPhase;' not in match[1]:
+        raise ValueError('Pinned IOHIDFamily support source phase is absent')
+    names = re.findall(r'/\* ([^*]+) in Sources \*/', match[1])
+    if len(names) != len(set(names)):
+        raise ValueError('Pinned IOHIDFamily support source phase has duplicate entries')
+    missing = sorted({Path(name).name for name in SYSTEM_SUPPORT_SOURCES} - set(names))
+    if missing:
+        raise ValueError('Pinned IOHIDFamily target no longer declares required support units: ' + ', '.join(missing))
+    result = []
+    for relative in SYSTEM_SUPPORT_SOURCES:
+        path = source / relative
+        if not path.is_file():
+            raise ValueError('Pinned IOHIDFamily support source is missing: ' + relative)
+        result.append(path)
     return result
 
 def prepare_headers(source, out, macos_sdk, event_headers=None):
@@ -139,7 +191,7 @@ def audit_inputs(source):
     revision = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
     if revision != REVISION or subprocess.check_output(['git', '-C', source, 'status', '--porcelain'], text=True).strip():
         raise ValueError('HID input audit requires the clean fixed source revision')
-    inputs = embedded_sources(source)
+    inputs = embedded_sources(source) + system_support_sources(source)
     header_source = source.parent / 'IOHIDEventHeaders'
     header_revision = verify_event_headers(header_source)
     sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
@@ -153,6 +205,8 @@ def audit_inputs(source):
               'kernel_personality_patch_sha256': digest(PERSONALITY_PATCH),
               'protected_device_access_policy': 'Dali-owned access property conservatively gates raw keyboard/keypad/mouse/touchpad IOHIDLibUserClient admission; kernel IOHIDEventDriver delivery remains available; no TCC consent UI is provided',
               'declaration_inputs': imported,
+              'support_source_phase': SYSTEM_SUPPORT_PHASE,
+              'support_source_files': list(SYSTEM_SUPPORT_SOURCES),
               'source_units': [{'path': str(p.relative_to(source)), 'sha256': digest(p)} for p in inputs],
               'unavailable_private_source': PRIVATE_SOURCE, 'source_archive_built': False,
               'hardware_qualified': False}
@@ -163,7 +217,7 @@ def build():
     revision = subprocess.check_output(['git', '-C', SOURCE, 'rev-parse', 'HEAD'], text=True).strip()
     if revision != REVISION or subprocess.check_output(['git', '-C', SOURCE, 'status', '--porcelain'], text=True).strip():
         raise ValueError('IOHIDFamily must be a clean checkout of the fixed revision')
-    inputs = embedded_sources()
+    inputs = embedded_sources() + system_support_sources()
     header_revision = verify_event_headers(EVENT_SOURCE)
     helper = storage_helpers()
     objects = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
@@ -181,7 +235,7 @@ def build():
     for patch in (PUBLIC_PATCH, PRIVATE_COMPAT_PATCH):
         subprocess.run(['git', 'apply', '--check', str(patch)], cwd=source_tree, check=True)
         subprocess.run(['git', 'apply', str(patch)], cwd=source_tree, check=True)
-    inputs = embedded_sources(source_tree)
+    inputs = embedded_sources(source_tree) + system_support_sources(source_tree)
     macos_sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
     include, sdk_inputs = prepare_headers(source_tree, OUT, macos_sdk)
     xnu = ROOT / '.cache/xnu-work'
@@ -261,7 +315,9 @@ def build():
     report = {'source_revision': revision, 'event_header_revision': header_revision,
               'event_schema': EVENT_SCHEMA, 'unsupported_event_features': list(UNSUPPORTED_EVENTS),
               'unsupported_hid_features': list(UNSUPPORTED_HID_FEATURES),
-              'embedded_phase': PHASE, 'objects': rows, 'iig': generated_rows,
+              'embedded_phase': PHASE, 'support_source_phase': SYSTEM_SUPPORT_PHASE,
+              'support_source_files': list(SYSTEM_SUPPORT_SOURCES),
+              'objects': rows, 'iig': generated_rows,
               'public_port_patch_sha256': digest(PUBLIC_PATCH),
               'private_compatibility_patch_sha256': digest(PRIVATE_COMPAT_PATCH),
               'kernel_personality_patch_sha256': digest(PERSONALITY_PATCH),
@@ -272,7 +328,7 @@ def build():
               'source_archive_built': True, 'kernel_link_verified': False,
               'hid_runtime_qualified': False, 'hardware_qualified': False}
     (OUT / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
-    print('PASS: actual public IOHIDFamily-Embedded archive built; kernel link/runtime require verification')
+    print('PASS: actual public IOHIDFamily Embedded and system-support archive built; kernel link/runtime require verification')
 
 def verify_kernel(kernel):
     report = json.loads((OUT / 'build-report.json').read_text())
@@ -282,6 +338,8 @@ def verify_kernel(kernel):
         raise ValueError('Source HID compatibility patch/report mismatch')
     if report.get('kernel_personality_patch_sha256') != digest(PERSONALITY_PATCH):
         raise ValueError('Source HID personality patch/report mismatch')
+    if report.get('support_source_phase') != SYSTEM_SUPPORT_PHASE or report.get('support_source_files') != list(SYSTEM_SUPPORT_SOURCES):
+        raise ValueError('Source HID support source manifest mismatch')
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', kernel], text=True)
     undefined = subprocess.check_output(['xcrun', 'nm', '-u', kernel], text=True)
     for name in CLASSES:

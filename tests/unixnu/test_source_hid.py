@@ -16,6 +16,39 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from unixnu import cli
 
 class SourceHidTests(unittest.TestCase):
+    def test_system_support_sources_are_resolved_from_the_fixed_family_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'IOHIDFamily'
+            source.mkdir()
+            files = '\n'.join('    /* ' + Path(name).name + ' in Sources */,'
+                              for name in HID.SYSTEM_SUPPORT_SOURCES)
+            project = source / 'IOHIDFamily.xcodeproj/project.pbxproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                HID.SYSTEM_SUPPORT_PHASE + ' /* Sources */ = {\n'
+                '    isa = PBXSourcesBuildPhase;\n'
+                '    files = (\n' + files + '\n    );\n};\n')
+            for name in HID.SYSTEM_SUPPORT_SOURCES:
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('/* pinned source fixture */\n')
+            resolved = HID.system_support_sources(source)
+            self.assertEqual([p.relative_to(source).as_posix() for p in resolved],
+                             list(HID.SYSTEM_SUPPORT_SOURCES))
+
+    def test_system_support_sources_reject_a_missing_target_member(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'IOHIDFamily'
+            source.mkdir()
+            project = source / 'IOHIDFamily.xcodeproj/project.pbxproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                HID.SYSTEM_SUPPORT_PHASE + ' /* Sources */ = {\n'
+                '    isa = PBXSourcesBuildPhase;\n'
+                '    files = (\n    );\n};\n')
+            with self.assertRaisesRegex(ValueError, 'required support units'):
+                HID.system_support_sources(source)
+
     def test_disabled_mode_never_invokes_apple_tools(self):
         output = io.StringIO()
         with patch.dict(HID.os.environ, {'XNU_SOURCE_HID_FAMILY': '0'}), \
@@ -96,6 +129,7 @@ class SourceHidTests(unittest.TestCase):
         baseline = (ROOT / 'scripts/build-xnu-4k-baseline.sh').read_text()
         self.assertIn('SOURCE_HID_FAMILY=${XNU_SOURCE_HID_FAMILY:-0}', baseline)
         self.assertIn('"$SOURCE_HID_FAMILY" "$ROOT/build/source-hid/libIOHIDFamily.a"', baseline)
+        self.assertIn('KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES ${XNU_EXTRA_LD_ARCHIVES:-}"', baseline)
 
 if __name__ == '__main__':
     unittest.main()
