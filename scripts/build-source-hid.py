@@ -154,6 +154,7 @@ def build():
     OUT.mkdir(parents=True, exist_ok=True)
     ARCHIVE.unlink(missing_ok=True)
     (OUT / 'build-report.json').unlink(missing_ok=True)
+    (OUT / 'compile-failures.json').unlink(missing_ok=True)
     source_tree = OUT / 'source'
     if source_tree.exists():
         shutil.rmtree(source_tree)
