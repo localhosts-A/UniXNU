@@ -19,6 +19,7 @@ typedef _Bool bool;
 #define false 0
 #endif
 #define UINT16_MAX MAX_UINT16
+#define UINT8_MAX MAX_UINT8
 #define UINT32_MAX MAX_UINT32
 #define UINT64_MAX MAX_UINT64
 #define SIZE_MAX MAX_UINTN

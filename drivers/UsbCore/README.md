@@ -36,8 +36,16 @@ metadata. Failed child attach callbacks remain retryable after the hardware rese
 deadline; unplug or stop delivers DETACH so the owner can clean partial child
 state. A controller clock callback is required for hub timing. The owner must
 quiesce children before stopping or disconnecting a hub; overcurrent remains
-latched until the owner stops and restarts the hub. This coordinator still does
-not implement an xHCI engine or create OS device services.
+latched until the owner stops and restarts the hub.
+
+`UsbXhci.c` is the portable low-level xHCI foundation: it validates capability
+register windows and USB2 Supported Protocol port ranges without writing MMIO,
+and owns coherent DMA32 command/transfer-ring and event-ring memory. It publishes
+TRBs with cycle ordering, tracks completion pointers, validates event cycles and
+retains memory after synchronization or completion faults until the caller
+provides a fresh stop proof. It does not start the controller, issue doorbells,
+translate IRQs, provide a DMA/IOMMU mapping, populate `usb_host_ops`, or publish
+HID/BOT services. Those runtime owners remain required.
 
 `UsbStorage.c` serializes block requests around a BOT device using caller-owned
 lock and bounce-buffer callbacks. It chunks large `IOStorage` requests to the
