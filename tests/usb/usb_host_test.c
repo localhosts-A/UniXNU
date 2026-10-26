@@ -325,6 +325,34 @@ static void test_optional_class_and_errors(void)
     assert(device.state == USB_HOST_EMPTY && events.key_count == 2 && !events.down[1]);
 }
 
+/* Decode HID short-item sizes/counts independently of the report reader so
+ * descriptor edits cannot silently change the IOHID input buffer layout. */
+static void check_boot_descriptor_layout(const uint8_t *bytes, size_t length,
+                                         uint32_t expected_input_bits)
+{
+    uint32_t report_size = 0, report_count = 0, input_bits = 0;
+    unsigned collections = 0;
+    for (size_t at = 0; at < length;) {
+        uint8_t prefix = bytes[at++];
+        assert(prefix != 0xfe); /* no long items */
+        size_t size = prefix & 3u; if (size == 3) size = 4;
+        assert(size <= length - at);
+        uint32_t value = 0;
+        for (size_t i = 0; i < size; ++i) value |= (uint32_t)bytes[at+i] << (i*8);
+        at += size;
+        unsigned type = (prefix >> 2) & 3u, tag = prefix >> 4;
+        if (type == 1 && tag == 7) report_size = value;
+        else if (type == 1 && tag == 9) report_count = value;
+        else if (type == 1 && tag == 8) assert(0 && "boot descriptors have no Report IDs");
+        else if (type == 0 && tag == 8) {
+            assert(report_size && report_size <= 8 && report_count <= 8);
+            input_bits += report_size * report_count;
+        } else if (type == 0 && tag == 10) ++collections;
+        else if (type == 0 && tag == 12) { assert(collections); --collections; }
+    }
+    assert(!collections && input_bits == expected_input_bits);
+}
+
 static void test_copied_boot_reports(void)
 {
     struct mock_controller m = {0}; struct usb_host_device device = {0};
@@ -370,9 +398,11 @@ static void test_copied_boot_reports(void)
     const uint8_t *descriptor = NULL; size_t length = 0;
     assert(usb_host_boot_report_descriptor(USB_HOST_HID_KEYBOARD, &descriptor, &length) == USB_OK);
     assert(descriptor && length && descriptor[length-1] == 0xc0);
+    check_boot_descriptor_layout(descriptor, length, 64);
     const uint8_t *keyboard = descriptor; size_t keyboard_length = length;
     assert(usb_host_boot_report_descriptor(USB_HOST_HID_MOUSE, &descriptor, &length) == USB_OK);
     assert(descriptor && length && descriptor[length-1] == 0xc0 && descriptor != keyboard);
+    check_boot_descriptor_layout(descriptor, length, 24);
     assert(usb_host_boot_report_descriptor((enum usb_host_hid_kind)9, &descriptor, &length) == USB_UNSUPPORTED);
     assert(usb_host_boot_report_descriptor(USB_HOST_HID_KEYBOARD, NULL, &length) == USB_INVALID);
     assert(usb_host_boot_report_descriptor(USB_HOST_HID_KEYBOARD, &descriptor, &length) == USB_OK);

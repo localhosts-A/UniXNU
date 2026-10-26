@@ -5,6 +5,7 @@ Real IIG definitions produce the DriverKit bridge; no original kernelcache,
 replacement class declarations or absolute-address symbol bindings are used.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.util
 import json
@@ -200,8 +201,7 @@ def build():
         generated_rows.append({'definition': str(definition.relative_to(ROOT)), 'definition_sha256': digest(definition),
                                'header_sha256': digest(header), 'implementation_sha256': digest(implementation),
                                'command': command})
-    compiled, rows = [], []
-    for source in [p for p in inputs if p.suffix != '.iig'] + [generated / (name + '.iig.cpp') for name in IIG_NAMES]:
+    def compile_unit(source):
         record = c if source.suffix == '.c' else cpp
         obj = OUT / (source.name + '.o')
         obj.unlink(missing_ok=True)
@@ -211,11 +211,27 @@ def build():
         command += ['-DAPPLE_KEXT_ASSERTIONS=1', '-DDISPATCH_MACH_SPI=1',
                     '-DOS_CRASH_ENABLE_EXPERIMENTAL_LIBTRACE=1', '-DIOHIDFAMILY_104187687_HIDE=1']
         log = obj.with_suffix('.log')
-        helper.run_logged(command, Path(record['directory']), log)
-        helper.validate_object(obj)
-        compiled.append(obj)
-        rows.append({'source': str(source.relative_to(ROOT)), 'source_sha256': digest(source),
-                     'object_sha256': digest(obj), 'log_sha256': digest(log), 'command': command})
+        (OUT / (source.name + '.command.json')).write_text(json.dumps(command, indent=2) + '\n')
+        row = {'source': str(source.relative_to(ROOT)), 'source_sha256': digest(source), 'command': command}
+        try:
+            helper.run_logged(command, Path(record['directory']), log)
+            helper.validate_object(obj)
+        except (RuntimeError, ValueError) as error:
+            return obj, dict(row, error=str(error), log_sha256=digest(log) if log.exists() else None)
+        return obj, dict(row, object_sha256=digest(obj), log_sha256=digest(log))
+
+    units = [p for p in inputs if p.suffix != '.iig'] + [generated / (name + '.iig.cpp') for name in IIG_NAMES]
+    # Compile every independent source so one CI pass exposes the complete set
+    # of public-header gaps. Any failed unit still refuses archive creation.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(compile_unit, units))
+    failures = [row for _, row in results if 'error' in row]
+    (OUT / 'compile-failures.json').write_text(json.dumps(failures, indent=2) + '\n')
+    if failures:
+        raise RuntimeError('HID source compile failures: ' + str(len(failures)) + '\n' +
+                           '\n'.join(row['source'] + ': ' + row['error'][:1200] for row in failures))
+    compiled = [obj for obj, _ in results]
+    rows = [row for _, row in results]
     subprocess.run(['xcrun', 'ar', 'rcs', str(ARCHIVE), *map(str, compiled)], check=True)
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', ARCHIVE], text=True)
     for name in CLASSES:
