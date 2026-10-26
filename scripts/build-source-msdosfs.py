@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,8 +88,17 @@ def build():
     ARCHIVE.unlink(missing_ok=True)
     (OUT / 'build-report.json').unlink(missing_ok=True)
     (OUT / 'compile-failures.json').unlink(missing_ok=True)
+    sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip())
+    conditions = sdk / 'usr/include/TargetConditionals.h'
+    if not conditions.is_file():
+        raise ValueError('Missing actual iPhoneOS SDK TargetConditionals.h: ' + str(conditions))
+    include = OUT / 'include'
+    include.mkdir(exist_ok=True)
+    shutil.copyfile(conditions, include / conditions.name)
+    declaration_inputs = [{'source': str(conditions), 'sha256': digest(conditions)}]
+    (OUT / 'sdk-inputs.json').write_text(json.dumps(declaration_inputs, indent=2) + '\n')
     xnu = ROOT / '.cache/xnu-work'
-    includes = [SOURCE / SOURCE_DIR, xnu / 'bsd', xnu / 'iokit', xnu / 'osfmk']
+    includes = [include, SOURCE / SOURCE_DIR, xnu / 'bsd', xnu / 'iokit', xnu / 'osfmk']
 
     def compile_unit(source):
         obj = OUT / (source.name + '.o')
@@ -120,6 +130,7 @@ def build():
               'source_files': list(SOURCES), 'objects': [row for _, row in results],
               'registration_source_sha256': digest(REGISTRATION), 'registration_patch_sha256': digest(PATCH),
               'compile_record_sha256': digest(record_path), 'archive_sha256': digest(ARCHIVE),
+              'declaration_inputs': declaration_inputs,
               'source_archive_built': True, 'kernel_link_verified': False,
               'registration_runtime_qualified': False, 'fat32_runtime_qualified': False,
               'hardware_qualified': False}
