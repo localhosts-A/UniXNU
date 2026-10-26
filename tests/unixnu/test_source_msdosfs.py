@@ -53,16 +53,20 @@ class SourceMsdosfsTests(unittest.TestCase):
                 FAT.main([])
 
     def test_every_real_vfs_symbol_must_be_defined_and_resolved_exactly(self):
-        defined = '\n'.join('00000000 T ' + name for name in FAT.SYMBOLS)
-        FAT.check_symbols(defined)
+        defined = '\n'.join('00000000 T ' + name for name in FAT.GLOBAL_SYMBOLS)
+        private_defined = '\n'.join('00000000 (__DATA,__const) private external ' + name
+                                     for name in FAT.PRIVATE_SYMBOLS)
+        FAT.check_symbols(defined, private_defined=private_defined)
         for name in FAT.SYMBOLS:
             with self.subTest(name=name):
+                global_defs = '\n'.join('00000000 T ' + item for item in FAT.GLOBAL_SYMBOLS
+                                         if item != name)
+                private_defs = '\n'.join('00000000 (__DATA,__const) private external ' + item
+                                          for item in FAT.PRIVATE_SYMBOLS if item != name)
                 with self.assertRaisesRegex(ValueError, 'Missing resolved'):
-                    FAT.check_symbols('\n'.join('00000000 T ' + item if item != name
-                                                else '00000000 T ' + item + '_suffix'
-                                                for item in FAT.SYMBOLS))
+                    FAT.check_symbols(global_defs, private_defined=private_defs)
                 with self.assertRaisesRegex(ValueError, 'Missing resolved'):
-                    FAT.check_symbols(defined, 'U ' + name)
+                    FAT.check_symbols(defined, 'U ' + name, private_defined)
 
     def test_feed_is_fetched_only_for_the_selected_kernel_profile(self):
         modules = {('refer', 'msdosfs'): SimpleNamespace(name='msdosfs', kind='refer', origin='git')}

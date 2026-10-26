@@ -31,6 +31,8 @@ SYMBOLS = ('_msdosfs_module_start', '_msdosfs_vfsops',
            '_msdosfs_vnodeop_opv_desc', '_msdosfs_fat_vnodeop_opv_desc',
            '_msdosfs_vfs_mount', '_msdosfs_vfs_sync', '_msdosfs_vfs_unmount',
            '_source_msdosfs_register')
+PRIVATE_SYMBOLS = ('_msdosfs_fat_vnodeop_opv_desc',)
+GLOBAL_SYMBOLS = tuple(name for name in SYMBOLS if name not in PRIVATE_SYMBOLS)
 
 
 def digest(path):
@@ -66,13 +68,23 @@ def c_record(objects):
     return path, record
 
 
-def check_symbols(defined, undefined=''):
+def symbol_names(output):
+    return {line.split()[-1] for line in output.splitlines() if line.split()}
+
+
+def check_symbols(defined, undefined='', private_defined=''):
     # Compare exact final tokens, so e.g. a function name embedded in a longer
-    # symbol or debug metadata cannot satisfy a missing implementation.
-    definitions = {line.split()[-1] for line in defined.splitlines() if line.split()}
-    unresolved = {line.split()[-1] for line in undefined.splitlines() if line.split()}
-    for name in SYMBOLS:
+    # symbol or debug metadata cannot satisfy a missing implementation. The FAT
+    # vnodeop descriptor is __private_extern__ upstream, so it is verified from
+    # the complete Mach-O symbol listing instead of the global-only listing.
+    definitions = symbol_names(defined)
+    private_definitions = symbol_names(private_defined)
+    unresolved = symbol_names(undefined)
+    for name in GLOBAL_SYMBOLS:
         if name not in definitions or name in unresolved:
+            raise ValueError('Missing resolved source msdosfs implementation: ' + name)
+    for name in PRIVATE_SYMBOLS:
+        if name not in private_definitions or name in unresolved:
             raise ValueError('Missing resolved source msdosfs implementation: ' + name)
 
 
@@ -131,7 +143,8 @@ def build():
                            '\n'.join(row['source'] + ': ' + row['error'][:1200] for row in failures))
     subprocess.run(['xcrun', 'ar', 'rcs', ARCHIVE, *[obj for obj, _ in results]], check=True)
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', ARCHIVE], text=True)
-    check_symbols(defined)
+    private_defined = subprocess.check_output(['xcrun', 'nm', '-mU', ARCHIVE], text=True)
+    check_symbols(defined, private_defined=private_defined)
     report = {'source_revision': revision, 'source_phase': PHASE,
               'source_files': list(SOURCES), 'objects': [row for _, row in results],
               'registration_source_sha256': digest(REGISTRATION), 'registration_patch_sha256': digest(PATCH),
@@ -152,13 +165,25 @@ def verify_kernel(kernel):
             report.get('registration_patch_sha256') != digest(PATCH)):
         raise ValueError('Source msdosfs archive/registration/report mismatch')
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', kernel], text=True)
+    private_defined = subprocess.check_output(['xcrun', 'nm', '-mU', kernel], text=True)
     undefined = subprocess.check_output(['xcrun', 'nm', '-u', kernel], text=True)
-    check_symbols(defined, undefined)
+    definitions = symbol_names(defined)
+    private_definitions = symbol_names(private_defined)
+    unresolved = symbol_names(undefined)
+    symbol_report = {
+        'kernel_sha256': digest(kernel),
+        'global_definitions': {name: name in definitions for name in GLOBAL_SYMBOLS},
+        'private_definitions': {name: name in private_definitions for name in PRIVATE_SYMBOLS},
+        'unresolved_required': sorted(set(SYMBOLS) & unresolved),
+    }
+    (OUT / 'kernel-symbol-report.json').write_text(json.dumps(symbol_report, indent=2) + '\n')
+    check_symbols(defined, undefined, private_defined)
     caller = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o'
     references = subprocess.check_output(['xcrun', 'nm', '-u', caller], text=True)
     if '_source_msdosfs_register' not in {line.split()[-1] for line in references.splitlines() if line.split()}:
         raise ValueError('Compiled bsd_init does not call source msdosfs registration')
     report.update(kernel_link_verified=True, kernel_sha256=digest(kernel),
+                  kernel_symbols_verified=symbol_report,
                   registration_caller_sha256=digest(caller), registration_hook_compiled=True)
     (OUT / 'kernel-link-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print('PASS: source msdosfs implementations and VFS registration hook linked; FAT32 runtime remains unqualified')
