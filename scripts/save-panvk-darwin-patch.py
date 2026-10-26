@@ -6,6 +6,8 @@ production driver. Neither source tree is reset or overwritten by this script.
 """
 import difflib
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 
@@ -13,8 +15,40 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('panvk_prepare', ROOT/'scripts/prepare-panvk-darwin.py')
 prepare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
-prepare.prepare(ROOT)
 baseline, source = ROOT/'.cache/panvk-mesa', ROOT/'.cache/panvk-mesa-darwin'
+state = ROOT/'.cache/panvk-darwin-prepared.json'
+
+
+def identity():
+    pins = json.loads((ROOT/'scripts/data/mali-g925-inputs.json').read_text())
+    reference = ROOT/'.cache/panvk-kbase-android'
+    prepare.checkout(reference,pins['panvk'],False)
+    prepare.checkout(source,pins['mesa'],False)
+    if subprocess.check_output(['git','-C',reference,'status','--porcelain'],text=True).strip():
+        raise SystemExit('Pinned PanVK reference checkout has local modifications')
+    if json.loads((reference/'sources.lock').read_text())['mesaCommit'] != pins['mesa']['commit']:
+        raise SystemExit('PanVK source lock differs from the pinned Mesa commit')
+    inputs={}
+    for family in pins['panvk']['families']:
+        directory=reference/'patches'/family
+        for patch in sorted(directory.glob('*.patch')):
+            inputs[str(patch.relative_to(reference))]=hashlib.sha256(patch.read_bytes()).hexdigest()
+        for file in sorted((directory/'files').rglob('*')):
+            if file.is_file() and file.name!='README':
+                inputs[str(file.relative_to(reference))]=hashlib.sha256(file.read_bytes()).hexdigest()
+    native=ROOT/'patches/panvk-darwin'
+    for patch in sorted(native.glob('*.patch')):
+        inputs[str(patch.relative_to(ROOT))]=hashlib.sha256(patch.read_bytes()).hexdigest()
+    for file in sorted((native/'files').rglob('*')):
+        if file.is_file():inputs[str(file.relative_to(ROOT))]=hashlib.sha256(file.read_bytes()).hexdigest()
+    abi=ROOT/'drivers/NativeMali/NativeMaliABI.h'
+    inputs[str(abi.relative_to(ROOT))]=hashlib.sha256(abi.read_bytes()).hexdigest()
+    return {'pins':pins,'inputs':inputs}
+
+
+recorded=json.loads(state.read_text())
+if recorded['identity']!=identity():
+    raise SystemExit('Prepared source identity differs from current pinned inputs; preserve and inspect it')
 tracked = subprocess.check_output(['git','ls-files','-z'],cwd=source).split(b'\0')
 patches = []
 for raw in tracked:
@@ -46,4 +80,11 @@ for name,p in expected.items():
         raise SystemExit('Missing/mismatched overlay: '+name)
 destination = ROOT/'patches/panvk-darwin/0001-native-mali-darwin.patch'
 destination.write_text(''.join(patches))
+recorded['identity']=identity()
+recorded['source']=prepare.snapshot(source)
+recorded['patch_count']=sum(1 for family in recorded['identity']['pins']['panvk']['families']
+                           for _ in (ROOT/'.cache/panvk-kbase-android'/'patches'/family).glob('*.patch'))
+recorded['patch_count']+=len(list((ROOT/'patches/panvk-darwin').glob('*.patch')))
+state.write_text(json.dumps(recorded,indent=2,sort_keys=True)+'\n')
+prepare.prepare(ROOT,False,True)
 print('Exported {} changed baseline files; source trees preserved'.format(sum(x.startswith('diff --git ') for x in patches)))

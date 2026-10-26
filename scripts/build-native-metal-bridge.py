@@ -94,6 +94,7 @@ manifest.write_text('\n'.join([
 ]))
 if args.backend == 'mali':
     shutil.copyfile(ROOT/'scripts/data/native-mali-metal.Cargo.lock', out/'Cargo.lock')
+    shutil.copyfile(ROOT/'scripts/data/metal2vulkan-cli.Cargo.lock', SOURCE/'Cargo.lock')
 if args.manifest_only:
     print(manifest)
     raise SystemExit(0)

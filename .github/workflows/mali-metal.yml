@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/dali-mali-metal-offline]
-    paths: ['.github/workflows/mali-metal.yml', 'patches/native-mali-metal/**', 'patches/metal2vulkan/**', 'drivers/NativeMaliMetal/**', 'scripts/*mali-metal*', 'scripts/build-native-metal-bridge.py']
+    paths: ['.github/workflows/mali-metal.yml', 'patches/native-mali-metal/**', 'patches/metal2vulkan/**', 'drivers/NativeMaliMetal/**', 'scripts/*mali-metal*', 'scripts/build-native-metal-bridge.py', 'scripts/data/native-mali-metal.Cargo.lock', 'scripts/data/metal2vulkan-cli.Cargo.lock']
 permissions:
   contents: read
 concurrency:
@@ -22,7 +22,7 @@ jobs:
       - name: Select Apple SDK and Rust
         run: |
           sudo xcode-select -s /Applications/Xcode_26.6.app
-          brew install llvm
+          brew install llvm spirv-tools
           printf '%s\n' "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           rustup toolchain install 1.98.0 --profile minimal
           rustup target add --toolchain 1.98.0 aarch64-apple-ios aarch64-apple-darwin
@@ -37,6 +37,8 @@ jobs:
           build/native-mali-metal/frame-test/present
       - name: Compile and link macOS Metal plugin
         run: python3 scripts/build-mali-metal-plugin.py --fetch --target host --compile-only
+      - name: Compile pinned Metal AIR to validated Vulkan SPIR-V offline
+        run: python3 scripts/check-native-mali-metal-air.py
       - name: Compile and link iOS17 Metal plugin
         run: python3 scripts/build-mali-metal-plugin.py --target ios --compile-only
       - name: Upload actual binaries and diagnostics
@@ -51,5 +53,9 @@ jobs:
             build/native-mali-metal/host
             build/native-mali-metal/ios
             build/native-mali-metal/frame-test
-          retention-days: 1
+            build/native-mali-metal/air-offline/report.json
+            build/native-mali-metal/air-offline/scale_and_offset.spv
+            build/native-mali-metal/air-offline/scale_and_offset.json
+            build/native-mali-metal/air-offline/translate.log
+          retention-days: 30
           if-no-files-found: error

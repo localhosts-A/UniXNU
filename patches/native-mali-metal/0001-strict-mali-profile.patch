@@ -1,3 +1,147 @@
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -24,6 +24,7 @@
+ #include <mach/mach.h>
+ #include "bridge/NativeMetalObjects.h"
+ #include "NativeBridgeMetalFrontend.h"
++#include "NativeMaliFramePresenter.h"
+ 
+ extern "C" void sys_dcache_flush(void *start, size_t length);
+ 
+@@ -32,6 +33,10 @@
+ static uint64_t gRegistryID;
+ static NSString *gName;
+ static void (*gMissing)(const char *, const char *);
++static std::mutex gFrameSinkLock;
++static NativeBridgeMetalFrameSink gFrameSink;
++static void *gFrameSinkContext;
++static std::atomic<uint64_t> gFrameSequence;
+ 
+ // What this device has been asked and refused, for the plugin's status line (native_bridge_metal_status): commits, render/compute pipelines made,
+ // refusals, and the last two refusals' texts. Counters only; nothing here changes a result.
+@@ -526,6 +531,9 @@
+ @property(nonatomic) uint32_t commitIndex;
+ @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
+ @property(nonatomic,strong) NSMutableSet *surfaces;
++@property(nonatomic,strong) NSMutableSet *writtenSurfaces;
++@property(nonatomic) NativeBridgeMetalFrameSink frameSink;
++@property(nonatomic) void *frameSinkContext;
+ // Runtime handles retain GPU storage, but only the Objective-C owner retains
+ // a no-copy deallocator, its memory owner and texture/heap ancestry.
+ @property(nonatomic,strong) NSMutableSet *resourceOwners;
+@@ -797,7 +805,7 @@
+ static void scheduled(void *context);
+ @implementation NBCommandBuffer
+ - (instancetype)init {
+- if((self=[super init])){_scheduledHandlers=[NSMutableArray array];_completedHandlers=[NSMutableArray array];_surfaces=[NSMutableSet set];_resourceOwners=[NSMutableSet set];_handlers=dispatch_group_create();_schedulingHandlers=dispatch_group_create();}
++ if((self=[super init])){_scheduledHandlers=[NSMutableArray array];_completedHandlers=[NSMutableArray array];_surfaces=[NSMutableSet set];_writtenSurfaces=[NSMutableSet set];_resourceOwners=[NSMutableSet set];_handlers=dispatch_group_create();_schedulingHandlers=dispatch_group_create();}
+  if(self)createdUs=nowUs();
+  return self;
+ }
+@@ -870,6 +878,8 @@
+  for(unsigned i=0;i<8;i++) {
+   MTLRenderPassColorAttachmentDescriptor *c=d.colorAttachments[i];
+   if(!attachment(c,pass.colors[i])){[self refuse:@"foreign color attachment"];return nil;}
++  if(c.texture && c.storeAction!=MTLStoreActionDontCare && [(NBTexture *)c.texture surface])
++   [_writtenSurfaces addObject:c.texture];
+   pass.colors[i].clear[0]=c.clearColor.red;pass.colors[i].clear[1]=c.clearColor.green;pass.colors[i].clear[2]=c.clearColor.blue;pass.colors[i].clear[3]=c.clearColor.alpha;
+  }
+  if(!attachment(d.depthAttachment,pass.depth) || !attachment(d.stencilAttachment,pass.stencil)){[self refuse:@"foreign depth/stencil attachment"];return nil;}
+@@ -885,8 +895,8 @@
+ - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
+ - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
+ // A drawable (RenderBox's CAMetalLayer path) is presented once the GPU has written it: this runtime's scheduling comes before completion.
+-- (void)presentDrawable:(id<MTLDrawable>)drawable {[self addCompletedHandler:^(id<MTLCommandBuffer>){[drawable present];}];}
+-- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)time {[self addCompletedHandler:^(id<MTLCommandBuffer>){[drawable presentAtTime:time];}];}
++- (void)presentDrawable:(id<MTLDrawable>)drawable {[self addCompletedHandler:^(id<MTLCommandBuffer> cb){if(cb.status==MTLCommandBufferStatusCompleted)[drawable present];}];}
++- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)time {[self addCompletedHandler:^(id<MTLCommandBuffer> cb){if(cb.status==MTLCommandBufferStatusCompleted)[drawable presentAtTime:time];}];}
+ - (void)enqueue {}
+ - (void)event:(id<MTLEvent>)event value:(uint64_t)value signal:(bool)signal {
+  if(![(id)event isKindOfClass:[NBEvent class]]){[self refuse:@"foreign event"];return;}
+@@ -919,10 +929,24 @@
+ }
+ // After completion (or a refusal): invalidate the CPU's view of imported surfaces, then completed handlers, once.
+ - (void)finish {
+- flushSurfaces(_surfaces);
++ NSMutableSet *remaining=[_surfaces mutableCopy];
++ if(self.status==MTLCommandBufferStatusCompleted && self.frameSink) {
++  NSMutableSet *delivered=[NSMutableSet set],*attempted=[NSMutableSet set];
++  for(NBTexture *texture in _writtenSurfaces) {
++   if(!texture.surface)continue;
++   NSNumber *identity=@(IOSurfaceGetID(texture.surface));if([attempted containsObject:identity])continue;
++   [attempted addObject:identity];
++   const uint64_t sequence=gFrameSequence.fetch_add(1)+1;
++   if(native_mali_deliver_completed_frame(texture.surface,sequence,self.frameSink,self.frameSinkContext))
++    [delivered addObject:identity];
++  }
++  for(NBTexture *texture in _surfaces)
++   if(texture.surface && [delivered containsObject:@(IOSurfaceGetID(texture.surface))])[remaining removeObject:texture];
++ }
++ flushSurfaces(remaining);
+  // Actual GPU completion (or a local refusal that never submitted) is the
+  // release point. A retained completed command must not pin every old frame.
+- [_surfaces removeAllObjects];[_resourceOwners removeAllObjects];
++ [_surfaces removeAllObjects];[_writtenSurfaces removeAllObjects];[_resourceOwners removeAllObjects];
+  @synchronized(gInFlight){[gInFlight removeObject:self];}
+  NSArray *completedHandlers;
+  @synchronized(self){
+@@ -947,6 +971,10 @@
+   const uint32_t index=(uint32_t)(gCommits.fetch_add(1)+1);self.commitIndex=index;
+   CommitRecord &r=gCommitRing[index%32];
+   r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
++ }
++ {
++  std::lock_guard<std::mutex> lock(gFrameSinkLock);
++  self.frameSink=gFrameSink;self.frameSinkContext=gFrameSinkContext;
+  }
+  dispatch_group_enter(_handlers);
+  dispatch_group_enter(_schedulingHandlers);
+@@ -1556,8 +1584,9 @@
+  if(getenv("NMB_DEVICE_BASE_NSOBJECT"))base=[NSObject class];
+ #endif
+ #if TARGET_OS_IPHONE
+- // The target's base class ABI (iPadOS 17.7.11): the dynamic subclass adds no instance variables.
+- if(!base || class_getInstanceSize(base)!=536){NBLOG(@"native-metal: unexpected _MTLDevice ABI");return nil;}
++ // This subclass adds no ivars and never accesses private base-class storage.
++ // Use this OS's actual class extent rather than the Adreno iPad's fixed size.
++ if(!base){NBLOG(@"native-metal: missing _MTLDevice base class");return nil;}
+ #endif
+  if(!base)base=[NSObject class];
+  Class cls=objc_allocateClassPair(base,"NativeBridgeMetalDevice",0);if(!cls)return nil;
+@@ -1570,6 +1599,12 @@
+  objc_registerClassPair(cls);
+  gDeviceObject=[cls new];
+  return gDeviceObject;
++}
++
++extern "C" bool native_bridge_metal_set_frame_sink(NativeBridgeMetalFrameSink sink,void *context) {
++ if(!sink && context)return false;
++ std::lock_guard<std::mutex> lock(gFrameSinkLock);
++ gFrameSink=sink;gFrameSinkContext=context;return true;
+ }
+ 
+ // Bare AIR bitcode (no metallib wrapper), which Metal itself refuses: for the bridge's own fixtures only.
+diff --git a/NativeBridgeMetalFrontend.h b/NativeBridgeMetalFrontend.h
+--- a/NativeBridgeMetalFrontend.h
++++ b/NativeBridgeMetalFrontend.h
+@@ -5,10 +5,16 @@
+ #include <stdint.h>
+ #ifdef __OBJC__
+ #import <Foundation/Foundation.h>
++#import <IOSurface/IOSurfaceRef.h>
+ extern "C" {
+ // Opens the process's one device: loader exports vkGetInstanceProcAddr (Turnip), cache is a writable shader-cache directory, registryID is the
+ // accelerator service's registry entry. missing (may be null) is told the class and selector of every unimplemented call.
+ id native_bridge_metal_open(const char *loader, const char *cache, uint64_t registryID, void (*missing)(const char *, const char *));
++// Register a process-lifetime consumer for completed stored color IOSurfaces.
++// The callback receives a borrowed IOSurface after GPU completion/cache visibility;
++// retain it for async scanout, and keep old contexts alive through pending callbacks.
++typedef void (*NativeBridgeMetalFrameSink)(void *, IOSurfaceRef, uint64_t);
++bool native_bridge_metal_set_frame_sink(NativeBridgeMetalFrameSink sink, void *context);
+ // Bare AIR bitcode as a library (the bridge's fixtures; Metal itself accepts only metallibs).
+ id native_bridge_metal_library_with_air(const void *bytes, size_t length);
+ // One line for the plugin's status report: command buffers committed/failed locally, pipelines made, refusals, the last refusal's text.
 diff --git a/bridge/NativeMetalBridge.rs b/bridge/NativeMetalBridge.rs
 --- a/bridge/NativeMetalBridge.rs
 +++ b/bridge/NativeMetalBridge.rs
@@ -25,23 +169,15 @@ diff --git a/bridge/NativeMetalObjects.rs b/bridge/NativeMetalObjects.rs
          options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
          options.messages = Some(MessageSink::new(observe_message));
          Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
-@@ -365,2 +365,3 @@
+@@ -362,8 +362,9 @@
+ /// this device has none of (iconservicesagent crashed in `CI::GLContext::init`, int-155); QuartzCore splits a frame into command buffers of
+ /// 128 draws where Apple3 is false (`MetalContext::flush`). Each waived row stays the runtime's own refusal where it is used, and
+ /// `nmb_device_family_waivers` names them for the journal.
 -const TARGET_FAMILIES: [GpuFamily; 5] =
 -    [GpuFamily::Apple1, GpuFamily::Apple2, GpuFamily::Apple3, GpuFamily::Common1, GpuFamily::Common2];
 +// NativeMali never overrides Vulkan-derived family blockers. The historical
 +// iPad compatibility waivers above apply only to the original Adreno plugin.
 +const TARGET_FAMILIES: [GpuFamily; 0] = [];
-diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
---- a/NativeBridgeMetalFrontend.mm
-+++ b/NativeBridgeMetalFrontend.mm
-@@ -888,2 +888,2 @@
--- (void)presentDrawable:(id<MTLDrawable>)drawable {[self addCompletedHandler:^(id<MTLCommandBuffer>){[drawable present];}];}
--- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)time {[self addCompletedHandler:^(id<MTLCommandBuffer>){[drawable presentAtTime:time];}];}
-+- (void)presentDrawable:(id<MTLDrawable>)drawable {[self addCompletedHandler:^(id<MTLCommandBuffer> cb){if(cb.status==MTLCommandBufferStatusCompleted)[drawable present];}];}
-+- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)time {[self addCompletedHandler:^(id<MTLCommandBuffer> cb){if(cb.status==MTLCommandBufferStatusCompleted)[drawable presentAtTime:time];}];}
-@@ -1559,2 +1559,3 @@
-- // The target's base class ABI (iPadOS 17.7.11): the dynamic subclass adds no instance variables.
-- if(!base || class_getInstanceSize(base)!=536){NBLOG(@"native-metal: unexpected _MTLDevice ABI");return nil;}
-+ // This subclass adds no ivars and never accesses private base-class storage.
-+ // Use this OS's actual class extent rather than the Adreno iPad's fixed size.
-+ if(!base){NBLOG(@"native-metal: missing _MTLDevice base class");return nil;}
+ 
+ /// The rows of Apple's tables the device does not meet in the target families `supportsFamily:` answers true (`TARGET_FAMILIES`), one
+ /// family per line ("Apple2 4: <row> ..."), into `out` (NUL-terminated); the length the whole text needs.

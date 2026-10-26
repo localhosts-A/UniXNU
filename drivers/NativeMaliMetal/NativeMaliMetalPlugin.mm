@@ -7,6 +7,11 @@
 #include <mach/mach.h>
 #include <unistd.h>
 #include "NativeBridgeMetalFrontend.h"
+#include "NativeMaliFramePresenter.h"
+
+extern "C" bool native_mali_metal_set_frame_sink(NativeMaliFrameSink sink,void *context) {
+    return native_bridge_metal_set_frame_sink(sink,context);
+}
 
 @interface _MTLDevice : NSObject
 @end

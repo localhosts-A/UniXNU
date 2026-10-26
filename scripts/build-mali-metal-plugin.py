@@ -35,7 +35,7 @@ def main():
     exe=bundle/'NativeMaliMetal'
     command=['xcrun','clang++','-target',triple,'-isysroot',sdk,'-std=c++17','-fobjc-arc','-O2','-g',
              '-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-deprecated-declarations',
-             '-fstack-protector-strong','-bundle','-I',kit,ROOT/'drivers/NativeMaliMetal/NativeMaliMetalPlugin.mm',
+             '-fstack-protector-strong','-bundle','-I',kit,'-I',ROOT/'drivers/NativeMaliMetal',ROOT/'drivers/NativeMaliMetal/NativeMaliMetalPlugin.mm',
              ROOT/'drivers/NativeMaliMetal/NativeMaliFramePresenter.mm',
              kit/'NativeBridgeMetalFrontend.mm',ROOT/f'build/native-mali-metal/bridge/{args.target}/libnative_metal_bridge.a',
              '-Wl,-dead_strip','-lobjc','-framework','Foundation','-framework','Metal','-framework','IOSurface',
@@ -48,7 +48,8 @@ def main():
     if any(name in dependencies for name in ['libdrm','freedreno','MoltenVK']):raise SystemExit('Unexpected GPU dependency')
     (out/'dependencies.txt').write_text(dependencies)
     symbols=subprocess.check_output(['nm','-gU',exe],text=True)
-    if '_native_mali_metal_open' not in symbols:raise SystemExit('Missing plugin entry point')
+    for symbol in ('_native_mali_metal_open','_native_mali_metal_set_frame_sink'):
+        if symbol not in symbols:raise SystemExit('Missing plugin entry point '+symbol)
     (bundle/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier='org.unixnu.NativeMaliMetal',
         CFBundleExecutable='NativeMaliMetal',CFBundlePackageType='BNDL',CFBundleVersion='1',
         CFBundleShortVersionString='1',NSPrincipalClass='NativeMaliMetalDevice',MinimumOSVersion='17.0')))
@@ -60,7 +61,8 @@ def main():
     elif (bundle/'libvulkan_native_mali.dylib').exists():
         raise SystemExit('Compile-only output must not contain an old ICD')
     for item in ([bundle/driver.name] if not args.compile_only else [])+[bundle]:
-        subprocess.run(['codesign','--force','--sign','-','--pagesize','4096',item],check=True)
+        subprocess.run(['codesign','--force','--sign','-','--pagesize','4096','--identifier',
+                        'org.unixnu.NativeMaliMetal.'+args.target if item==bundle else 'org.unixnu.NativeMali.ICD.'+args.target,item],check=True)
         subprocess.run(['codesign','--verify','--strict',item],check=True)
         detail=subprocess.run(['codesign','--display','--verbose=4',item],capture_output=True,text=True,check=True).stderr
         if not re.search(r'^Page size=4096$',detail,re.M):raise SystemExit('Signature page size is not 4096')
