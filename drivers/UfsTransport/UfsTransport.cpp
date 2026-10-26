@@ -223,13 +223,15 @@ Status Transport::probe(uint8_t lun) {
   bool wp = unit[5] != 0;
   uint8_t exponent = unit[10]; uint64_t unitBlocks = be64(unit + 11);
   uint8_t cdb[16] = {};
-  // Initial reset UNIT ATTENTION may require acknowledgement. Only this known
-  // completed CHECK CONDITION is retried, only for no-data TEST UNIT READY.
+  // Initial reset UNIT ATTENTION may require acknowledgement. Accept the
+  // generic reset (29/00) and bus reset (29/02), observed after Dali's host reset.
+  // Only these completed CHECK CONDITIONs retry no-data TEST UNIT READY.
   // There is no automatic retry of a data read/write, sync, query or timeout.
   for (unsigned attempt = 0; attempt < 3; ++attempt) {
     status = scsi(lun, cdb, 6, 0, 0);
     if (status == Status::Success) break;
-    if (status != Status::Target || last_.target != 2 || last_.senseKey != 6 || last_.asc != 0x29 || last_.ascq) return status;
+    if (status != Status::Target || last_.target != 2 || last_.senseKey != 6 || last_.asc != 0x29 ||
+        (last_.ascq != 0 && last_.ascq != 2)) return status;
   }
   if (status != Status::Success) return status;
   cdb[0] = 0x25;

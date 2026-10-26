@@ -23,6 +23,8 @@ class UfsTransportTests(unittest.TestCase):
         cls.lib = ctypes.CDLL(str(library))
         cls.lib.ufs_core_case.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64)]
         cls.lib.ufs_identity_case.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint8)]
+        cls.lib.ufs_tur_probe_case.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64)]
+        cls.lib.ufs_reset_data_case.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64)]
 
     @classmethod
     def tearDownClass(cls):
@@ -104,6 +106,43 @@ class UfsTransportTests(unittest.TestCase):
     def test_stuck_initialization_flag_is_bounded_and_set_once(self):
         out = self.case(30)
         self.assertEqual((out[1],out[2],out[7],out[14]), (4,2,1,1))
+
+    def tur(self, scenario):
+        out = (ctypes.c_uint64*16)()
+        self.lib.ufs_tur_probe_case(scenario, out)
+        self.assertEqual((out[0], out[1], out[11]), (0, 0, 0))
+        return list(out)
+
+    def test_bus_reset_ua_acknowledged_by_tur_before_capacity_fixed_and_descriptor_sense(self):
+        for scenario in (1, 10, 12):
+            with self.subTest(scenario=scenario):
+                out = self.tur(scenario)
+                self.assertEqual((out[2], out[3], out[4], out[9], out[10]), (0, 2, 1, 0, 1))
+
+    def test_repeated_reset_ua_stops_at_three_turs_without_capacity_or_geometry(self):
+        for scenario, ascq in ((2, 2), (11, 0)):
+            out = self.tur(scenario)
+            self.assertEqual(out[2:11], [7, 3, 0, 2, 6, 0x29, ascq, 0, 0])
+            self.assertEqual(out[12:15], [2, 2, 0])
+
+    def test_other_ascq_sense_key_asc_or_target_status_is_not_retried(self):
+        for scenario in (3, 4, 5, 6, 13):
+            out = self.tur(scenario)
+            self.assertEqual((out[2], out[3], out[4], out[9], out[10]), (7, 1, 0, 0, 0))
+            self.assertEqual(out[12:15], [2, 2, 0])
+
+    def test_tur_timeout_ocs_and_protocol_errors_quarantine_after_one_submission(self):
+        for scenario, status in ((7, 4), (8, 5), (9, 6)):
+            out = self.tur(scenario)
+            self.assertEqual((out[2], out[3], out[4], out[9], out[10]), (status, 1, 0, 1, 0))
+            self.assertEqual(out[12:15], [2, 2, 0])
+
+    def test_bus_reset_on_read_sync_or_write_never_replays_the_command(self):
+        for operation in (0, 1, 2):
+            out = (ctypes.c_uint64*10)()
+            self.lib.ufs_reset_data_case(operation, out)
+            self.assertEqual(list(out[:8]), [0, 0, 0, 7, 1, 6, 0x29, 2])
+            self.assertEqual((out[8], out[9]), (0 if operation == 0 else 1, 0))
 
     def test_absent_lun_query_result_is_preserved_without_geometry_or_scsi_retry(self):
         out = self.case(36)

@@ -12,6 +12,7 @@ struct Sim {
   uint32_t regs[0x100/4]{}, fault=0, rings=0, queriesSet=0, bad=0, allowCalls=0, reads=0, writes=0;
   uint32_t size=4096,turs=0; uint64_t blocks=2048, pa=0x22000000, time=0,windowFirst=8;
   bool enabled=true, wp=false, grant=false;
+  unsigned turCase=0, turSubmissions=0, capacityReads=0, resetOnData=0;
   uint8_t lastCdb[16]{}, lastLun=0, lastTag=0;
   Sim(){regs[0x34/4]=1;regs[0x30/4]=15;}
   void complete() {
@@ -39,13 +40,25 @@ struct Sim {
     } else if(q[0]==1) {
       memcpy(lastCdb,q+16,16);
       uint8_t op=q[16];uint32_t expected=uint32_t(q[12])<<24|uint32_t(q[13])<<16|uint32_t(q[14])<<8|q[15];
-      if(op==0x25) {big(dma+DataOffset,blocks-1>=UINT32_MAX?UINT32_MAX:blocks-1,4);big(dma+DataOffset+4,size,4);}
+      if(op==0x25) {++capacityReads;big(dma+DataOffset,blocks-1>=UINT32_MAX?UINT32_MAX:blocks-1,4);big(dma+DataOffset+4,size,4);}
       else if(op==0x9e) {big(dma+DataOffset,blocks-1,8);big(dma+DataOffset+8,size,4);}
       else if(op==0x28||op==0x88) {++reads;for(uint32_t i=0;i<expected;++i)dma[DataOffset+i]=uint8_t(i*17+23);}
       else if(op==0x2a||op==0x8a) ++writes;
       else if(op==0x35) {for(unsigned i=17;i<32;++i)if(q[i])++bad;}
       else if(op==0) {++turs;if((fault==32&&turs<3)||fault==33){r[6]=1;r[7]=2;big(r+10,20,2);big(r+32,18,2);r[34]=0x70;r[36]=fault==32?6:2;r[46]=fault==32?0x29:4;}}
       else ++bad;
+      if(op==0 && turCase) {
+        if(turCase==8)little(dma+8,1);
+        else if(turCase==9)r[3]^=1;
+        else if(turCase!=7 && ((turCase!=1&&turCase!=10&&turCase!=12)||turs==1)) {
+          r[6]=1;r[7]=turCase==6?8:2;
+          uint8_t key=turCase==4?2:6, asc=turCase==5?0x28:0x29;
+          uint8_t ascq=turCase==3?3:turCase==13?1:(turCase==11||turCase==12)?0:2;
+          if(turCase==10) {big(r+10,6,2);big(r+32,4,2);r[34]=0x72;r[35]=key;r[36]=asc;r[37]=ascq;}
+          else {big(r+10,20,2);big(r+32,18,2);r[34]=0x70;r[36]=key;r[46]=asc;r[47]=ascq;}
+        }
+      }
+      if(resetOnData && op!=0) {r[6]=1;r[7]=2;big(r+10,20,2);big(r+32,18,2);r[34]=0x70;r[36]=6;r[46]=0x29;r[47]=2;}
       if(fault==6)little(dma+8,1);
       if(fault==7)r[3]^=1;
       if(fault==8)r[2]^=1;
@@ -63,11 +76,14 @@ struct Sim {
     s.regs[off/4]=v;
     if(off==0x58){
       ++s.rings;auto t=s.dma,q=s.dma+UcdOffset;
+      const bool tur=q[0]==1&&q[16]==0;
+      if(tur)++s.turSubmissions;
       uint64_t ucd=uint64_t(le(t+16))|(uint64_t(le(t+20))<<32);
       uint32_t dir=(le(t)>>25)&3, prdCount=le(t+28)&0xffff;
       if(v!=1||ucd!=s.pa+UcdOffset||(le(t)&~0x06000000U)!=0x11000000U||le(t+4)||le(t+8)!=15||le(t+12)||
          le(t+24)!=(128U|((ResponseOffset/4)<<16))||(le(t+28)>>16)!=PrdtOffset/4||((dir!=0)!=(prdCount==1)))++s.bad;
       if(prdCount){auto p=q+PrdtOffset;uint64_t data=uint64_t(le(p))|(uint64_t(le(p+4))<<32);if(data!=s.pa+DataOffset||le(p+8)||le(p+12)>=DataMax)++s.bad;}
+      if(tur&&s.turCase==7)return true;
       if(s.fault==4||s.fault==27||s.fault==31)return s.fault!=27;
       if(s.fault==5){s.regs[0x58/4]=0;return true;}
       little(t+8,0);s.complete();
@@ -127,4 +143,29 @@ extern "C" void ufs_identity_case(unsigned fault,uint64_t *out,uint8_t *identity
   uint32_t bytes=0;out[2]=uint32_t(host.readDeviceIdentity(identity,256,bytes));
   out[3]=bytes;out[4]=s->rings;out[5]=s->bad;out[6]=host.poisoned();
   delete s;
+}
+extern "C" void ufs_tur_probe_case(unsigned scenario,uint64_t *out) {
+  auto s=new Sim;Transport host;
+  Dma dma{s->dma,s->pa,UINT64_MAX,DmaBytes};
+  out[0]=uint32_t(host.start(s->port(),dma));
+  out[1]=uint32_t(host.initializeDevice());s->turCase=scenario;
+  out[2]=uint32_t(host.probe(2));out[3]=s->turSubmissions;out[4]=s->capacityReads;
+  const auto completion=host.completion();
+  out[5]=completion.target;out[6]=completion.senseKey;out[7]=completion.asc;out[8]=completion.ascq;
+  out[9]=host.poisoned();out[10]=host.geometry(2)->valid;out[11]=s->bad;
+  if(out[2]) {
+    uint8_t buffer[4096]{};unsigned before=s->rings;
+    out[12]=uint32_t(host.read(2,0,1,buffer));out[13]=uint32_t(host.synchronize(2));
+    out[14]=s->rings-before;
+  }
+  delete s;
+}
+extern "C" void ufs_reset_data_case(unsigned operation,uint64_t *out) {
+  auto s=new Sim;Transport host;Dma dma{s->dma,s->pa,UINT64_MAX,DmaBytes};
+  out[0]=uint32_t(host.start(s->port(),dma));out[1]=uint32_t(host.initializeDevice());
+  out[2]=uint32_t(host.probe(2));s->resetOnData=1;s->grant=true;
+  uint8_t buffer[4096]{};unsigned before=s->rings;
+  out[3]=uint32_t(operation==0?host.read(2,8,1,buffer):operation==1?host.synchronize(2):host.write(2,8,1,buffer));
+  out[4]=s->rings-before;out[5]=host.completion().senseKey;out[6]=host.completion().asc;out[7]=host.completion().ascq;
+  out[8]=host.poisoned();out[9]=s->bad;delete s;
 }
