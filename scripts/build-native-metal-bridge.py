@@ -6,6 +6,7 @@
 is committed. Output: build/native-metal-bridge/<target>/libnative_metal_bridge.a"""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -18,6 +19,7 @@ PIN = json.loads((ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text(
 SOURCE = ROOT / '.cache/gpu-reference/metal2vulkan'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--target', choices=['ios', 'host'], default='ios')
+parser.add_argument('--backend', choices=['adreno', 'mali'], default='adreno')
 parser.add_argument('--fetch', action='store_true', help='fetch the exact translator commit when its cache is absent')
 parser.add_argument('--manifest-only', action='store_true',
                     help='write build/native-metal-bridge/Cargo.toml (patched source, fixtures) and stop before cargo, for `cargo fetch`')
@@ -62,7 +64,13 @@ for patch in PATCHES[states.index(tree_diff):]:
     subprocess.run(['git', '-C', str(SOURCE), 'apply', str(patch)], check=True)
 if subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], text=True) != canonical_diff(expected):
     raise SystemExit('Translator patch result differs from its exact recorded source')
-out = ROOT / 'build/native-metal-bridge'
+kit = ROOT / 'drivers/NativeMetal'
+if args.backend == 'mali':
+    spec = importlib.util.spec_from_file_location('mali_metal_source', ROOT/'scripts/prepare-native-mali-metal.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    kit = module.prepare()
+out = ROOT / ('build/native-mali-metal/bridge' if args.backend == 'mali' else 'build/native-metal-bridge')
 out.mkdir(parents=True, exist_ok=True)
 llvm_as = next((p for p in ['/opt/homebrew/opt/llvm/bin/llvm-as', shutil.which('llvm-as') or ''] if p and Path(p).exists()), None)
 if not llvm_as:
@@ -74,7 +82,7 @@ subprocess.run([llvm_as, '-o', fc_air, SOURCE / 'crates/metal2vulkan-validation/
 manifest = out / 'Cargo.toml'
 manifest.write_text('\n'.join([
     '[package]', 'name = "native-metal-bridge"', 'version = "0.1.0"', 'edition = "2024"', 'rust-version = "1.98"', '[workspace]',
-    '[lib]', 'crate-type = ["staticlib"]', 'path = ' + json.dumps(str(ROOT / 'drivers/NativeMetal/bridge/NativeMetalBridge.rs')),
+    '[lib]', 'crate-type = ["staticlib"]', 'path = ' + json.dumps(str(kit / 'bridge/NativeMetalBridge.rs')),
     '[dependencies]',
     'metal2vulkan = { path = ' + json.dumps(str(SOURCE / 'crates/metal2vulkan')) + ', features = ["ash"] }',
     'metal2vulkan-runtime = { path = ' + json.dumps(str(SOURCE / 'crates/metal2vulkan-runtime')) + ' }',
@@ -84,6 +92,8 @@ manifest.write_text('\n'.join([
     'sha2 = { version = "0.10", features = ["asm"] }',
     '[profile.release]', 'panic = "unwind"', 'debug = 1', '',
 ]))
+if args.backend == 'mali':
+    shutil.copyfile(ROOT/'scripts/data/native-mali-metal.Cargo.lock', out/'Cargo.lock')
 if args.manifest_only:
     print(manifest)
     raise SystemExit(0)
@@ -91,12 +101,14 @@ triple = 'aarch64-apple-ios' if args.target == 'ios' else 'aarch64-apple-darwin'
 # The translator source the runtime is built from (its pin and recorded patches), which keys the shader cache: shader priming keeps what it
 # finished while this stays the same (PrimeShaders.h).
 runtime_id = hashlib.sha256((PIN + '\n' + canonical_diff(expected)).encode()).hexdigest()[:32]
+if args.backend == 'mali':
+    runtime_id = hashlib.sha256((runtime_id + (kit.parent/'source-profile.json').read_text()).encode()).hexdigest()[:32]
 env = dict(os.environ, NMB_RUNTIME_ID=runtime_id, NMB_FIXTURE_AIR=str(air), NMB_FC_AIR=str(fc_air), IPHONEOS_DEPLOYMENT_TARGET='17.0', MACOSX_DEPLOYMENT_TARGET='14.0')
-target_dir = ROOT / 'build/m2v-target'
+target_dir = ROOT / ('build/m2v-mali-target' if args.backend == 'mali' else 'build/m2v-target')
 log = out / ('build-%s.log' % args.target)
 with log.open('w') as stream:
     result = subprocess.run(['cargo', '+1.98.0', 'build', '--release', '--manifest-path', manifest, '--target', triple,
-                             '--target-dir', target_dir], env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=1800)
+                             '--target-dir', target_dir, *(['--locked'] if args.backend == 'mali' else [])], env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=1800)
 if result.returncode:
     raise SystemExit(log.read_text()[-6000:])
 library = target_dir / triple / 'release/libnative_metal_bridge.a'

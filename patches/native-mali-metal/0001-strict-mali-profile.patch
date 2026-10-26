@@ -1,0 +1,47 @@
+diff --git a/bridge/NativeMetalBridge.rs b/bridge/NativeMetalBridge.rs
+--- a/bridge/NativeMetalBridge.rs
++++ b/bridge/NativeMetalBridge.rs
+@@ -85,8 +85,9 @@
+ fn open(loader: &CStr, cache: &CStr) -> Result<Device, String> {
+     let mut options = DeviceOptions::default();
+     options.loader = Some(PathBuf::from(loader.to_string_lossy().into_owned()));
+-    // No macOS release names this host; answer as the newest measured Metal.
+-    options.metal_level = Some(MetalLevel::NEWEST);
++    // Format vocabulary only. Device limits, formats and family rows are still
++    // checked against this Vulkan device; no Apple hardware family is waived.
++    options.metal_level = Some(MetalLevel::MacOS26_7);
+     options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
+     Device::system_default_with(&options).map_err(|e| format!("device: {e:?}"))
+ }
+diff --git a/bridge/NativeMetalObjects.rs b/bridge/NativeMetalObjects.rs
+--- a/bridge/NativeMetalObjects.rs
++++ b/bridge/NativeMetalObjects.rs
+@@ -161,7 +161,7 @@
+         let (loader, cache) = unsafe { (CStr::from_ptr(loader), CStr::from_ptr(cache)) };
+         let mut options = DeviceOptions::default();
+         options.loader = Some(PathBuf::from(loader.to_string_lossy().into_owned()));
+-        options.metal_level = Some(MetalLevel::NEWEST);
++        options.metal_level = Some(MetalLevel::MacOS26_7);
+         options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
+         options.messages = Some(MessageSink::new(observe_message));
+         Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
+@@ -365,2 +365,3 @@
+-const TARGET_FAMILIES: [GpuFamily; 5] =
+-    [GpuFamily::Apple1, GpuFamily::Apple2, GpuFamily::Apple3, GpuFamily::Common1, GpuFamily::Common2];
++// NativeMali never overrides Vulkan-derived family blockers. The historical
++// iPad compatibility waivers above apply only to the original Adreno plugin.
++const TARGET_FAMILIES: [GpuFamily; 0] = [];
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -888,2 +888,2 @@
+-- (void)presentDrawable:(id<MTLDrawable>)drawable {[self addCompletedHandler:^(id<MTLCommandBuffer>){[drawable present];}];}
+-- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)time {[self addCompletedHandler:^(id<MTLCommandBuffer>){[drawable presentAtTime:time];}];}
++- (void)presentDrawable:(id<MTLDrawable>)drawable {[self addCompletedHandler:^(id<MTLCommandBuffer> cb){if(cb.status==MTLCommandBufferStatusCompleted)[drawable present];}];}
++- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)time {[self addCompletedHandler:^(id<MTLCommandBuffer> cb){if(cb.status==MTLCommandBufferStatusCompleted)[drawable presentAtTime:time];}];}
+@@ -1559,2 +1559,3 @@
+- // The target's base class ABI (iPadOS 17.7.11): the dynamic subclass adds no instance variables.
+- if(!base || class_getInstanceSize(base)!=536){NBLOG(@"native-metal: unexpected _MTLDevice ABI");return nil;}
++ // This subclass adds no ivars and never accesses private base-class storage.
++ // Use this OS's actual class extent rather than the Adreno iPad's fixed size.
++ if(!base){NBLOG(@"native-metal: missing _MTLDevice base class");return nil;}

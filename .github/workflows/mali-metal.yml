@@ -1,0 +1,49 @@
+name: NativeMali Metal
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/dali-mali-metal-offline]
+    paths: ['.github/workflows/mali-metal.yml', 'patches/native-mali-metal/**', 'patches/metal2vulkan/**', 'drivers/NativeMaliMetal/**', 'scripts/*mali-metal*', 'scripts/build-native-metal-bridge.py']
+permissions:
+  contents: read
+concurrency:
+  group: native-mali-metal-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Fetch only pinned NativeMetal frontend
+        run: git submodule update --init drivers/NativeMetal
+      - name: Select Apple SDK and Rust
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          brew install llvm
+          printf '%s\n' "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup target add --toolchain 1.98.0 aarch64-apple-ios aarch64-apple-darwin
+      - name: Prepare strict Mali profile twice
+        run: |
+          python3 scripts/prepare-native-mali-metal.py
+          python3 scripts/prepare-native-mali-metal.py
+      - name: Compile and link macOS Metal plugin
+        run: python3 scripts/build-mali-metal-plugin.py --fetch --target host --compile-only
+      - name: Compile and link iOS17 Metal plugin
+        run: python3 scripts/build-mali-metal-plugin.py --target ios --compile-only
+      - name: Upload actual binaries and diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-mali-metal-compile
+          path: |
+            build/native-mali-metal/source-profile.json
+            build/native-mali-metal/bridge/*.log
+            build/native-mali-metal/bridge/Cargo.lock
+            build/native-mali-metal/host
+            build/native-mali-metal/ios
+          retention-days: 1
+          if-no-files-found: error
