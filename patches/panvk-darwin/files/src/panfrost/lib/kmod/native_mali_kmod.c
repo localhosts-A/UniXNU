@@ -4,7 +4,6 @@
  */
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -111,7 +110,7 @@ error:
 }
 static void unmap_queue(struct native_dev *dev,struct native_queue *q) {
    if(q->output)IOConnectUnmapMemory64(dev->connection,q->output_token,mach_task_self(),q->output);
-   if(q->pages)mach_vm_deallocate(mach_task_self(),q->pages,8192);
+   if(q->pages)munmap((void *)(uintptr_t)q->pages,8192);
 }
 static void dev_destroy(struct pan_kmod_dev *base) {
    struct native_dev *dev=ndev(base);
@@ -211,20 +210,26 @@ void *kbase_kmod_csf_queue_bind(struct pan_kmod_dev *base,uint32_t group,uint32_
    struct nml_request q=request(NML_QUEUE_BIND);q.object=group;q.parent=bo->base.handle;q.value=stream;q.length=size;struct nml_response out;
    if(invoke(dev,&q,&out)){simple_mtx_unlock(&dev->lock);pan_kmod_dev_free(base,queue);return NULL;}
    queue->group=group;queue->stream=stream;queue->ring=ring;queue->output_token=out.auxiliary;
-   mach_vm_address_t pages=0;bool mapped=false;
-   if(mach_vm_allocate(mach_task_self(),&pages,12288,VM_FLAGS_ANYWHERE)==KERN_SUCCESS){
-      queue->pages=pages;mach_vm_deallocate(mach_task_self(),pages+8192,4096);
-      mach_vm_address_t output=pages+8192;mach_vm_size_t bytes=4096;
-      if(IOConnectMapMemory64(dev->connection,queue->output_token,mach_task_self(),&output,&bytes,kIOMapReadOnly|kIOMapWriteCombineCache)==KERN_SUCCESS){
-         queue->output=output;mapped=output==pages+8192&&bytes==4096;
+   bool mapped=false;
+   void *reservation=mmap(NULL,12288,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+   if(reservation!=MAP_FAILED){
+      const mach_vm_address_t pages=(mach_vm_address_t)(uintptr_t)reservation;
+      if(munmap((void *)(uintptr_t)(pages+8192),4096)==0){
+         queue->pages=pages;
+         mach_vm_address_t output=pages+8192;mach_vm_size_t bytes=4096;
+         if(IOConnectMapMemory64(dev->connection,queue->output_token,mach_task_self(),&output,&bytes,kIOMapReadOnly|kIOMapWriteCombineCache)==KERN_SUCCESS){
+            queue->output=output;mapped=output==pages+8192&&bytes==4096;
+         }
+      } else {
+         munmap(reservation,12288);
       }
    }
    if(!mapped){unmap_queue(dev,queue);q=request(NML_QUEUE_UNBIND);q.object=group;q.value=stream;invoke(dev,&q,NULL);
       simple_mtx_unlock(&dev->lock);pan_kmod_dev_free(base,queue);errno=ENOMEM;return NULL;}
    // Page0 is deliberately inaccessible; native submission must always call
    // the kernel transport and cannot accidentally use kbase's MMIO fast path.
-   mprotect((void *)(uintptr_t)pages,4096,PROT_NONE);
-   queue->next=dev->queues;dev->queues=queue;simple_mtx_unlock(&dev->lock);return (void *)(uintptr_t)pages;
+   mprotect((void *)(uintptr_t)queue->pages,4096,PROT_NONE);
+   queue->next=dev->queues;dev->queues=queue;simple_mtx_unlock(&dev->lock);return (void *)(uintptr_t)queue->pages;
 }
 void kbase_kmod_csf_queue_term(struct pan_kmod_dev *base,uint64_t ring,void *user_io){
    struct native_dev *dev=ndev(base);simple_mtx_lock(&dev->lock);struct native_queue **link=&dev->queues;
