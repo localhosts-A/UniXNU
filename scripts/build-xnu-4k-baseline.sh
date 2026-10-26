@@ -280,6 +280,28 @@ if [ -d "$MOCKFS_OBJECT_DIR" ]; then
 fi
 EXTRA_MAKE_ARGS+=("ubc_subr.o_CFLAGS_ADD=-DXNU_NATIVE_CS_HASH_CACHE=$CS_HASH_CACHE_MODE -DXNU_SOURCE_ENTITLEMENT_FREE=$ENTITLEMENT_FREE_MODE")
 EXTRA_CFLAGS=${XNU_EXTRA_CFLAGS:--Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding}
+USB_HOST_MODE=${XNU_NATIVE_USB_HOST:-0}
+if [ "$USB_HOST_MODE" != 0 ] && [ "$USB_HOST_MODE" != 1 ]; then
+  echo 'XNU_NATIVE_USB_HOST must be 0 or 1' >&2
+  exit 1
+fi
+USB_CDC_LOG_MODE=${XNU_NATIVE_USB_CDC_LOG:-0}
+if [ "$USB_CDC_LOG_MODE" != 0 ] && [ "$USB_CDC_LOG_MODE" != 1 ]; then
+  echo 'XNU_NATIVE_USB_CDC_LOG must be 0 or 1' >&2
+  exit 1
+fi
+if [ "$USB_CDC_LOG_MODE" = 1 ] && [ "$USB_HOST_MODE" != 1 ]; then
+  echo 'XNU_NATIVE_USB_CDC_LOG requires the opt-in USB profile and its gadget archive' >&2
+  exit 1
+fi
+USB_CDC_LOG_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.native-usb-cdc-log-mode
+if [ "$(cat "$USB_CDC_LOG_STAMP" 2>/dev/null || echo unknown)" != "$USB_CDC_LOG_MODE" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/serial_console.o"
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/pexpert/DEVELOPMENT/pe_kprintf.o"
+  mkdir -p "$(dirname "$USB_CDC_LOG_STAMP")"
+  printf '%s\n' "$USB_CDC_LOG_MODE" > "$USB_CDC_LOG_STAMP"
+fi
+EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_NATIVE_USB_CDC_LOG=$USB_CDC_LOG_MODE"
 OWNER_ROOT_PROBE=${XNU_VERIFIED_ROOT_PROBE:-0}
 if [ "$OWNER_ROOT_PROBE" != 0 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then
   echo 'XNU_VERIFIED_ROOT_PROBE must be 0 or 1' >&2

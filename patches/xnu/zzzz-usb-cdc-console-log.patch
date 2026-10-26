@@ -1,0 +1,58 @@
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -1,3 +1,7 @@
+ #include <kern/boot_progress.h>
++#if defined(XNU_NATIVE_USB_CDC_LOG) && XNU_NATIVE_USB_CDC_LOG
++#include <stddef.h>
++extern size_t dali_usb_cdc_log_write(const void *, size_t);
++#endif
+ /*
+  * Copyright (c) 2000-2020 Apple, Inc. All rights reserved.
+@@ -252,15 +256,23 @@
+ static inline void
+ _cnputc(char c, bool poll)
+ {
+-	if (boot_progress_active()) { boot_progress_putc(c); return; }
++	if (boot_progress_active()) {
++#if defined(XNU_NATIVE_USB_CDC_LOG) && XNU_NATIVE_USB_CDC_LOG
++		(void)dali_usb_cdc_log_write(&c, sizeof(c));
++#endif
++		boot_progress_putc(c); return;
++	}
+ 	bool in_debugger = (kernel_debugger_entry_count > 0);
+ 	const uint32_t idx = get_cons_ops_index();
+ 
+ 	poll = poll || in_debugger;
+ 
+ 	if (c == '\n') {
+ 		_cnputc('\r', poll);
+ 	}
+ 
++#if defined(XNU_NATIVE_USB_CDC_LOG) && XNU_NATIVE_USB_CDC_LOG
++	(void)dali_usb_cdc_log_write(&c, sizeof(c));
++#endif
+ 	cons_ops[idx].putc(c, poll);
+ }
+diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -8,2 +8,6 @@
+ #include <stdarg.h>
++#if defined(XNU_NATIVE_USB_CDC_LOG) && XNU_NATIVE_USB_CDC_LOG
++#include <stddef.h>
++extern size_t dali_usb_cdc_log_write(const void *, size_t);
++#endif
+ #include <machine/machine_routines.h>
+@@ -156,8 +160,11 @@
+ static void
+ serial_putc_crlf(char c)
+ {
++#if defined(XNU_NATIVE_USB_CDC_LOG) && XNU_NATIVE_USB_CDC_LOG
++	(void)dali_usb_cdc_log_write(&c, sizeof(c));
++#endif
+ 	if (c == '\n') {
+ 		uart_putc('\r');
+ 	}
+ 	uart_putc(c);
+ }
