@@ -25,6 +25,16 @@ EVENT_REVISION = '2365347f5147a1e2a46de21acd08d27fe0906e85'
 EVENT_SCHEMA = 'IOHIDFamily-1915.140.3'
 UNSUPPORTED_EVENTS = ('game-controller-bottom-M1-M4', 'digitizer-estimated-roll',
                       'unpublished-apple-vendor-usages', 'private-property-forwarding')
+UNSUPPORTED_HID_FEATURES = (
+    'interactive-tcc-authorization',
+    'private-no-dropped-report-and-task-suspend-options',
+    'raw-userclient-report-queue-can-drop-input-edges-under-backpressure',
+    'unlisted-userclient-property-writes',
+    'private-game-controller-property',
+    'private-interface-rematch',
+    'private-property-change-notification-list',
+    'blessed-apple-vendor-keyboard-usages',
+)
 OUT = ROOT / 'build/source-hid'
 ARCHIVE = OUT / 'libIOHIDFamily.a'
 PHASE = '84D292320CC90C8E00698218'
@@ -36,6 +46,8 @@ GENERATED_EVENT_HEADERS = ('IOHIDEventTypes.h', 'IOHIDEventFieldDefs.h',
                            'IOHIDEventStructDefs.h', 'IOHIDEventMacroDefs.h')
 PRIVATE_SOURCE = 'IOHIDEventServiceFastPathUserClient.cpp'
 PUBLIC_PATCH = ROOT / 'scripts/patches/iohidfamily-public.patch'
+PRIVATE_COMPAT_PATCH = ROOT / 'scripts/patches/iohidfamily-private-compat.patch'
+PERSONALITY_PATCH = ROOT / 'patches/xnu/source-hid-personalities.patch'
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -135,7 +147,12 @@ def audit_inputs(source):
     OUT.mkdir(parents=True, exist_ok=True)
     report = {'source_revision': revision, 'event_header_revision': header_revision,
               'event_schema': EVENT_SCHEMA, 'unsupported_event_features': list(UNSUPPORTED_EVENTS),
-              'public_port_patch_sha256': digest(PUBLIC_PATCH), 'declaration_inputs': imported,
+              'unsupported_hid_features': list(UNSUPPORTED_HID_FEATURES),
+              'public_port_patch_sha256': digest(PUBLIC_PATCH),
+              'private_compatibility_patch_sha256': digest(PRIVATE_COMPAT_PATCH),
+              'kernel_personality_patch_sha256': digest(PERSONALITY_PATCH),
+              'protected_device_access_policy': 'Dali-owned access property conservatively gates raw keyboard/keypad/mouse/touchpad IOHIDLibUserClient admission; kernel IOHIDEventDriver delivery remains available; no TCC consent UI is provided',
+              'declaration_inputs': imported,
               'source_units': [{'path': str(p.relative_to(source)), 'sha256': digest(p)} for p in inputs],
               'unavailable_private_source': PRIVATE_SOURCE, 'source_archive_built': False,
               'hardware_qualified': False}
@@ -161,8 +178,9 @@ def build():
         shutil.rmtree(source_tree)
     shutil.copytree(SOURCE, source_tree, ignore=shutil.ignore_patterns('.git'))
     subprocess.run(['git', 'init', '--quiet', str(source_tree)], check=True)
-    subprocess.run(['git', 'apply', '--check', str(PUBLIC_PATCH)], cwd=source_tree, check=True)
-    subprocess.run(['git', 'apply', str(PUBLIC_PATCH)], cwd=source_tree, check=True)
+    for patch in (PUBLIC_PATCH, PRIVATE_COMPAT_PATCH):
+        subprocess.run(['git', 'apply', '--check', str(patch)], cwd=source_tree, check=True)
+        subprocess.run(['git', 'apply', str(patch)], cwd=source_tree, check=True)
     inputs = embedded_sources(source_tree)
     macos_sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
     include, sdk_inputs = prepare_headers(source_tree, OUT, macos_sdk)
@@ -242,8 +260,13 @@ def build():
             raise ValueError('Source HID archive lacks the real class: ' + name)
     report = {'source_revision': revision, 'event_header_revision': header_revision,
               'event_schema': EVENT_SCHEMA, 'unsupported_event_features': list(UNSUPPORTED_EVENTS),
+              'unsupported_hid_features': list(UNSUPPORTED_HID_FEATURES),
               'embedded_phase': PHASE, 'objects': rows, 'iig': generated_rows,
-              'public_port_patch_sha256': digest(PUBLIC_PATCH), 'unavailable_private_source': PRIVATE_SOURCE,
+              'public_port_patch_sha256': digest(PUBLIC_PATCH),
+              'private_compatibility_patch_sha256': digest(PRIVATE_COMPAT_PATCH),
+              'kernel_personality_patch_sha256': digest(PERSONALITY_PATCH),
+              'protected_device_access_policy': 'Dali-owned access property conservatively gates raw keyboard/keypad/mouse/touchpad IOHIDLibUserClient admission; kernel IOHIDEventDriver delivery remains available; no TCC consent UI is provided',
+              'unavailable_private_source': PRIVATE_SOURCE,
               'declaration_inputs': sdk_inputs, 'c_compile_record_sha256': digest(c_path),
               'cpp_compile_record_sha256': digest(cpp_path), 'archive_sha256': digest(ARCHIVE),
               'source_archive_built': True, 'kernel_link_verified': False,
@@ -255,12 +278,25 @@ def verify_kernel(kernel):
     report = json.loads((OUT / 'build-report.json').read_text())
     if report.get('source_revision') != REVISION or not report.get('source_archive_built') or report.get('archive_sha256') != digest(ARCHIVE):
         raise ValueError('Source HID archive/report mismatch')
+    if report.get('private_compatibility_patch_sha256') != digest(PRIVATE_COMPAT_PATCH):
+        raise ValueError('Source HID compatibility patch/report mismatch')
+    if report.get('kernel_personality_patch_sha256') != digest(PERSONALITY_PATCH):
+        raise ValueError('Source HID personality patch/report mismatch')
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', kernel], text=True)
     undefined = subprocess.check_output(['xcrun', 'nm', '-u', kernel], text=True)
     for name in CLASSES:
         if name + '10gMetaClassE' not in defined or name in undefined:
             raise ValueError('Final XNU kernel lacks resolved source HID class: ' + name)
-    report.update(kernel_link_verified=True, kernel_sha256=digest(kernel), kernel_classes=list(CLASSES))
+    data = kernel.read_bytes()
+    personalities = {'keyboard': 6, 'keypad': 7, 'mouse': 2}
+    if b"'IOClass'         = IOHIDEventDriver;" not in data or b"'IOProviderClass' = IOHIDInterface;" not in data:
+        raise ValueError('Final XNU kernel lacks the built-in IOHIDEventDriver interface personality')
+    for name, usage in personalities.items():
+        marker = ("'DeviceUsage' = " + str(usage) + ':32;').encode()
+        if marker not in data:
+            raise ValueError('Final XNU kernel lacks the source HID ' + name + ' personality')
+    report.update(kernel_link_verified=True, kernel_sha256=digest(kernel), kernel_classes=list(CLASSES),
+                  kernel_personalities=personalities)
     (OUT / 'kernel-link-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print('PASS: source IOHIDFamily classes resolve in source XNU; HID runtime/hardware remain unqualified')
 

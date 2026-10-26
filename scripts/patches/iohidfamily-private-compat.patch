@@ -1,0 +1,326 @@
+diff --git a/IOHIDFamily/IOHIDDevice.cpp b/IOHIDFamily/IOHIDDevice.cpp
+index 1c5bce3..373087f 100644
+--- a/IOHIDFamily/IOHIDDevice.cpp
++++ b/IOHIDFamily/IOHIDDevice.cpp
+@@ -523,11 +523,9 @@ bool IOHIDDevice::start( IOService * provider )
+     // set interface properties
+     publishProperties(NULL);
+     
+-    if (conformsTo(kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard) ||
+-        conformsTo(kHIDPage_GenericDesktop, kHIDUsage_GD_Mouse) ||
+-        conformsTo(kHIDPage_Digitizer, kHIDUsage_Dig_TouchPad)) {
+-        setProperty(kIOHIDRequiresTCCAuthorizationKey, kOSBooleanTrue);
+-    }
++    // Interactive TCC authorization belongs to the userspace policy stack,
++    // which is not part of this source-only kernel port. Protected devices
++    // remain guarded by the project-scoped fail-closed access property.
+ 
+     matching = registryEntryIDMatching(getRegistryEntryID());
+     _deviceNotify = addMatchingNotification(gIOFirstMatchNotification,
+@@ -1193,31 +1191,11 @@ IOReturn IOHIDDevice::message( UInt32 type, IOService * provider, void * argumen
+ //---------------------------------------------------------------------------
+ // Handle properties.
+ 
+-static const OSSymbol * msgProps[] = {kIOHIDDeviceMessagePropertyUpdateKeys};
+-
+ bool IOHIDDevice::setProperty( const OSSymbol * key, OSObject * object)
+ {
+-    bool ret;
+-
+-    if (key->isEqualTo(kIOHIDDeviceForceInterfaceRematchKey)) {
+-        if (OSDynamicCast(OSBoolean, object) == kOSBooleanTrue) {
+-            messageClients(kIOHIDMessageInterfaceRematch);
+-        }
+-        return true;
+-    }
+-
+-    // Update the property table before notifying clients of property changes.
+-    ret = super::setProperty(key, object);
+-    require(ret, exit);
+-
+-    for (const OSSymbol * prop : msgProps) {
+-        if (key->isEqualTo(prop)) {
+-            messageClients(kIOMessageServicePropertyChange);
+-        }
+-    }
+-
+-exit:
+-    return ret;
++    // The public source set does not define the private rematch or property
++    // notification key list. Store ordinary properties without those actions.
++    return super::setProperty(key, object);
+ }
+ 
+ //---------------------------------------------------------------------------
+@@ -1527,15 +1505,33 @@ OSBoolean * IOHIDDevice::newIsAccessProtected()
+     OSString *  transportStr = newTransportString();
+     OSNumber *  vidNum = newVendorIDNumber();
+     OSObject *  obj;
+-    OSBoolean * boolean;
++    OSBoolean * boolean = kOSBooleanFalse;
++    OSBoolean * explicitProtection = NULL;
+ 
+     do {
+         bool ok = false;
+ 
+         // A value previously set for kDaliPublicHidProtectedAccessKey takes precedence
+         obj = copyProperty(kDaliPublicHidProtectedAccessKey);
+-        boolean = OSDynamicCast(OSBoolean, obj);
+-        if (boolean) {
++        explicitProtection = OSDynamicCast(OSBoolean, obj);
++        if (explicitProtection == kOSBooleanTrue) {
++            boolean = kOSBooleanTrue;
++            break;
++        }
++
++        // This source-only port has no verified TCC policy service. Keep
++        // standard input protected from raw user clients by default; the
++        // in-kernel IOHIDEventDriver continues to receive interface reports.
++        if (conformsTo(kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard) ||
++            conformsTo(kHIDPage_GenericDesktop, kHIDUsage_GD_Keypad) ||
++            conformsTo(kHIDPage_GenericDesktop, kHIDUsage_GD_Mouse) ||
++            conformsTo(kHIDPage_Digitizer, kHIDUsage_Dig_TouchPad)) {
++            boolean = kOSBooleanTrue;
++            break;
++        }
++
++        if (explicitProtection == kOSBooleanFalse) {
++            boolean = kOSBooleanFalse;
+             break;
+         }
+ 
+diff --git a/IOHIDFamily/IOHIDEventDriver.cpp b/IOHIDFamily/IOHIDEventDriver.cpp
+index e3676ab..a34f656 100644
+--- a/IOHIDFamily/IOHIDEventDriver.cpp
++++ b/IOHIDFamily/IOHIDEventDriver.cpp
+@@ -419,8 +419,10 @@ bool IOHIDEventDriver::handleStart(IOService *provider)
+     }
+     OSSafeReleaseNULL(obj);
+     
+-    // Get array of blessed vendor keyboard usages.
++    // Blessed vendor usages depend on unpublished Apple property keys.
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     require_action(getBlessedUsagePairs(), exit, HIDServiceLogError("Error parsing the blessed usage pair array!"));
++#endif
+     
+     _keyboard.appleVendorSupported = getProperty(kIOHIDAppleVendorSupported, gIOServicePlane);
+     
+@@ -557,6 +559,7 @@ bool IOHIDEventDriver::didTerminate( IOService * provider, IOOptionBits options,
+ //==============================================================================
+ bool IOHIDEventDriver::getBlessedUsagePairs()
+ {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     OSObject *  obj;
+     OSArray *   pairs;
+     bool        ret = false;
+@@ -576,6 +579,10 @@ bool IOHIDEventDriver::getBlessedUsagePairs()
+ 
+ exit:
+     return ret;
++#else
++    // Standard HID keyboard and mouse usages are handled by public tables.
++    return true;
++#endif
+ }
+ 
+ //====================================================================================================
+@@ -1117,7 +1124,7 @@ void IOHIDEventDriver::setDigitizerProperties()
+ #if DALI_HID_PRIVATE_APPLE_USAGES
+         conformTo (kHIDPage_AppleVendor, kHIDUsage_AppleVendor_DFR) ||
+ #endif
+-        conformTo(kHIDPage_Digitizer, kHIDUsage_Dig_TouchPad) || getProperty(kIOHIDDigitizerCollectionDispatchKey, gIOServicePlane) == kOSBooleanTrue) {
++        conformTo(kHIDPage_Digitizer, kHIDUsage_Dig_TouchPad) || getProperty(kDaliPublicHidDigitizerCollectionDispatchKey, gIOServicePlane) == kOSBooleanTrue) {
+         _digitizer.collectionDispatch = true;
+     }
+   
+@@ -2405,6 +2412,7 @@ bool IOHIDEventDriver::parseKeyboardElement(IOHIDElement * element)
+ 
+ #endif
+         default:
++#if DALI_HID_PRIVATE_APPLE_USAGES
+             // Enumerate blessed AppleVendor usages.
+             if (!_keyboard.blessedUsagePairs) {
+                 break;
+@@ -2426,6 +2434,7 @@ bool IOHIDEventDriver::parseKeyboardElement(IOHIDElement * element)
+                     break;
+                 }
+             }
++#endif
+             break;
+     }
+     
+diff --git a/IOHIDFamily/IOHIDLibUserClient.cpp b/IOHIDFamily/IOHIDLibUserClient.cpp
+index 2a5bcd5..fc369b0 100644
+--- a/IOHIDFamily/IOHIDLibUserClient.cpp
++++ b/IOHIDFamily/IOHIDLibUserClient.cpp
+@@ -328,7 +328,7 @@ bool IOHIDLibUserClient::initWithTask(task_t owningTask, void * /* security_id *
+     
+     if (!_privilegedClient) {
+         // Preparing for extended data. Set a temporary key.
+-        setProperty(kIOHIDExtendedDataKey, true);
++        setProperty(kDaliPublicHidExtendedDataKey, true);
+     }
+ 
+     fClientOpened = false;
+@@ -818,31 +818,6 @@ IOReturn IOHIDLibUserClient::message(UInt32 type, IOService * provider, void * a
+                          argument);
+     }
+ 
+-    if (type == kIOMessageTaskAppSuspendedChange && (fCachedOptionBits & kIOHIDOptionsPrivateTypeNoDroppedReports)) {
+-        __block bool isSuspended = task_is_app_suspended (fClient);
+-        
+-        HIDLibUserClientLog("suspended:%d", isSuspended);
+-        
+-        fGate->runActionBlock(^IOReturn (){
+-            if (!fClientOpened) {
+-                return kIOReturnSuccess;
+-            }
+-            if (isSuspended) {
+-                fClientSuspended = true;
+-                // Clear any waiting reports.
+-                if (!queue_empty(&fBlockedReports)) {
+-                    IOHIDBlockedReport *report = NULL;
+-                    queue_remove_first(&fBlockedReports, report, IOHIDBlockedReport *, qc);
+-                    fGate->commandWakeup(report);
+-                    HIDLibUserClientLog("Woke blocked report thread due to suspended client");
+-                }
+-            } else {
+-                fClientSuspended = false;
+-            }
+-            return kIOReturnSuccess;
+-        });
+-    }
+-
+     return super::message(type, provider, argument);
+ }
+ 
+@@ -876,33 +851,47 @@ IOReturn IOHIDLibUserClient::setProperties(OSObject *properties)
+ {
+     IOReturn ret = kIOReturnUnsupported;
+     OSDictionary * props = OSDynamicCast(OSDictionary, properties);
+-    OSNumber     * num;
++    OSNumber *bufferCount = NULL;
++    OSNumber *entrySize = NULL;
++    bool hasBufferCount = false;
++    bool hasEntrySize = false;
++    unsigned int allowedCount = 0;
+ 
+     require_action_quiet(fNub, exit, ret = kIOReturnOffline);
++    require_action_quiet(props, exit, ret = kIOReturnBadArgument);
+ 
+-    if (props && props->getObject(kIOHIDDeviceGameControllerSupportKey)) {
+-        if (_interfaceRematchEntitlement) {
+-            ret = fNub->setProperty(kIOHIDDeviceGameControllerSupportKey, props->getObject(kIOHIDDeviceGameControllerSupportKey)) ? kIOReturnSuccess : kIOReturnError;
+-        }
+-        props->removeObject(kIOHIDDeviceGameControllerSupportKey);
+-        require_quiet(props->getCount(), exit);
++    if (props->getCount() == 0) {
++        ret = kIOReturnSuccess;
++        goto exit;
+     }
+ 
+-    if (props && props->getObject(kIOHIDDeviceForceInterfaceRematchKey)) {
+-        if (_interfaceRematchEntitlement) {
+-            ret = fNub->setProperty(kIOHIDDeviceForceInterfaceRematchKey, props->getObject(kIOHIDDeviceForceInterfaceRematchKey)) ? kIOReturnSuccess : kIOReturnError;
+-        }
+-        props->removeObject(kIOHIDDeviceForceInterfaceRematchKey);
+-        require_quiet(props->getCount(), exit);
+-    }
++    // The public API documents only these two numeric, per-connection queue
++    // properties as writable here. Reject unknown/private keys before they
++    // can reach IOHIDDevice::setProperties.
++    hasBufferCount = props->getObject(kIOHIDMaxReportBufferCountKey) != NULL;
++    hasEntrySize = props->getObject(kIOHIDReportBufferEntrySizeKey) != NULL;
++    allowedCount = (hasBufferCount ? 1U : 0U) + (hasEntrySize ? 1U : 0U);
++    require_action_quiet(props->getCount() == allowedCount, exit, ret = kIOReturnUnsupported);
++
++    bufferCount = OSDynamicCast(OSNumber, props->getObject(kIOHIDMaxReportBufferCountKey));
++    entrySize = OSDynamicCast(OSNumber, props->getObject(kIOHIDReportBufferEntrySizeKey));
++    require_action_quiet((!hasBufferCount || bufferCount) && (!hasEntrySize || entrySize),
++                         exit,
++                         ret = kIOReturnBadArgument);
+ 
+     ret = fNub->setProperties(properties);
++    if (ret != kIOReturnSuccess) {
++        goto exit;
++    }
+ 
+-    if (props && (num = OSDynamicCast(OSNumber, props->getObject(kIOHIDMaxReportBufferCountKey)))) {
+-        ret = setProperty(kIOHIDMaxReportBufferCountKey, num) ? kIOReturnSuccess : kIOReturnError;
++    if (hasBufferCount) {
++        ret = setProperty(kIOHIDMaxReportBufferCountKey, bufferCount) ? kIOReturnSuccess : kIOReturnError;
++        if (ret != kIOReturnSuccess) {
++            goto exit;
++        }
+     }
+-    if (props && (num = OSDynamicCast(OSNumber, props->getObject(kIOHIDReportBufferEntrySizeKey)))) {
+-        ret = setProperty(kIOHIDReportBufferEntrySizeKey, num) ? kIOReturnSuccess : kIOReturnError;
++    if (hasEntrySize) {
++        ret = setProperty(kIOHIDReportBufferEntrySizeKey, entrySize) ? kIOReturnSuccess : kIOReturnError;
+     }
+ 
+ exit:
+@@ -1948,7 +1937,7 @@ IOReturn IOHIDLibUserClient::setReport(IOMemoryDescriptor * mem, IOHIDReportType
+     require_action(fNub && !isInactive(), exit, ret = kIOReturnNotAttached);
+     require_noerr((ret = mem->prepare(kIODirectionInOut)), exit);
+ 
+-    obj = copyProperty(kIOHIDExtendedDataKey);
++    obj = copyProperty(kDaliPublicHidExtendedDataKey);
+     extended = OSDynamicCast(OSArray, obj);
+     if ((itr = OSCollectionIterator::withCollection(extended))) {
+         while (true) {
+@@ -2137,17 +2126,17 @@ IOHIDLibUserClient::attach(IOService * provider)
+     if (!super::attach(provider)) {
+         return false;
+     }
+-    if (provider && getProperty(kIOHIDExtendedDataKey)) {
++    if (provider && getProperty(kDaliPublicHidExtendedDataKey)) {
+         // Check for extended data
+-        OSObject *obj = provider->copyProperty(kIOHIDExtendedDataKey, gIOServicePlane);
++        OSObject *obj = provider->copyProperty(kDaliPublicHidExtendedDataKey, gIOServicePlane);
+         OSArray *extended = OSDynamicCast(OSArray, obj);
+         if (OSDynamicCast(OSArray, extended) && extended->getCount()) {
+             // Extended data found. Replace the temporary key.
+-            setProperty(kIOHIDExtendedDataKey, extended);
++            setProperty(kDaliPublicHidExtendedDataKey, extended);
+         }
+         else {
+             // No extended data found. Remove the temporary key.
+-            removeProperty(kIOHIDExtendedDataKey);
++            removeProperty(kDaliPublicHidExtendedDataKey);
+         }
+         OSSafeReleaseNULL(obj);
+     }
+@@ -2233,16 +2222,9 @@ IOHIDLibUserClient::handleEnqueue(void *queueData, UInt32 dataSize, IOHIDReportE
+ bool
+ IOHIDLibUserClient::canDropReport()
+ {
+-    // kIOHIDOptionsPrivateTypeNoDroppedReports must be used to prevent dropping reports
+-    if (!(fCachedOptionBits & kIOHIDOptionsPrivateTypeNoDroppedReports)) {
+-        return true;
+-    }
+-
+-    if (fClientSuspended && !(fCachedOptionBits & kIOHIDOptionsPrivateTypeIgnoreTaskSuspend)) {
+-        return true;
+-    }
+-
+-    return false;
++    // The private no-drop option is not in the public source ABI. Keep report
++    // delivery nonblocking and allow queue pressure to drop reports.
++    return true;
+ }
+ 
+ void
+diff --git a/IOHIDFamily/IOHIDPrivateKeys.h b/IOHIDFamily/IOHIDPrivateKeys.h
+index be2fcaf..7bdd27a 100644
+--- a/IOHIDFamily/IOHIDPrivateKeys.h
++++ b/IOHIDFamily/IOHIDPrivateKeys.h
+@@ -42,6 +42,8 @@ __BEGIN_DECLS
+ #define kDaliPublicHidProtectedAccessKey "DaliPublicHIDProtectedAccess"
+ #define kDaliPublicHidDeviceTypeHintKey "DaliPublicHIDDeviceTypeHint"
+ #define kDaliPublicHidDeviceTypeHeadsetKey "DaliPublicHIDDeviceTypeHeadset"
++#define kDaliPublicHidExtendedDataKey "DaliPublicHIDExtendedData"
++#define kDaliPublicHidDigitizerCollectionDispatchKey "DigitizerCollectionDispatch"
+ 
+ /*!
+     @defined HID Device Property Keys

@@ -187,6 +187,14 @@ if [ "$SOURCE_STORAGE_FAMILY" = 1 ]; then
   fi
   PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_SOURCE_STORAGE_FAMILY=1"
 fi
+SOURCE_HID_FAMILY=${XNU_SOURCE_HID_FAMILY:-0}
+if [ "$SOURCE_HID_FAMILY" != 0 ] && [ "$SOURCE_HID_FAMILY" != 1 ]; then
+  echo 'XNU_SOURCE_HID_FAMILY must be 0 or 1' >&2
+  exit 1
+fi
+if [ "$SOURCE_HID_FAMILY" = 1 ]; then
+  PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_SOURCE_HID_FAMILY=1"
+fi
 NATIVE_VIRTIO_CONSOLE=${XNU_NATIVE_VIRTIO_CONSOLE:-0}
 if [ "$NATIVE_VIRTIO_CONSOLE" != 0 ] && [ "$NATIVE_VIRTIO_CONSOLE" != 1 ]; then
   echo 'XNU_NATIVE_VIRTIO_CONSOLE must be 0 or 1' >&2
@@ -772,6 +780,7 @@ python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-a
   "$SHENG_PMGR" "$ROOT/build/sheng-platform-power/libShengPlatformPower.a" \
   "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/native-adreno/libNativeAdreno.a" \
   "$SOURCE_STORAGE_FAMILY" "$ROOT/build/source-storage/libIOStorageFamily.a" \
+  "$SOURCE_HID_FAMILY" "$ROOT/build/source-hid/libIOHIDFamily.a" \
   "${XNU_EXTRA_KERNEL_ARCHIVE_DEPENDENCIES:-}" <<'PY'
 import hashlib
 from pathlib import Path

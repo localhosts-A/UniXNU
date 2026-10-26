@@ -1,0 +1,30 @@
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 559a9db..b4817be 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -39,6 +39,25 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
+     "     'IOProbeScore'    = 0:32;"
+     "   },"
++#if defined(XNU_SOURCE_HID_FAMILY) && XNU_SOURCE_HID_FAMILY
++    "   {"
++    "     'IOClass'         = IOHIDEventDriver;"
++    "     'IOProviderClass' = IOHIDInterface;"
++    "     'IOMatchDefer'    = .true.;"
++    "     'DeviceUsagePairs' = ("
++    "       { 'DeviceUsagePage' = 1:32; 'DeviceUsage' = 6:32; },"
++    "       { 'DeviceUsagePage' = 1:32; 'DeviceUsage' = 7:32; }"
++    "     );"
++    "   },"
++    "   {"
++    "     'IOClass'         = IOHIDEventDriver;"
++    "     'IOProviderClass' = IOHIDInterface;"
++    "     'IOMatchDefer'    = .true.;"
++    "     'DeviceUsagePairs' = ("
++    "       { 'DeviceUsagePage' = 1:32; 'DeviceUsage' = 2:32; }"
++    "     );"
++    "   },"
++#endif
+     "   {"
+     "     'IOClass'         = IOExclaveProxy;"
+     "     'IOProviderClass' = IOService;"

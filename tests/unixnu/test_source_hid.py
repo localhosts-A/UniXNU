@@ -66,5 +66,36 @@ class SourceHidTests(unittest.TestCase):
                 self.assertEqual((include / 'IOKit/hid' / name).read_bytes(), (event_headers / name).read_bytes())
                 self.assertEqual((include / 'IOKit/hidevent' / name).read_bytes(), (event_headers / name).read_bytes())
 
+    def test_public_port_records_unsupported_security_and_private_features(self):
+        self.assertTrue(HID.PUBLIC_PATCH.is_file())
+        self.assertTrue(HID.PRIVATE_COMPAT_PATCH.is_file())
+        self.assertTrue(HID.PERSONALITY_PATCH.is_file())
+        self.assertIn('interactive-tcc-authorization', HID.UNSUPPORTED_HID_FEATURES)
+        self.assertIn('private-interface-rematch', HID.UNSUPPORTED_HID_FEATURES)
+        self.assertIn('private-no-dropped-report-and-task-suspend-options', HID.UNSUPPORTED_HID_FEATURES)
+        self.assertIn('raw-userclient-report-queue-can-drop-input-edges-under-backpressure', HID.UNSUPPORTED_HID_FEATURES)
+        self.assertIn('unlisted-userclient-property-writes', HID.UNSUPPORTED_HID_FEATURES)
+
+    def test_compatibility_patch_gates_input_and_allows_only_public_queue_properties(self):
+        patch = HID.PRIVATE_COMPAT_PATCH.read_text()
+        for fragment in (
+            'DaliPublicHIDProtectedAccess',
+            'kHIDUsage_GD_Keyboard',
+            'kHIDUsage_GD_Keypad',
+            'kHIDUsage_GD_Mouse',
+            'kHIDUsage_Dig_TouchPad',
+            'kIOHIDMaxReportBufferCountKey',
+            'kIOHIDReportBufferEntrySizeKey',
+            'props->getCount() == allowedCount',
+            'kIOReturnUnsupported',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, patch)
+
+    def test_hid_archive_is_part_of_opt_in_kernel_cache_identity(self):
+        baseline = (ROOT / 'scripts/build-xnu-4k-baseline.sh').read_text()
+        self.assertIn('SOURCE_HID_FAMILY=${XNU_SOURCE_HID_FAMILY:-0}', baseline)
+        self.assertIn('"$SOURCE_HID_FAMILY" "$ROOT/build/source-hid/libIOHIDFamily.a"', baseline)
+
 if __name__ == '__main__':
     unittest.main()
