@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import shlex
 import shutil
@@ -26,8 +27,9 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.jobs <= 32:
         parser.error('--jobs must be 1..32')
-    subprocess.run([sys.executable, ROOT/'scripts/prepare-panvk-darwin.py'], check=True)
-    source = ROOT/'.cache/panvk-mesa'
+    darwin = platform.system() == 'Darwin'
+    subprocess.run([sys.executable, ROOT/'scripts/prepare-panvk-darwin.py', *(['--darwin'] if darwin else [])], check=True)
+    source = ROOT/('.cache/panvk-mesa-darwin' if darwin else '.cache/panvk-mesa')
     out = ROOT/'build/panvk-host-tools'
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -55,7 +57,8 @@ def main():
                '-Dmesa-clc=enabled', '-Dinstall-mesa-clc=true', '-Dprecomp-compiler=enabled',
                '-Dinstall-precomp-compiler=true', '-Dllvm=enabled', '-Dzstd=disabled',
                '-Dbuild-tests=false', '-Dvideo-codecs=', '-Dvulkan-layers=']
-    profile = {'source': json.loads((ROOT/'.cache/panvk-prepared.json').read_text()), 'options': options,
+    stamp = ROOT/('.cache/panvk-darwin-prepared.json' if darwin else '.cache/panvk-prepared.json')
+    profile = {'source': json.loads(stamp.read_text()), 'options': options,
                'compiler': subprocess.check_output([env['CXX'], '--version'], text=True),
                'environment': {key: env.get(key, '') for key in ('CC', 'CXX', 'CPPFLAGS', 'LDFLAGS', 'PKG_CONFIG_PATH')},
                'meson': subprocess.check_output([meson, '--version'], text=True).strip()}
