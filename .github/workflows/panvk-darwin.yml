@@ -1,0 +1,66 @@
+name: NativeMali PanVK Darwin
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/dali-mali-metal-offline]
+    paths: ['.github/workflows/panvk-darwin.yml', 'patches/panvk-darwin/**', 'drivers/NativeMali/NativeMaliABI.h', 'scripts/*panvk*', 'scripts/data/mali-*']
+permissions:
+  contents: read
+concurrency:
+  group: native-mali-panvk-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Select SDK and native compiler dependencies
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
+          brew install llvm spirv-llvm-translator spirv-tools glslang cmake pkgconf ninja
+          printf '%s\n' "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$(brew --prefix spirv-llvm-translator)/lib/pkgconfig:$(brew --prefix spirv-tools)/lib/pkgconfig" >> "$GITHUB_ENV"
+          brew list --versions > "$RUNNER_TEMP/panvk-toolchain.txt"
+      - name: Python build tools
+        run: |
+          python3 -m venv .cache/mali-venv
+          .cache/mali-venv/bin/python -m pip install -r scripts/data/mali-build-requirements.txt
+      - name: Prepare fixed RC3 compiler sources
+        run: python3 scripts/prepare-panvk-darwin.py --fetch
+      - name: Build actual native code generators
+        run: python3 scripts/build-panvk-host-tools.py --dependency-prefix "$(brew --prefix spirv-llvm-translator)" --jobs 4
+      - name: Prepare NativeMali source and verify repeated preparation
+        run: |
+          python3 scripts/prepare-panvk-darwin.py --fetch --darwin
+          python3 scripts/prepare-panvk-darwin.py --darwin
+      - name: Compile and link macOS driver against actual IOKit
+        run: python3 scripts/build-panvk-darwin.py --target host --jobs 4
+      - name: Compile and link arm64 iOS17 driver
+        run: python3 scripts/build-panvk-darwin.py --target ios --jobs 4
+      - name: Upload source profiles, libraries and diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-mali-panvk-darwin
+          path: |
+            build/panvk-host-tools/*.json
+            build/panvk-host-tools/*.log
+            build/panvk-darwin-host/*.json
+            build/panvk-darwin-host/*.log
+            build/panvk-darwin-host/*.txt
+            build/panvk-darwin-host/*.dylib
+            build/panvk-darwin-host/meson-logs/meson-log.txt
+            build/panvk-darwin-ios/*.json
+            build/panvk-darwin-ios/*.log
+            build/panvk-darwin-ios/*.txt
+            build/panvk-darwin-ios/*.dylib
+            build/panvk-darwin-ios/meson-logs/meson-log.txt
+            .cache/panvk-prepared.json
+            .cache/panvk-darwin-prepared.json
+            ${{ runner.temp }}/panvk-toolchain.txt
+          if-no-files-found: error
+          retention-days: 1
