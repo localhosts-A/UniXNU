@@ -46,8 +46,8 @@ class SourceMsdosfsTests(unittest.TestCase):
 
     def test_kernel_localargs_transform_is_exact_and_preserves_user_copyin(self):
         original = (
-            '\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));\n'
-            '\t\tvfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | '
+            '\terror = copyin(data, &args, sizeof(struct msdosfs_args));\n'
+            '\tvfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | '
             'VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED;\n')
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -59,7 +59,7 @@ class SourceMsdosfsTests(unittest.TestCase):
             self.assertEqual(source.read_text(), original)
             self.assertIn('if (vfs_is_kernel_localargs(mp))', transformed)
             self.assertIn('bcopy((const void *)data, &args, sizeof(args));', transformed)
-            self.assertIn('else {\n\t\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));',
+            self.assertIn('else {\n\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));',
                           transformed)
             self.assertIn('VFS_TBLREADDIR_EXTENDED | VFS_TBLKERNELARGS;', transformed)
             with self.assertRaisesRegex(ValueError, 'Refusing to patch'):

@@ -70,15 +70,15 @@ def prepare_kernel_localargs_source(source, destination):
         raise ValueError('Refusing to patch the pinned msdosfs source in place')
     text = source.read_text()
     replacements = (
-        ('\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));',
-         '\t\tif (vfs_is_kernel_localargs(mp)) {\n'
-         '\t\t\tbcopy((const void *)data, &args, sizeof(args));\n'
-         '\t\t\terror = 0;\n'
-         '\t\t} else {\n'
-         '\t\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));\n'
-         '\t\t}'),
-        ('\t\tvfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED;',
-         '\t\tvfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED | VFS_TBLKERNELARGS;'),
+        ('\terror = copyin(data, &args, sizeof(struct msdosfs_args));',
+         '\tif (vfs_is_kernel_localargs(mp)) {\n'
+         '\t\tbcopy((const void *)data, &args, sizeof(args));\n'
+         '\t\terror = 0;\n'
+         '\t} else {\n'
+         '\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));\n'
+         '\t}'),
+        ('\tvfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED;',
+         '\tvfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED | VFS_TBLKERNELARGS;'),
     )
     for anchor, replacement in replacements:
         if text.count(anchor) != 1:
