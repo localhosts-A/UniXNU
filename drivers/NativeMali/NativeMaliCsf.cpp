@@ -116,4 +116,25 @@ CsfResult CsfInterface::groupAcknowledged(size_t i, uint32_t m, bool *d) {
 CsfResult CsfInterface::streamAcknowledged(size_t i, size_t j, uint32_t m, bool *d) {
     return group(i) && j < groups_[i].streamCount ? acknowledged(groups_[i].streams[j], m, d) : CsfResult::Invalid;
 }
+CsfResult CsfInterface::pending(const CsfEndpoint &ep, uint32_t mask, uint32_t *bits, bool accept) {
+    if (!valid_) return CsfResult::State;
+    if (!mask || !bits) return CsfResult::Invalid;
+    uint32_t req = 0, ack = 0;
+    if (!read(ep.input, &req) || !read(ep.output, &ack)) return CsfResult::Access;
+    *bits = (req ^ ack) & mask;
+    if (accept && *bits && !ops_.write(ops_.cookie, ep.input, (req & ~mask) | (ack & mask))) return CsfResult::Access;
+    return CsfResult::Ok;
+}
+CsfResult CsfInterface::groupPending(size_t i, uint32_t m, uint32_t *b) {
+    return group(i) ? pending(groups_[i].endpoint, m, b, false) : CsfResult::Invalid;
+}
+CsfResult CsfInterface::streamPending(size_t i, size_t j, uint32_t m, uint32_t *b) {
+    return group(i) && j < groups_[i].streamCount ? pending(groups_[i].streams[j], m, b, false) : CsfResult::Invalid;
+}
+CsfResult CsfInterface::groupAccept(size_t i, uint32_t m) {
+    uint32_t bits = 0; return group(i) ? pending(groups_[i].endpoint, m, &bits, true) : CsfResult::Invalid;
+}
+CsfResult CsfInterface::streamAccept(size_t i, size_t j, uint32_t m) {
+    uint32_t bits = 0; return group(i) && j < groups_[i].streamCount ? pending(groups_[i].streams[j], m, &bits, true) : CsfResult::Invalid;
+}
 } // namespace native_mali

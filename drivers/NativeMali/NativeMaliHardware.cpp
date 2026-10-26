@@ -105,6 +105,10 @@ HardwareResult Hardware::flushCaches(uint32_t us) {
     if (result == HardwareResult::Ok && !write(0x24, 1u << 17)) return HardwareResult::Access;
     return result;
 }
+HardwareResult Hardware::synchronizeMemory(uint32_t us) {
+    if (!l2_) return HardwareResult::State;
+    return timeoutValid(us) ? flushCaches(us) : HardwareResult::Invalid;
+}
 HardwareResult Hardware::synchronizeAddressSpace(uint8_t as, uint32_t us) {
     if (!l2_ || as >= 16 || !(touched_ & (1u << as))) return HardwareResult::State;
     if (!timeoutValid(us)) return HardwareResult::Invalid;

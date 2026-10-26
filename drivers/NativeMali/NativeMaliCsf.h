@@ -46,6 +46,10 @@ public:
     CsfResult globalAcknowledged(uint32_t mask, bool *);
     CsfResult groupAcknowledged(size_t group, uint32_t mask, bool *);
     CsfResult streamAcknowledged(size_t group, size_t stream, uint32_t mask, bool *);
+    CsfResult groupPending(size_t group, uint32_t mask, uint32_t *);
+    CsfResult streamPending(size_t group, size_t stream, uint32_t mask, uint32_t *);
+    CsfResult groupAccept(size_t group, uint32_t mask);
+    CsfResult streamAccept(size_t group, size_t stream, uint32_t mask);
 private:
     CsfMemoryOps ops_{};
     uint32_t bytes_ = 0, version_ = 0, groupCount_ = 0;
@@ -59,5 +63,6 @@ private:
     CsfResult output(const CsfEndpoint &, uint32_t, uint32_t *, uint32_t limit);
     CsfResult request(const CsfEndpoint &, uint32_t offset, uint32_t, uint32_t, bool);
     CsfResult acknowledged(const CsfEndpoint &, uint32_t, bool *);
+    CsfResult pending(const CsfEndpoint &, uint32_t, uint32_t *, bool accept);
 };
 } // namespace native_mali

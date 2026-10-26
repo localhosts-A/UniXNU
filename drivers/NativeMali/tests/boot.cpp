@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "NativeMaliBoot.h"
 #include "NativeMaliSha256.h"
+#include "NativeMaliScheduler.h"
+#include "NativeMaliSession.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -65,7 +67,7 @@ struct Model {
     std::map<std::pair<WindowId,uint32_t>,uint32_t> platform;
     uint64_t next=0x10000000;
     size_t writes=0,delays=0;
-    bool resetWorks=true,bootWorks=true,globalWorks=true;
+    bool resetWorks=true,bootWorks=true,globalWorks=true,queueWorks=true;
     Model() {
         regs[0]=0xd8300015;regs[0x14]=0x2830;regs[0x18]=0xffff;
         regs[0x100]=0xfff;regs[0x110]=1;regs[0x120]=3;
@@ -94,8 +96,9 @@ struct Model {
         assert(static_cast<Model *>(c)->memory.erase(a.handle)==1);free(a.handle);
     }
     static void memSync(void *,const FirmwareAllocation &,size_t,size_t) {}
-    uint32_t *gpu(uint32_t va) {
-        uint64_t pa=uint64_t(regs[0x2404])<<32|regs[0x2400];
+    uint32_t *gpu(uint64_t va,uint8_t as=0) {
+        const uint32_t root=0x2400+uint32_t(as)*0x40;
+        uint64_t pa=uint64_t(regs[root+4])<<32|regs[root];
         for(unsigned level=0;level<4;++level) {
             const auto table=tables.find(pa);if(table==tables.end())return nullptr;
             const uint64_t desc=table->second.entries[(uint64_t(va)>>(39-level*9))&511];
@@ -114,12 +117,21 @@ struct Model {
         else if(off==0x2004)m.regs[0x2000]&=~v;
         else m.regs[off]=v;
         if(off==0x30&&v==0x101&&m.resetWorks){m.regs[0x20]|=1u<<8;m.regs[0x704]=0;}
+        if(off==0x30&&v==0x3304)m.regs[0x20]|=1u<<17;
         if(off==0x1a0||off==0x1a4||off==0x190||off==0x194)m.regs[off-0x40]=v;
         if(off==0x700&&v==2){m.regs[0x704]=1;if(m.bootWorks){assert(m.gpu(0x04000000));m.regs[0x1000]|=Hardware::GlobalInterrupt;}}
         if(off==0x80000&&m.globalWorks) {
             auto in=m.gpu(0x04000008),out=m.gpu(0x0400000c);assert(in&&out);
             auto request=m.gpu(*in),ack=m.gpu(*out);assert(request&&ack);*ack=*request;
             m.regs[0x1000]|=Hardware::GlobalInterrupt;
+            *m.gpu(*out+8)=*m.gpu(*in+8);
+            if(m.queueWorks)for(size_t i=0;i<3;++i){
+                auto descriptor=m.gpu(0x04001000+i*0x100);assert(descriptor);
+                const auto groupIn=descriptor[1],groupOut=descriptor[2];
+                *m.gpu(groupOut)=*m.gpu(groupIn);*m.gpu(groupOut+8)=*m.gpu(groupIn+8);
+                for(size_t j=0;j<8;++j){auto stream=m.gpu(0x04001040+i*0x100+j*12);assert(stream);
+                    *m.gpu(stream[2])=*m.gpu(stream[1]);}
+            }
         }
         return true;
     }
@@ -144,6 +156,7 @@ struct Model {
         return true;
     }
     static void delay(void *c,uint32_t us){static_cast<Model *>(c)->delays+=us;}
+    static uint64_t now(void *c){return static_cast<Model *>(c)->delays*1000;}
     static void barrier(void *){}
     static bool zeroShared(void *,size_t off,size_t bytes){return !off&&bytes==0x4000;}
     BootConfig config(const std::vector<uint8_t>&r,const std::vector<uint8_t>&f) {
@@ -183,6 +196,91 @@ int main() {
         Model m;Boot boot;const auto bad=image(true),badRes=resources(bad);
         assert(boot.start(m.config(badRes,bad))==BootResult::Interface&&!boot.ready());
         assert(m.memory.empty()&&m.tables.empty());
+    }
+    {
+        Model m;Boot boot;auto config=m.config(res,fw);config.arenaPages=64;
+        assert(boot.start(config)==BootResult::Ok);Scheduler scheduler;
+        assert(scheduler.initialize(boot,{&m,Model::delay,nullptr},5)==QueueResult::Ok&&scheduler.capacity()==3);
+        uint32_t group=0,second=0,third=0,fourth=0;
+        assert(scheduler.create(1,1,&group)==QueueResult::Ok&&scheduler.owns(group,1));
+        assert(!scheduler.owns(group,2));
+        assert(scheduler.create(1,1,&second)==QueueResult::Ok&&scheduler.create(2,1,&third)==QueueResult::Ok);
+        assert(scheduler.create(1,1,&fourth)==QueueResult::Capacity);
+        QueueView view{};assert(scheduler.bind(group,0,0x100000000ull,65536,&view)==QueueResult::Ok);
+        assert(*m.gpu(0x04006050)==1&&*m.gpu(0x04007018)==65536&&*m.gpu(0x04007004)==0x100);
+        assert(scheduler.kick(group,0,65544)==QueueResult::Invalid);
+        assert(scheduler.kick(group,0,64)==QueueResult::Ok);
+        assert(scheduler.view(group,0,&view)==QueueResult::Ok&&view.insert==64&&view.extract==0);
+        // GPU execution is never synthesized by kick: the firmware actor alone
+        // advances extraction in this model.
+        *reinterpret_cast<uint64_t *>(m.gpu(view.output))=64;
+        assert(scheduler.suspend(1)==QueueResult::Ok&&scheduler.kick(group,0,128)==QueueResult::State);
+        assert(scheduler.resume(1)==QueueResult::Ok);
+        assert(scheduler.kick(group,0,128)==QueueResult::Ok);
+        assert(scheduler.kick(group,0,64)==QueueResult::Invalid);
+        assert(scheduler.poll()==QueueResult::Ok&&scheduler.error(1)==0);
+        assert(scheduler.destroy(group)==QueueResult::Ok&&!scheduler.owns(group,1));
+        assert(scheduler.create(1,1,&fourth)==QueueResult::Ok&&fourth!=group);
+        m.queueWorks=false;
+        assert(scheduler.bind(fourth,0,0x100010000ull,65536,&view)==QueueResult::Timeout);
+        assert(scheduler.error(1)&&scheduler.owns(fourth,1));
+        assert(scheduler.destroy(fourth)!=QueueResult::Ok&&scheduler.owns(fourth,1));
+        assert(boot.stop()==BootResult::Ok);scheduler.resetAfterQuiescence();assert(scheduler.capacity()==0);
+    }
+    {
+        Model m;Boot boot;auto config=m.config(res,fw);config.arenaPages=64;
+        assert(boot.start(config)==BootResult::Ok);Scheduler scheduler;
+        assert(scheduler.initialize(boot,{&m,Model::delay,nullptr},5)==QueueResult::Ok);
+        Session first,second;SessionOps ops{config.memory,config.tables,nullptr,Model::delay,Model::now};
+        assert(first.initialize(boot,scheduler,1,ops,32*1024*1024)==NML_OK);
+        assert(second.initialize(boot,scheduler,2,ops,32*1024*1024)==NML_OK);
+        const auto request=[](uint32_t op){nml_request r{};r.version=NML_ABI_VERSION;r.size=sizeof(r);r.operation=op;return r;};
+        nml_response out{};auto r=request(NML_GET_INFO);assert(first.call(r,&out)==NML_OK&&out.words[NML_INFO_GPU_ID]==0xd8300015);
+        assert(!(out.words[NML_INFO_CAPABILITIES]&NML_CAP_HOST_IMPORT));
+        r.size--;assert(first.call(r,&out)==NML_INVALID);r=request(NML_GET_INFO);r.reserved[0]=1;assert(first.call(r,&out)==NML_INVALID);
+        r=request(NML_BUFFER_ALLOC);r.length=4096;r.flags=NML_BUFFER_UNCACHED;
+        assert(first.call(r,&out)==NML_OK);const auto sync=out.object;const uint64_t syncVa=out.address;
+        assert(syncVa>=0x100000000ull&&m.gpu(syncVa,1));
+        r=request(NML_WAIT_VALUE);r.address=syncVa;r.value=8;r.timeout_ns=3000000;
+        assert(first.call(r,&out)==NML_TIMEOUT&&out.value==0);*reinterpret_cast<uint64_t *>(m.gpu(syncVa,1))=9;
+        assert(first.call(r,&out)==NML_OK&&out.value==9);assert(second.call(r,&out)==NML_INVALID);
+        r=request(NML_ALIAS_CREATE);r.parent=sync;r.length=4096;r.value=2;
+        assert(first.call(r,&out)==NML_OK);const auto alias=out.object;const uint64_t aliasVa=out.address;
+        assert(m.gpu(aliasVa,1)==m.gpu(syncVa,1)&&m.gpu(aliasVa+4096,1)==m.gpu(syncVa,1));
+        r=request(NML_BUFFER_FREE);r.object=sync;assert(first.call(r,&out)==NML_BUSY);
+        r.object=alias;assert(first.call(r,&out)==NML_OK);r.object=sync;assert(first.call(r,&out)==NML_OK);
+        r=request(NML_BUFFER_ALLOC);r.length=65536;assert(first.call(r,&out)==NML_OK);const auto ring=out.object;
+        r=request(NML_GROUP_CREATE);r.value=1;assert(first.call(r,&out)==NML_OK);const auto group=out.object;
+        r=request(NML_QUEUE_BIND);r.object=group;r.parent=ring;r.length=65536;assert(first.call(r,&out)==NML_OK);
+        assert(second.call(r,&out)==NML_INVALID);
+        r=request(NML_BUFFER_FREE);r.object=ring;assert(first.call(r,&out)==NML_BUSY);
+        r=request(NML_QUEUE_KICK);r.object=group;r.value=64;assert(first.call(r,&out)==NML_OK);
+        r=request(NML_QUEUE_UNBIND);r.object=group;assert(first.call(r,&out)==NML_OK);
+        r=request(NML_BUFFER_FREE);r.object=ring;assert(first.call(r,&out)==NML_OK);
+        r=request(NML_GROUP_DESTROY);r.object=group;assert(first.call(r,&out)==NML_OK);
+        r=request(NML_HEAP_CREATE);r.length=4096;r.value=2;r.offset=4;r.address=65535;
+        assert(first.call(r,&out)==NML_OK);const auto heap=out.object;const auto heapVa=out.address;
+        const uint64_t next=*reinterpret_cast<uint64_t *>(m.gpu(out.value,1));assert((next&4095)==1&&(next&~4095ull));
+        assert(*reinterpret_cast<uint64_t *>(m.gpu(heapVa,1))==0);
+        uint64_t chunk=0;assert(first.oom(heapVa,2,1,0,&chunk)&&chunk);
+        assert(*reinterpret_cast<uint64_t *>(m.gpu(chunk&~4095ull,1))==0);
+        r=request(NML_HEAP_DESTROY);r.object=heap;assert(first.call(r,&out)==NML_OK);
+        assert(second.close()==NML_OK&&first.close()==NML_OK);assert(boot.stop()==BootResult::Ok);
+    }
+    {
+        Model m;Boot boot;auto config=m.config(res,fw);config.arenaPages=64;
+        assert(boot.start(config)==BootResult::Ok);Scheduler scheduler;
+        assert(scheduler.initialize(boot,{&m,Model::delay,nullptr},5)==QueueResult::Ok);
+        Session session;SessionOps ops{config.memory,config.tables,nullptr,Model::delay,Model::now};
+        assert(session.initialize(boot,scheduler,1,ops,32*1024*1024)==NML_OK);
+        nml_request r{};r.version=NML_ABI_VERSION;r.size=sizeof(r);r.operation=NML_BUFFER_ALLOC;r.length=65536;
+        nml_response out{};assert(session.call(r,&out)==NML_OK);const auto ring=out.object;
+        r={};r.version=NML_ABI_VERSION;r.size=sizeof(r);r.operation=NML_GROUP_CREATE;r.value=1;
+        assert(session.call(r,&out)==NML_OK);const auto group=out.object;
+        r={};r.version=NML_ABI_VERSION;r.size=sizeof(r);r.operation=NML_QUEUE_BIND;r.object=group;r.parent=ring;r.length=65536;
+        assert(session.call(r,&out)==NML_OK);const auto allocations=m.memory.size();m.queueWorks=false;
+        assert(session.close()==NML_DEVICE_LOST&&session.retained()&&m.memory.size()==allocations);
+        assert(boot.stop()==BootResult::Ok);assert(session.close(true)==NML_OK);
     }
     puts("PASS: production boot composition, real page-table walk, SHA binding, MCU/global ACK gates, rollback and DMA quarantine; hardware_exercised=false");
 }

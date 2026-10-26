@@ -27,7 +27,7 @@ def main():
              ('csf', ['NativeMaliCsf.cpp']),
              ('hardware', ['NativeMaliHardware.cpp']),
              ('platform', ['NativeMaliPlatform.cpp', 'NativeMaliResources.cpp']),
-             ('boot', ['NativeMaliBoot.cpp', 'NativeMaliSha256.cpp', 'NativeMaliCsf.cpp', 'NativeMaliHardware.cpp',
+             ('boot', ['NativeMaliBoot.cpp', 'NativeMaliScheduler.cpp', 'NativeMaliSession.cpp', 'NativeMaliSha256.cpp', 'NativeMaliCsf.cpp', 'NativeMaliHardware.cpp',
                        'NativeMaliPlatform.cpp', 'NativeMaliResources.cpp', 'NativeMaliMmu.cpp',
                        'NativeMaliFirmware.cpp', 'NativeMaliFirmwareMemory.cpp', 'NativeMaliFirmwareSetup.cpp']),
              ('firmware-memory', ['NativeMaliMmu.cpp', 'NativeMaliFirmware.cpp',

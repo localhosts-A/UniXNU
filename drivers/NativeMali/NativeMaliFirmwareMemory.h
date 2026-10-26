@@ -40,6 +40,12 @@ public:
     bool seal() { if (!prepared_) return false; sealed_ = true; return true; }
     bool read32(uint32_t virtualAddress, uint32_t *);
     bool write32(uint32_t virtualAddress, uint32_t);
+    bool read64(uint32_t virtualAddress, uint64_t *);
+    bool write64(uint32_t virtualAddress, uint64_t);
+    bool zero(uint32_t virtualAddress, size_t bytes);
+    // Kernel-only backing view, used to create a read-only client mapping of a
+    // queue output page. Never export firmware image or input pages to clients.
+    bool backing(uint32_t address, size_t bytes, FirmwareAllocation *, size_t *offset);
     bool prepared() const { return prepared_; }
     bool ownsStorage() const { return prepared_ || count_; }
     size_t pageCount() const { return prepared_ ? totalPages_ : 0; }

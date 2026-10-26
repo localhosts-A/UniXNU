@@ -170,4 +170,32 @@ bool FirmwareMemory::write32(uint32_t address, uint32_t value)
     ops_.publish(ops_.cookie, region->memory, offset, 4);
     return true;
 }
+bool FirmwareMemory::backing(uint32_t address, size_t bytes, FirmwareAllocation *allocation, size_t *offset)
+{
+    if (!allocation || !offset || !accessible(address, bytes, FirmwareImage::Read | FirmwareImage::Write)) return false;
+    Region *region = containing(address, true);
+    if (!region) return false;
+    *allocation = region->memory; *offset = address - region->layout.start; return true;
+}
+bool FirmwareMemory::read64(uint32_t address, uint64_t *value)
+{
+    FirmwareAllocation allocation{}; size_t offset = 0;
+    if (!value || (address & 7) || !backing(address, 8, &allocation, &offset)) return false;
+    ops_.acquire(ops_.cookie, allocation, offset, 8);
+    *value = __atomic_load_n(reinterpret_cast<uint64_t *>(allocation.cpu + offset), __ATOMIC_ACQUIRE); return true;
+}
+bool FirmwareMemory::write64(uint32_t address, uint64_t value)
+{
+    FirmwareAllocation allocation{}; size_t offset = 0;
+    if ((address & 7) || !backing(address, 8, &allocation, &offset)) return false;
+    __atomic_store_n(reinterpret_cast<uint64_t *>(allocation.cpu + offset), value, __ATOMIC_RELEASE);
+    ops_.publish(ops_.cookie, allocation, offset, 8); return true;
+}
+bool FirmwareMemory::zero(uint32_t address, size_t bytes)
+{
+    FirmwareAllocation allocation{}; size_t offset = 0;
+    if (!backing(address, bytes, &allocation, &offset)) return false;
+    for (size_t i = 0; i < bytes; ++i) allocation.cpu[offset + i] = 0;
+    ops_.publish(ops_.cookie, allocation, offset, bytes); return true;
+}
 } // namespace native_mali

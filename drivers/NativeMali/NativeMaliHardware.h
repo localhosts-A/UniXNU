@@ -45,6 +45,7 @@ public:
     HardwareResult fault(HardwareFault *);
     HardwareResult latestFlush(uint32_t *);
     HardwareResult timestamp(uint64_t *);
+    HardwareResult synchronizeMemory(uint32_t timeoutUs);
     bool mcuRunning() const { return running_; }
     bool quiesced() const { return reset_ && !running_; }
 private:
