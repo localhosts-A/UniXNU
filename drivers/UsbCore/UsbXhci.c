@@ -554,7 +554,7 @@ int usb_xhci_event_decode(const struct usb_xhci_trb *trb, struct usb_xhci_event 
         break;
     case USB_XHCI_TRB_COMMAND_EVENT:
         decoded.kind = USB_XHCI_EVENT_COMMAND_COMPLETION;
-        decoded.data.command.command_trb_pointer = parameter & ~UINT64_C(0x0f);
+        decoded.data.command.command_trb_pointer = parameter & ~(uint64_t)0x0fu;
         decoded.data.command.completion_parameter = dword2 & 0x00ffffffu;
         decoded.data.command.vf_id = (uint8_t)((dword3 >> 16) & 0xffu);
         decoded.data.command.slot_id = (uint8_t)(dword3 >> 24);
