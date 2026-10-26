@@ -20,6 +20,15 @@ class SourceHidTests(unittest.TestCase):
         self.assertIn('IOHIDSystem/IOHITablet.cpp', HID.SYSTEM_SUPPORT_SOURCES)
         self.assertIn('IOHITablet', HID.CLASSES)
 
+    def test_support_archive_does_not_repeat_embedded_source_units(self):
+        self.assertNotIn('IOHIDFamily/Cosmo_USB2ADB.c', HID.SYSTEM_SUPPORT_SOURCES)
+        self.assertNotIn('IOHIDFamily/IOHIDEventServiceQueue.cpp', HID.SYSTEM_SUPPORT_SOURCES)
+
+    def test_source_inputs_reject_basename_collisions(self):
+        with self.assertRaisesRegex(ValueError, 'basename appears more than once'):
+            HID.ensure_unique_source_basenames([
+                Path('/tmp/one/Shared.cpp'), Path('/tmp/two/Shared.cpp')])
+
     def test_system_support_sources_are_resolved_from_the_fixed_family_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / 'IOHIDFamily'

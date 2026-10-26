@@ -57,11 +57,9 @@ SYSTEM_SUPPORT_SOURCES = (
     'IOHIDFamily/IOHIDConsumer.cpp',
     'IOHIDFamily/IOHIDKeyboard.cpp',
     'IOHIDFamily/IOHIDPointing.cpp',
-    'IOHIDFamily/Cosmo_USB2ADB.c',
     'IOHIDSystem/IOFixed64.cpp',
     'IOHIDSystem/IOFixedPoint64.cpp',
     'IOHIDSystem/IOHIDDeviceShim.cpp',
-    'IOHIDFamily/IOHIDEventServiceQueue.cpp',
     'IOHIDSystem/IOHIDKeyboardDevice.cpp',
     'IOHIDSystem/IOHIDKeyboardEventDevice.cpp',
     'IOHIDSystem/IOHIDPointingDevice.cpp',
@@ -139,6 +137,21 @@ def system_support_sources(source=SOURCE):
             raise ValueError('Pinned IOHIDFamily support source is missing: ' + relative)
         result.append(path)
     return result
+
+def source_inputs(source=SOURCE):
+    """Return both source phases while protecting basename-based object names."""
+    return ensure_unique_source_basenames(
+        embedded_sources(source) + system_support_sources(source))
+
+def ensure_unique_source_basenames(inputs):
+    seen = {}
+    for path in inputs:
+        previous = seen.get(path.name)
+        if previous is not None:
+            raise ValueError('HID source basename appears more than once: ' +
+                             path.name + ' (' + str(previous) + ', ' + str(path) + ')')
+        seen[path.name] = path
+    return inputs
 
 def prepare_headers(source, out, macos_sdk, event_headers=None, apple_usages=None):
     include = out / 'include'
@@ -239,7 +252,7 @@ def build():
     revision = subprocess.check_output(['git', '-C', SOURCE, 'rev-parse', 'HEAD'], text=True).strip()
     if revision != REVISION or subprocess.check_output(['git', '-C', SOURCE, 'status', '--porcelain'], text=True).strip():
         raise ValueError('IOHIDFamily must be a clean checkout of the fixed revision')
-    inputs = embedded_sources() + system_support_sources()
+    inputs = source_inputs()
     header_revision = verify_event_headers(EVENT_SOURCE)
     usages_revision = verify_apple_usages(APPLE_USAGES_SOURCE)
     helper = storage_helpers()
@@ -258,7 +271,7 @@ def build():
     for patch in (PUBLIC_PATCH, PRIVATE_COMPAT_PATCH):
         subprocess.run(['git', 'apply', '--check', str(patch)], cwd=source_tree, check=True)
         subprocess.run(['git', 'apply', str(patch)], cwd=source_tree, check=True)
-    inputs = embedded_sources(source_tree) + system_support_sources(source_tree)
+    inputs = source_inputs(source_tree)
     macos_sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
     include, sdk_inputs = prepare_headers(source_tree, OUT, macos_sdk)
     xnu = ROOT / '.cache/xnu-work'
