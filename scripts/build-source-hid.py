@@ -23,7 +23,8 @@ EVENT_REVISION = '2365347f5147a1e2a46de21acd08d27fe0906e85'
 # Public 2031 omits its schema/generator. This explicit source port retains
 # the published 1915 event layout; it does not claim the private 2031 event ABI.
 EVENT_SCHEMA = 'IOHIDFamily-1915.140.3'
-UNSUPPORTED_EVENTS = ('game-controller-bottom-M1-M4', 'digitizer-estimated-roll')
+UNSUPPORTED_EVENTS = ('game-controller-bottom-M1-M4', 'digitizer-estimated-roll',
+                      'unpublished-apple-vendor-usages', 'private-property-forwarding')
 OUT = ROOT / 'build/source-hid'
 ARCHIVE = OUT / 'libIOHIDFamily.a'
 PHASE = '84D292320CC90C8E00698218'
@@ -166,9 +167,9 @@ def build():
     macos_sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
     include, sdk_inputs = prepare_headers(source_tree, OUT, macos_sdk)
     xnu = ROOT / '.cache/xnu-work'
-    includes = [include, source_tree, source_tree / 'IOHIDFamily', source_tree / 'IOHIDSystem',
+    includes = [include, include / 'IOKit/hid', source_tree, source_tree / 'IOHIDFamily', source_tree / 'IOHIDSystem',
                 source_tree / 'IOHIDSystem/IOKit/hidsystem', source_tree / 'IOHIDSystem/IOHIDDescriptorParser',
-                xnu / 'iokit', ROOT / 'build/storage-abi/include',
+                xnu / 'iokit', xnu / 'osfmk', xnu / 'bsd', ROOT / 'build/storage-abi/include',
                 macos_sdk / 'System/Library/Frameworks/Kernel.framework/Headers']
     sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
     iig = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--find', 'iig'], text=True).strip()
@@ -210,7 +211,8 @@ def build():
         if source.suffix == '.c':
             command[3] = 'clang'
         command += ['-DAPPLE_KEXT_ASSERTIONS=1', '-DDISPATCH_MACH_SPI=1',
-                    '-DOS_CRASH_ENABLE_EXPERIMENTAL_LIBTRACE=1', '-DIOHIDFAMILY_104187687_HIDE=1']
+                    '-DOS_CRASH_ENABLE_EXPERIMENTAL_LIBTRACE=1', '-DIOHIDFAMILY_104187687_HIDE=1',
+                    '-DDALI_HID_PRIVATE_APPLE_USAGES=0']
         log = obj.with_suffix('.log')
         (OUT / (source.name + '.command.json')).write_text(json.dumps(command, indent=2) + '\n')
         row = {'source': str(source.relative_to(ROOT)), 'source_sha256': digest(source), 'command': command}

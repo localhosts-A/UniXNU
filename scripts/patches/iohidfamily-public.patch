@@ -1,26 +1,150 @@
-diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.cpp
---- a/IOHIDFamily/IOHIDEventService.cpp
-+++ b/IOHIDFamily/IOHIDEventService.cpp
-@@ -58,7 +58,6 @@
- #include <stdatomic.h>
+diff --git a/IOHIDFamily/AppleUserHIDDevice.cpp b/IOHIDFamily/AppleUserHIDDevice.cpp
+index 5eaea8c..7c44bfd 100644
+--- a/IOHIDFamily/AppleUserHIDDevice.cpp
++++ b/IOHIDFamily/AppleUserHIDDevice.cpp
+@@ -120,7 +120,7 @@ bool AppleUserHIDDevice::init (OSDictionary * dict)
  
- #include "IOHIDEventServiceUserClient.h"
--#include "IOHIDEventServiceFastPathUserClient.h"
+     super::setProperty(kIOServiceDEXTEntitlementsKey, kIOHIDDeviceDextEntitlement);
+     
+-    super::setProperty(kIOHIDRegisterServiceKey, kOSBooleanFalse);
++    super::setProperty(kDaliPublicHidRegisterServiceKey, kOSBooleanFalse);
+     
+     ret = true;
+     
+@@ -160,7 +160,7 @@ bool AppleUserHIDDevice::start(IOService * provider)
+     IOReturn ret    = kIOReturnSuccess;
+     bool     status = false;
+    
+-    bool dkStart = getProperty(kIOHIDDKStartKey) == kOSBooleanTrue;
++    bool dkStart = getProperty(kDaliPublicHidDKStartKey) == kOSBooleanTrue;
+     
+     HIDDeviceLog("start (state:0x%x)", _state);
  
- extern "C" int  kern_stack_snapshot_with_reason(char *reason);
- extern "C" kern_return_t sysdiagnose_notify_user(uint32_t keycode);
-@@ -2424,10 +2423,6 @@
-         
-         client = OSTypeAlloc(IOHIDEventServiceUserClient);
+diff --git a/IOHIDFamily/AppleUserHIDEventService.cpp b/IOHIDFamily/AppleUserHIDEventService.cpp
+index 8dbb97d..025e7d3 100644
+--- a/IOHIDFamily/AppleUserHIDEventService.cpp
++++ b/IOHIDFamily/AppleUserHIDEventService.cpp
+@@ -124,7 +124,7 @@ bool AppleUserHIDEventService::init(OSDictionary *dict)
      
--    } else if (type == kIOHIDEventServiceFastPathUserClientType) {
--    
--        client = OSTypeAlloc(IOHIDEventServiceFastPathUserClient);
--    
-     } else {
+     super::setProperty(kIOServiceDEXTEntitlementsKey, kIOHIDEventServiceDextEntitlement);
      
-         return super::newUserClient(owningTask, securityID, type, properties, handler);
+-    super::setProperty(kIOHIDRegisterServiceKey, kOSBooleanFalse);
++    super::setProperty(kDaliPublicHidRegisterServiceKey, kOSBooleanFalse);
+ 
+     return true;
+ }
+@@ -154,7 +154,7 @@ bool AppleUserHIDEventService::start(IOService * provider)
+     IOReturn        ret       = kIOReturnSuccess;
+     IOHIDInterface *interface = NULL;
+     
+-    bool dkStart = getProperty(kIOHIDDKStartKey) == kOSBooleanTrue;
++    bool dkStart = getProperty(kDaliPublicHidDKStartKey) == kOSBooleanTrue;
+ 
+     HIDEventServiceLog ("start (state:0x%x)", _state);
+ 
+diff --git a/IOHIDFamily/IOHIDDevice.cpp b/IOHIDFamily/IOHIDDevice.cpp
+index 23c4568..1c5bce3 100644
+--- a/IOHIDFamily/IOHIDDevice.cpp
++++ b/IOHIDFamily/IOHIDDevice.cpp
+@@ -32,7 +32,7 @@
+ #include <IOKit/IOMessage.h>
+ #include <libkern/OSKextLib.h>
+ #include <IOKit/IOKitKeys.h>
+-#include <IOKit/IOReporter.h>
++#include <IOKit/IOKernelReporters.h>
+ 
+ #include "IOHIDFamilyPrivate.h"
+ #include <IOKit/hid/IOHIDDevice.h>
+@@ -441,13 +441,15 @@ bool IOHIDDevice::start( IOService * provider )
+     createReporters();
+ 
+     // Enable multiple interfaces if the first top-level collection has usage pair kHIDPage_AppleVendor, kHIDUsage_AppleVendor_MultipleInterfaces
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     if (_elementArray->getCount() > 1 &&
+         ((IOHIDElement *)_elementArray->getObject(1))->getUsagePage() == kHIDPage_AppleVendor &&
+         ((IOHIDElement *)_elementArray->getObject(1))->getUsage() == kHIDUsage_AppleVendor_MultipleInterfaces) {
+-        setProperty(kIOHIDMultipleInterfaceEnabledKey, kOSBooleanTrue);
++        setProperty(kDaliPublicHidMultipleInterfaceEnabledKey, kOSBooleanTrue);
+     }
++#endif
+ 
+-    multipleInterface = (getProperty(kIOHIDMultipleInterfaceEnabledKey) == kOSBooleanTrue);
++    multipleInterface = (getProperty(kDaliPublicHidMultipleInterfaceEnabledKey) == kOSBooleanTrue);
+ 
+     _hierarchElements = _elementContainer->getFlattenedElements();
+     require(_hierarchElements, exit);
+@@ -535,7 +537,7 @@ bool IOHIDDevice::start( IOService * provider )
+     matching->release();
+     require(_deviceNotify, exit);
+     
+-    obj = getProperty(kIOHIDRegisterServiceKey);
++    obj = getProperty(kDaliPublicHidRegisterServiceKey);
+     if (obj != kOSBooleanFalse) {
+         registerService();
+     }
+@@ -899,7 +901,7 @@ bool IOHIDDevice::publishProperties(IOService * provider __unused)
+         SET_PROP_FROM_VALUE(    kIOHIDMaxFeatureReportSizeKey,  copyProperty(kIOHIDMaxFeatureReportSizeKey));
+         SET_PROP_FROM_VALUE(    kIOHIDReportPoolSizeKey,        copyProperty(kIOHIDReportPoolSizeKey));
+         SET_PROP_FROM_VALUE(    kIOHIDReportDescriptorKey,      copyProperty(kIOHIDReportDescriptorKey));
+-        SET_PROP_FROM_VALUE(    kIOHIDProtectedAccessKey,       newIsAccessProtected());
++        SET_PROP_FROM_VALUE(    kDaliPublicHidProtectedAccessKey,       newIsAccessProtected());
+ 
+         if ( getProvider() )
+         {
+@@ -1504,10 +1506,12 @@ OSBoolean * IOHIDDevice::newIsAccessProtected()
+         const UInt32 usagePage;
+         const UInt32 usage;
+     };
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     static const UsagePair ProtectedAccessUsagePairs[] = {
+         {kHIDPage_AppleVendor, 0x004B},
+         {kHIDPage_AppleVendor, 0x004D}
+     };
++#endif
+ 
+     struct AppleVendorID {
+         const char * transport;
+@@ -1528,8 +1532,8 @@ OSBoolean * IOHIDDevice::newIsAccessProtected()
+     do {
+         bool ok = false;
+ 
+-        // A value previously set for kIOHIDProtectedAccessKey takes precedence
+-        obj = copyProperty(kIOHIDProtectedAccessKey);
++        // A value previously set for kDaliPublicHidProtectedAccessKey takes precedence
++        obj = copyProperty(kDaliPublicHidProtectedAccessKey);
+         boolean = OSDynamicCast(OSBoolean, obj);
+         if (boolean) {
+             break;
+@@ -1553,12 +1557,18 @@ OSBoolean * IOHIDDevice::newIsAccessProtected()
+         }
+ 
+         // Test protected usages against this device's usage pairs
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         for (size_t i = 0; i<sizeof(ProtectedAccessUsagePairs)/sizeof(ProtectedAccessUsagePairs[0]); i++) {
+             if (conformsTo(ProtectedAccessUsagePairs[i].usagePage, ProtectedAccessUsagePairs[i].usage)) {
+                 boolean = kOSBooleanTrue;
+                 break;
+             }
+         }
++#else
++        // The private usage values are unpublished. Keep potentially protected
++        // first-party devices protected instead of silently weakening access.
++        boolean = kOSBooleanTrue;
++#endif
+ 
+     } while (0);
+ 
+@@ -2629,7 +2639,7 @@ OSMetaClassDefineReservedUnused(IOHIDDevice, 40);
+ kern_return_t
+ IMPL(IOHIDDevice, _Start)
+ {
+-    setProperty(kIOHIDDKStartKey, kOSBooleanTrue);
++    setProperty(kDaliPublicHidDKStartKey, kOSBooleanTrue);
+     
+     bool ret = start(provider);
+     
 diff --git a/IOHIDFamily/IOHIDDeviceTypes.h b/IOHIDFamily/IOHIDDeviceTypes.h
+index de9e54f..6e2e15d 100644
 --- a/IOHIDFamily/IOHIDDeviceTypes.h
 +++ b/IOHIDFamily/IOHIDDeviceTypes.h
 @@ -27,7 +27,8 @@
@@ -33,10 +157,30 @@ diff --git a/IOHIDFamily/IOHIDDeviceTypes.h b/IOHIDFamily/IOHIDDeviceTypes.h
  #include <DriverKit/IOTypes.h>
  #include <DriverKit/IOReturn.h>
  #else
+diff --git a/IOHIDFamily/IOHIDElementPrivate.cpp b/IOHIDFamily/IOHIDElementPrivate.cpp
+index b3324e2..a2fd4f4 100644
+--- a/IOHIDFamily/IOHIDElementPrivate.cpp
++++ b/IOHIDFamily/IOHIDElementPrivate.cpp
+@@ -291,12 +291,14 @@ IOHIDElementPrivate::valueElement( IOHIDElementContainer *     owner,
+         element->_reportCount = 1;
+     }
+   
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     if (parent && parent->getUsagePage() == kHIDPage_AppleVendor &&
+        (parent->getUsage() == kHIDUsage_AppleVendor_Message ||
+         parent->getUsage() == kHIDUsage_AppleVendor_Payload))
+     {
+         element->_flags |= kIOHIDElementVariableSizeElement;
+     }
++#endif
+     // Register with owner and parent, then spawn sub-elements.
+ 
+     if ( ( owner->registerElement( element, &element->_cookie ) == true )
 diff --git a/IOHIDFamily/IOHIDEvent.cpp b/IOHIDFamily/IOHIDEvent.cpp
+index 26ae537..9018072 100644
 --- a/IOHIDFamily/IOHIDEvent.cpp
 +++ b/IOHIDFamily/IOHIDEvent.cpp
-@@ -907,7 +907,7 @@
+@@ -907,7 +907,7 @@ IOHIDEvent * IOHIDEvent::digitizerEvent(
      event->position.z       = z;
      event->pressure         = tipPressure;
      event->auxPressure      = auxPressure;
@@ -45,7 +189,7 @@ diff --git a/IOHIDFamily/IOHIDEvent.cpp b/IOHIDFamily/IOHIDEvent.cpp
  
  
      // Let's assume no tip pressure means finger
-@@ -1356,6 +1356,11 @@
+@@ -1356,6 +1356,11 @@ IOHIDEvent * IOHIDEvent::extendedGameControllerEventWithOptionalButtons(
          IOFixed                         bottomM4,
          IOOptionBits                    options)
  {
@@ -57,22 +201,23 @@ diff --git a/IOHIDFamily/IOHIDEvent.cpp b/IOHIDFamily/IOHIDEvent.cpp
      IOHIDEvent *me = standardGameControllerEvent(timeStamp, dpadUp, dpadDown, dpadLeft, dpadRight, faceX, faceY, faceA, faceB, shoulderL1, shoulderR1, options);
      IOHIDGameControllerEventData *event = NULL;
      __IOHIDGameControllerEventData *extData = NULL;
-@@ -1371,11 +1376,6 @@
-     event->joystick.y   = joystickY;
+@@ -1372,11 +1377,6 @@ IOHIDEvent * IOHIDEvent::extendedGameControllerEventWithOptionalButtons(
      event->joystick.z   = joystickZ;
      event->joystick.rz  = joystickRz;
--
+ 
 -    extData->bottom.m1 = bottomM1;
 -    extData->bottom.m2 = bottomM2;
 -    extData->bottom.m3 = bottomM3;
 -    extData->bottom.m4 = bottomM4;
- 
+-
      extData->thumbstickButtonLeft = thumbstickButtonLeft;
      extData->thumbstickButtonRight = thumbstickButtonRight;
+     extData->l4  = shoulderL4;
 diff --git a/IOHIDFamily/IOHIDEventData.h b/IOHIDFamily/IOHIDEventData.h
+index f1f7c53..c5cd32d 100644
 --- a/IOHIDFamily/IOHIDEventData.h
 +++ b/IOHIDFamily/IOHIDEventData.h
-@@ -232,7 +232,6 @@
+@@ -232,7 +232,6 @@ typedef struct  __attribute__((packed,,aligned(4))) _IOHIDSystemQueueElement {
          value  = (((IOHIDDigitizerEventData*)event)->eventMask & kIOHIDDigitizerEventEstimatedAltitude) ? kIOHIDDigitizerEventUpdateAltitudeMask : 0; \
          value |= (((IOHIDDigitizerEventData*)event)->eventMask & kIOHIDDigitizerEventEstimatedAzimuth) ? kIOHIDDigitizerEventUpdateAzimuthMask : 0;   \
          value |= (((IOHIDDigitizerEventData*)event)->eventMask & kIOHIDDigitizerEventEstimatedPressure) ? kIOHIDDigitizerEventUpdatePressureMask : 0; \
@@ -80,7 +225,7 @@ diff --git a/IOHIDFamily/IOHIDEventData.h b/IOHIDFamily/IOHIDEventData.h
          break;                                                                                                               \
      }                                                                                                                        \
      _IOHIDUnknowDefaultField(event, field)
-@@ -245,8 +244,6 @@
+@@ -245,8 +244,6 @@ typedef struct  __attribute__((packed,,aligned(4))) _IOHIDSystemQueueElement {
                                                     ((value & kIOHIDDigitizerEventUpdateAzimuthMask) ? kIOHIDDigitizerEventEstimatedAzimuth : 0); \
          ((IOHIDDigitizerEventData*)event)->eventMask = (((IOHIDDigitizerEventData*)event)->eventMask & ~kIOHIDDigitizerEventEstimatedPressure) | \
                                                   ((value & kIOHIDDigitizerEventUpdatePressureMask) ? kIOHIDDigitizerEventEstimatedPressure : 0); \
@@ -89,73 +234,487 @@ diff --git a/IOHIDFamily/IOHIDEventData.h b/IOHIDFamily/IOHIDEventData.h
          break;                                                                                                               \
      }                                                                                                                        \
      _IOHIDUnknowDefaultField(event, field)
-diff --git a/IOHIDFamily/AppleUserHIDEventService.cpp b/IOHIDFamily/AppleUserHIDEventService.cpp
---- a/IOHIDFamily/AppleUserHIDEventService.cpp
-+++ b/IOHIDFamily/AppleUserHIDEventService.cpp
-@@ -124,7 +124,7 @@
-     
-     super::setProperty(kIOServiceDEXTEntitlementsKey, kIOHIDEventServiceDextEntitlement);
-     
--    super::setProperty(kIOHIDRegisterServiceKey, kOSBooleanFalse);
-+    super::setProperty(kDaliPublicHidRegisterServiceKey, kOSBooleanFalse);
- 
-     return true;
- }
-@@ -154,7 +154,7 @@
-     IOReturn        ret       = kIOReturnSuccess;
-     IOHIDInterface *interface = NULL;
-     
--    bool dkStart = getProperty(kIOHIDDKStartKey) == kOSBooleanTrue;
-+    bool dkStart = getProperty(kDaliPublicHidDKStartKey) == kOSBooleanTrue;
- 
-     HIDEventServiceLog ("start (state:0x%x)", _state);
- 
-diff --git a/IOHIDFamily/AppleUserHIDDevice.cpp b/IOHIDFamily/AppleUserHIDDevice.cpp
---- a/IOHIDFamily/AppleUserHIDDevice.cpp
-+++ b/IOHIDFamily/AppleUserHIDDevice.cpp
-@@ -120,7 +120,7 @@
- 
-     super::setProperty(kIOServiceDEXTEntitlementsKey, kIOHIDDeviceDextEntitlement);
-     
--    super::setProperty(kIOHIDRegisterServiceKey, kOSBooleanFalse);
-+    super::setProperty(kDaliPublicHidRegisterServiceKey, kOSBooleanFalse);
-     
-     ret = true;
-     
-@@ -160,7 +160,7 @@
-     IOReturn ret    = kIOReturnSuccess;
-     bool     status = false;
-    
--    bool dkStart = getProperty(kIOHIDDKStartKey) == kOSBooleanTrue;
-+    bool dkStart = getProperty(kDaliPublicHidDKStartKey) == kOSBooleanTrue;
-     
-     HIDDeviceLog("start (state:0x%x)", _state);
- 
-diff --git a/IOHIDFamily/IOHIDDevice.cpp b/IOHIDFamily/IOHIDDevice.cpp
---- a/IOHIDFamily/IOHIDDevice.cpp
-+++ b/IOHIDFamily/IOHIDDevice.cpp
-@@ -535,7 +535,7 @@
-     matching->release();
-     require(_deviceNotify, exit);
-     
--    obj = getProperty(kIOHIDRegisterServiceKey);
-+    obj = getProperty(kDaliPublicHidRegisterServiceKey);
-     if (obj != kOSBooleanFalse) {
-         registerService();
+diff --git a/IOHIDFamily/IOHIDEventDriver.cpp b/IOHIDFamily/IOHIDEventDriver.cpp
+index 7cfe936..e3676ab 100644
+--- a/IOHIDFamily/IOHIDEventDriver.cpp
++++ b/IOHIDFamily/IOHIDEventDriver.cpp
+@@ -937,9 +937,13 @@ void IOHIDEventDriver::processDigitizerElements()
+         _multiAxis.disabled = true;
      }
-@@ -2629,7 +2629,7 @@
- kern_return_t
- IMPL(IOHIDDevice, _Start)
- {
--    setProperty(kIOHIDDKStartKey, kOSBooleanTrue);
-+    setProperty(kDaliPublicHidDKStartKey, kOSBooleanTrue);
+ 
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     if (!conformTo(kHIDPage_AppleVendor, kHIDUsage_AppleVendor_DFR)) {
+         setProperty("SupportsInk", 1, 32);
+     }
++#else
++    setProperty("SupportsInk", 1, 32);
++#endif
+ exit:
+     if ( orphanedElements )
+         orphanedElements->release();
+@@ -1109,7 +1113,11 @@ void IOHIDEventDriver::setDigitizerProperties()
+     require(properties, exit);
+     require(_digitizer.transducers, exit);
+ 
+-    if (conformTo (kHIDPage_AppleVendor, kHIDUsage_AppleVendor_DFR) || conformTo(kHIDPage_Digitizer, kHIDUsage_Dig_TouchPad) || getProperty(kIOHIDDigitizerCollectionDispatchKey, gIOServicePlane) == kOSBooleanTrue) {
++    if (
++#if DALI_HID_PRIVATE_APPLE_USAGES
++        conformTo (kHIDPage_AppleVendor, kHIDUsage_AppleVendor_DFR) ||
++#endif
++        conformTo(kHIDPage_Digitizer, kHIDUsage_Dig_TouchPad) || getProperty(kIOHIDDigitizerCollectionDispatchKey, gIOServicePlane) == kOSBooleanTrue) {
+         _digitizer.collectionDispatch = true;
+     }
+   
+@@ -1889,11 +1897,13 @@ bool IOHIDEventDriver::parseDigitizerElement(IOHIDElement * element)
+         // element of transducerIndex 0
+     }
      
-     bool ret = start(provider);
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     if (element->getUsagePage() == kHIDPage_AppleVendorMultitouch && element->getUsage() == kHIDUsage_AppleVendorMultitouch_TouchCancel) {
+         OSSafeReleaseNULL(_digitizer.touchCancelElement);
+         element->retain();
+         _digitizer.touchCancelElement = element;
+     }
++#endif
      
+     if (element->getUsagePage() == kHIDPage_Digitizer && element->getUsage() == kHIDUsage_Dig_Untouch) {
+         _digitizer.collectionDispatch = true;
+@@ -2322,40 +2332,78 @@ bool IOHIDEventDriver::parseKeyboardElement(IOHIDElement * element)
+         case kHIDPage_CameraControl:
+             store = true;
+             break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorTopCase:
+             if (_keyboard.appleVendorSupported) {
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AV_TopCase_BrightnessDown:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AV_TopCase_BrightnessUp:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AV_TopCase_IlluminationDown:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AV_TopCase_IlluminationUp:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AV_TopCase_KeyboardFn:
+                     store = true;
+                     break;
++#endif
+                 }
+             }
+             break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorKeyboard:
+             if (_keyboard.appleVendorSupported) {
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Spotlight:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Dashboard:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Function:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Launchpad:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Reserved:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_CapsLockDelayEnable:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_PowerState:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Expose_All:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Expose_Desktop:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Brightness_Up:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Brightness_Down:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorKeyboard_Language:
+                     store = true;
+                     break;
++#endif
+                 }
+             }
+             break;
+ 
++#endif
+         default:
+             // Enumerate blessed AppleVendor usages.
+             if (!_keyboard.blessedUsagePairs) {
+@@ -2421,6 +2469,7 @@ bool IOHIDEventDriver::parseVendorMessageElement(IOHIDElement * element)
+   
+     parent = element->getParentElement();
+   
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     if (parent &&
+         (parent->getCollectionType() == kIOHIDElementCollectionTypeApplication ||
+          parent->getCollectionType() == kIOHIDElementCollectionTypePhysical) &&
+@@ -2473,6 +2522,7 @@ bool IOHIDEventDriver::parseVendorMessageElement(IOHIDElement * element)
+ 
+         result = true;
+     }
++#endif
+ exit:
+     return result;
+ }
+@@ -2498,19 +2548,27 @@ bool IOHIDEventDriver::parseAccelElement(IOHIDElement * element)
+                     break;
+             }
+             break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorMotion:
+             if (parent &&
+                 (parent->getUsage() == kHIDUsage_Snsr_Motion_Accelerometer ||
+                 parent->getUsage() == kHIDUsage_Snsr_Motion_Accelerometer3D)) {
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Type:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Path:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Generation:
+                         store = true;
+                         break;
++#endif
+                 }
+             }
+             break;
++#endif
+     }
+     
+     require(store, exit);
+@@ -2548,19 +2606,27 @@ bool IOHIDEventDriver::parseGyroElement(IOHIDElement * element)
+                     break;
+             }
+             break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorMotion:
+             if (parent &&
+                 (parent->getUsage() == kHIDUsage_Snsr_Motion_Gyrometer ||
+                 parent->getUsage() == kHIDUsage_Snsr_Motion_Gyrometer3D)) {
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Type:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Path:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Generation:
+                         store = true;
+                         break;
++#endif
+                 }
+             }
+             break;
++#endif
+     }
+     
+     require(store, exit);
+@@ -2597,19 +2663,27 @@ bool IOHIDEventDriver::parseCompassElement(IOHIDElement * element)
+                     break;
+             }
+             break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorMotion:
+             if (parent &&
+                 (parent->getUsage() == kHIDUsage_Snsr_Orientation_CompassD ||
+                 parent->getUsage() == kHIDUsage_Snsr_Orientation_Compass3D)) {
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Type:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Path:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Generation:
+                         store = true;
+                         break;
++#endif
+                 }
+             }
+             break;
++#endif
+     }
+     
+     require(store, exit);
+@@ -2686,13 +2760,17 @@ bool IOHIDEventDriver::parseSensorPropertyElement(IOHIDElement * element)
+                     break;
+             }
+             break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorSensor:
+             switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorSensor_BTSniffOff:
+                     propertyElement = &_sensorProperty.sniffControl;
+                     break;
++#endif
+             }
+             break;
++#endif
+     }
+     
+     require(propertyElement, exit);
+@@ -2720,18 +2798,34 @@ bool IOHIDEventDriver::parseDeviceOrientationElement(IOHIDElement * element)
+ 
+     require(usage <= kHIDUsage_MaxUsage, exit);
+     switch (usagePage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorMotion:
+             switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorMotion_DeviceOrientationTypeAmbiguous:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorMotion_DeviceOrientationTypePortrait:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorMotion_DeviceOrientationTypePortraitUpsideDown:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorMotion_DeviceOrientationTypeLandscapeLeft:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorMotion_DeviceOrientationTypeLandscapeRight:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorMotion_DeviceOrientationTypeFaceUp:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorMotion_DeviceOrientationTypeFaceDown:
+                     store = &(_orientation.cmElements);
++#endif
+             }
+             break;
++#endif
+         case kHIDPage_Sensor:
+             switch (usage) {
+                 case kHIDUsage_Snsr_Data_Orientation_TiltXAxis:
+@@ -2800,33 +2894,49 @@ bool IOHIDEventDriver::parsePhaseElement(IOHIDElement * element)
+ 
+     require(usage <= kHIDUsage_MaxUsage, exit);
+     switch (usagePage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorKeyboard:
+             switch(usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorKeyboard_LongPress:
+                     _phase.longPress = element;
+                     _phase.longPress->retain();
+                     return true;
++#endif
+             }
+             break;
+ 
++#endif
+         default:
+             break;
+     }
+  
+     switch (usagePage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorHIDEvent:
+             switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseBegan:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseEnded:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseChanged:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseCancelled:
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseMayBegin:
+                     store = true;
+                     break;
+ 
++#endif
+                 default:
+                     break;
+             }
++#endif
+         default:
+             break;
+     }
+@@ -4355,19 +4465,27 @@ void IOHIDEventDriver::handleAccelReport(AbsoluteTime timeStamp, UInt32 reportID
+                         break;
+                 }
+                 break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+             case kHIDPage_AppleVendorMotion:
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Type:
+                         type = element->getValue();
+                         break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Path:
+                         subType = element->getValue();
+                         break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Generation:
+                         generation = element->getValue();
+                         break;
++#endif
+                 }
+                 break;
++#endif
+             default:
+                 break;
+         }
+@@ -4441,19 +4559,27 @@ void IOHIDEventDriver::handleGyroReport(AbsoluteTime timeStamp, UInt32 reportID)
+                         break;
+                 }
+                 break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+             case kHIDPage_AppleVendorMotion:
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Type:
+                         type = element->getValue();
+                         break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Path:
+                         subType = element->getValue();
+                         break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Generation:
+                         generation = element->getValue();
+                         break;
++#endif
+                 }
+                 break;
++#endif
+             default:
+                 break;
+         }
+@@ -4524,19 +4650,27 @@ void IOHIDEventDriver::handleCompassReport(AbsoluteTime timeStamp, UInt32 report
+                         break;
+                 }
+                 break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+             case kHIDPage_AppleVendorMotion:
+                 switch (usage) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Type:
+                         type = element->getValue();
+                         break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Path:
+                         subType = element->getValue();
+                         break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                     case kHIDUsage_AppleVendorMotion_Generation:
+                         generation = element->getValue();
+                         break;
++#endif
+                 }
+                 break;
++#endif
+             default:
+                 break;
+         }
+@@ -4735,21 +4869,31 @@ void IOHIDEventDriver::handlePhaseReport(AbsoluteTime timeStamp, UInt32 reportID
+         IOHIDElement *element = OSDynamicCast(IOHIDElement, _phase.phaseElements->getObject(index));
+         if (element->getValue() != 0) {
+             switch (element->getUsage()) {
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseBegan:
+                     _phase.phaseFlags |= kIOHIDEventPhaseBegan;
+                     break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseChanged:
+                     _phase.phaseFlags |= kIOHIDEventPhaseChanged;
+                     break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseEnded:
+                     _phase.phaseFlags |= kIOHIDEventPhaseEnded;
+                     break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseCancelled:
+                     _phase.phaseFlags |= kIOHIDEventPhaseCancelled;
+                     break;
++#endif
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDUsage_AppleVendorHIDEvent_PhaseMayBegin:
+                     _phase.phaseFlags |= kIOHIDEventPhaseMayBegin;
+                     break;
++#endif
+             }
+         }
+     }
 diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.cpp
+index d57aeee..9d6842f 100644
 --- a/IOHIDFamily/IOHIDEventService.cpp
 +++ b/IOHIDFamily/IOHIDEventService.cpp
-@@ -345,7 +345,7 @@
+@@ -58,7 +58,6 @@
+ #include <stdatomic.h>
+ 
+ #include "IOHIDEventServiceUserClient.h"
+-#include "IOHIDEventServiceFastPathUserClient.h"
+ 
+ extern "C" int  kern_stack_snapshot_with_reason(char *reason);
+ extern "C" kern_return_t sysdiagnose_notify_user(uint32_t keycode);
+@@ -275,10 +274,10 @@ bool IOHIDEventService::start ( IOService * provider )
+         setProperty(kIOHIDBuiltInKey, boolean);
+     OSSafeReleaseNULL(obj);
+ 
+-    obj = provider->copyProperty(kIOHIDProtectedAccessKey);
++    obj = provider->copyProperty(kDaliPublicHidProtectedAccessKey);
+     boolean = OSDynamicCast(OSBoolean, obj);
+     if (boolean)
+-        setProperty(kIOHIDProtectedAccessKey, boolean);
++        setProperty(kDaliPublicHidProtectedAccessKey, boolean);
+     OSSafeReleaseNULL(obj);
+ 
+     obj = provider->copyProperty(kIOHIDPointerAccelerationSupportKey);
+@@ -333,9 +332,9 @@ bool IOHIDEventService::start ( IOService * provider )
+     parseSupportedElements (getReportElements(), bootProtocol);
+     
+     if (supportsHeadset(getReportElements())) {
+-        setProperty(kIOHIDDeviceTypeHintKey, kIOHIDDeviceTypeHeadsetKey);
++        setProperty(kDaliPublicHidDeviceTypeHintKey, kDaliPublicHidDeviceTypeHeadsetKey);
+         if (device) {
+-            device->setProperty(kIOHIDDeviceTypeHintKey, kIOHIDDeviceTypeHeadsetKey);
++            device->setProperty(kDaliPublicHidDeviceTypeHintKey, kDaliPublicHidDeviceTypeHeadsetKey);
+         }
+     }
+ 
+@@ -345,7 +344,7 @@ bool IOHIDEventService::start ( IOService * provider )
  
      _readyForInputReports = true;
      
@@ -164,7 +723,88 @@ diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.c
      if (obj != kOSBooleanFalse) {
          registerService(kIOServiceAsynchronous);
      }
-@@ -2835,7 +2835,7 @@
+@@ -585,7 +584,7 @@ exit:
+ }
+ 
+ 
+-static const OSSymbol * propagateProps[] = {kIOHIDPropagatePropertyKeys};
++// Private property forwarding is unsupported by this public source port.
+ 
+ //====================================================================================================
+ // IOHIDEventService::setSystemProperties
+@@ -625,14 +624,6 @@ IOReturn IOHIDEventService::setSystemProperties( OSDictionary * properties )
+         _debugMask = number->unsigned32BitValue();
+     }
+ 
+-    if (_provider && !isInactive()) {
+-        for (const OSSymbol * prop : propagateProps) {
+-            OSObject *val = properties->getObject(prop);
+-            if (val) {
+-                _provider->setProperty(prop, val);
+-            }
+-        }
+-    }
+     
+     return kIOReturnSuccess;
+ }
+@@ -806,6 +797,7 @@ void IOHIDEventService::parseSupportedElements ( OSArray * elementArray, UInt32
+                             break;
+                     }
+                     break;
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 case kHIDPage_AppleVendorTopCase:
+                     if ((usage == kHIDUsage_AV_TopCase_KeyboardFn) &&
+                         (_keyboard.appleVendorSupported))
+@@ -813,6 +805,7 @@ void IOHIDEventService::parseSupportedElements ( OSArray * elementArray, UInt32
+                         supportedModifiers |= NX_SECONDARYFNMASK;
+                     }
+                     break;
++#endif
+             }
+ 
+             // Cache device functions
+@@ -2303,6 +2296,7 @@ void IOHIDEventService::dispatchEvent(IOHIDEvent * event, IOOptionBits options)
+     
+     IOHID_DEBUG(kIOHIDDebugCode_DispatchHIDEvent, event->getTimeStampOfType(kIOHIDEventTimestampTypeDefault), currentTime, options | event->getOptions() & kIOHIDEventOptionContinuousTime, getRegistryEntryID());
+     
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     if (_debugMask & kIOHIDDebugPerfEvent) {
+         IOHIDEventPerfData data = {currentTime, 0, 0, 0};
+         IOHIDEvent *perfEvent = IOHIDEvent::vendorDefinedEvent (
+@@ -2319,6 +2313,7 @@ void IOHIDEventService::dispatchEvent(IOHIDEvent * event, IOOptionBits options)
+            perfEvent->release();
+         }
+     }
++#endif
+ 
+     IOLockLock(_clientDictLock);
+ 
+@@ -2424,10 +2419,6 @@ IOReturn  IOHIDEventService::newUserClient (
+         
+         client = OSTypeAlloc(IOHIDEventServiceUserClient);
+     
+-    } else if (type == kIOHIDEventServiceFastPathUserClientType) {
+-    
+-        client = OSTypeAlloc(IOHIDEventServiceFastPathUserClient);
+-    
+     } else {
+     
+         return super::newUserClient(owningTask, securityID, type, properties, handler);
+@@ -2694,8 +2685,11 @@ dispatch:
+ 
+         IOHID_DEBUG(kIOHIDDebugCode_DispatchKeyboard, usagePage, usage, value, options);
+ 
+-        if (usagePage == kHIDPage_KeyboardOrKeypad ||
+-            (_keyboard.appleVendorSupported && (usagePage == kHIDPage_AppleVendorKeyboard || (usagePage == kHIDPage_AppleVendorTopCase && usage == kHIDUsage_AV_TopCase_KeyboardFn)))) {
++        if (usagePage == kHIDPage_KeyboardOrKeypad
++#if DALI_HID_PRIVATE_APPLE_USAGES
++            || (_keyboard.appleVendorSupported && (usagePage == kHIDPage_AppleVendorKeyboard || (usagePage == kHIDPage_AppleVendorTopCase && usage == kHIDUsage_AV_TopCase_KeyboardFn)))
++#endif
++            ) {
+             if ( !_keyboardNub ) {
+                 _keyboardNub = newKeyboardShim();
+             }
+@@ -2835,7 +2829,7 @@ IMPL(IOHIDEventService, Stop)
  kern_return_t
  IMPL(IOHIDEventService, _Start)
  {
@@ -173,11 +813,108 @@ diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.c
      
      bool ret = start (provider);
          
+diff --git a/IOHIDFamily/IOHIDFamilyPrivate.cpp b/IOHIDFamily/IOHIDFamilyPrivate.cpp
+index f6a4f7a..3470651 100644
+--- a/IOHIDFamily/IOHIDFamilyPrivate.cpp
++++ b/IOHIDFamily/IOHIDFamilyPrivate.cpp
+@@ -449,7 +449,7 @@ bool MatchPropertyTable(IOService * owner, OSDictionary * table, SInt32 * score)
+     return match;
+ }
+ 
+-static const char * restrictedKeys[] = {kIOUserClientClassKey, kIOClassKey, kIOProviderClassKey, kIOKitDebugKey, kIOServiceDEXTEntitlementsKey, kIOHIDDevicePrivilegedKey};
++static const char * restrictedKeys[] = {kIOUserClientClassKey, kIOClassKey, kIOProviderClassKey, kIOKitDebugKey, kIOServiceDEXTEntitlementsKey, kDaliPublicHidDevicePrivilegedKey};
+ 
+ bool IsIOHIDRestrictedIOKitProperty(const OSSymbol* key)
+ {
+diff --git a/IOHIDFamily/IOHIDInterface.cpp b/IOHIDFamily/IOHIDInterface.cpp
+index 2040b1b..f364ef6 100644
+--- a/IOHIDFamily/IOHIDInterface.cpp
++++ b/IOHIDFamily/IOHIDInterface.cpp
+@@ -359,7 +359,7 @@ bool IOHIDInterface::matchPropertyTable(
+     // This is necessary in a situation where a user space process could be searching
+     // the registry during termination.
+     
+-    bool isPartofMultiInterfaceDevice = (provider->getProperty(kIOHIDMultipleInterfaceEnabledKey) == kOSBooleanTrue);
++    bool isPartofMultiInterfaceDevice = (provider->getProperty(kDaliPublicHidMultipleInterfaceEnabledKey) == kOSBooleanTrue);
+     
+     if (isPartofMultiInterfaceDevice) {
+         ret = MatchPropertyTable(this, table, score);
+@@ -426,19 +426,10 @@ void IOHIDInterface::close(
+     super::close(client, options);
+ }
+ 
+-static const OSSymbol * propagateProps[] = {kIOHIDPropagatePropertyKeys};
+-
++// The public import omits the private propagation-key list. This source port
++// keeps interface property changes local instead of inventing a forwarding ABI.
+ bool IOHIDInterface::setProperty( const OSSymbol * key, OSObject * object)
+ {
+-    require(_owner, exit);
+-
+-    for (const OSSymbol * prop : propagateProps) {
+-        if (key->isEqualTo(prop)) {
+-            _owner->setProperty(key, object);
+-        }
+-    }
+-
+-exit:
+     return super::setProperty(key, object);
+ }
+ 
+diff --git a/IOHIDFamily/IOHIDLibUserClient.cpp b/IOHIDFamily/IOHIDLibUserClient.cpp
+index 5f7a89f..2a5bcd5 100644
+--- a/IOHIDFamily/IOHIDLibUserClient.cpp
++++ b/IOHIDFamily/IOHIDLibUserClient.cpp
+@@ -398,7 +398,7 @@ bool IOHIDLibUserClient::start(IOService *provider)
+ 
+     HIDLibUserClientLogInfo("start");
+ 
+-    if (provider->getProperty(kIOHIDProtectedAccessKey) == kOSBooleanTrue && _protectedAccessClient == false) {
++    if (provider->getProperty(kDaliPublicHidProtectedAccessKey) == kOSBooleanTrue && _protectedAccessClient == false) {
+         HIDLibUserClientLogError("Missing entitlement to access protected service");
+         return false;
+     }
+@@ -1026,7 +1026,7 @@ bool IOHIDLibUserClient::serializeDebugState(void *ref __unused, OSSerialize *se
+ 
+     require(debugDict, exit);
+     
+-    debugDict->setObject(kIOHIDDevicePrivilegedKey, _privilegedClient ? kOSBooleanTrue : kOSBooleanFalse);
++    debugDict->setObject(kDaliPublicHidDevicePrivilegedKey, _privilegedClient ? kOSBooleanTrue : kOSBooleanFalse);
+ 
+     num = OSNumber::withNumber(fReportLimit, 32);
+     if (num) {
+diff --git a/IOHIDFamily/IOHIDPrivateKeys.h b/IOHIDFamily/IOHIDPrivateKeys.h
+index 159235e..be2fcaf 100644
+--- a/IOHIDFamily/IOHIDPrivateKeys.h
++++ b/IOHIDFamily/IOHIDPrivateKeys.h
+@@ -32,6 +32,17 @@
+ 
+ __BEGIN_DECLS
+ 
++// Project-scoped controls for this public source port. The upstream private
++// registration/DriverKit-start key strings are unpublished and are not guessed.
++#define kDaliPublicHidRegisterServiceKey "DaliPublicHIDRegisterService"
++#define kDaliPublicHidDKStartKey "DaliPublicHIDDKStart"
++#define kDaliPublicHidDevicePrivilegedKey "DaliPublicHIDDevicePrivileged"
++#define kDaliPublicHidUserDeviceSuspendKey "DaliPublicHIDUserDeviceSuspend"
++#define kDaliPublicHidMultipleInterfaceEnabledKey "DaliPublicHIDMultipleInterfaceEnabled"
++#define kDaliPublicHidProtectedAccessKey "DaliPublicHIDProtectedAccess"
++#define kDaliPublicHidDeviceTypeHintKey "DaliPublicHIDDeviceTypeHint"
++#define kDaliPublicHidDeviceTypeHeadsetKey "DaliPublicHIDDeviceTypeHeadset"
++
+ /*!
+     @defined HID Device Property Keys
+     @abstract Keys that represent properties of a particular device.
 diff --git a/IOHIDFamily/IOHIDResourceUserClient.cpp b/IOHIDFamily/IOHIDResourceUserClient.cpp
+index df913e5..26b27f6 100644
 --- a/IOHIDFamily/IOHIDResourceUserClient.cpp
 +++ b/IOHIDFamily/IOHIDResourceUserClient.cpp
-@@ -504,7 +504,7 @@
-     _properties->setObject(kIOHIDDevicePrivilegedKey, _privileged ? kOSBooleanTrue : kOSBooleanFalse);
+@@ -501,10 +501,10 @@ IOReturn IOHIDResourceDeviceUserClient::createDevice(IOExternalMethodArguments *
+     }
+     
+     // add privilege entitlements
+-    _properties->setObject(kIOHIDDevicePrivilegedKey, _privileged ? kOSBooleanTrue : kOSBooleanFalse);
++    _properties->setObject(kDaliPublicHidDevicePrivilegedKey, _privileged ? kOSBooleanTrue : kOSBooleanFalse);
      
      if (arguments->scalarInput[0] & kIOHIDUserDeviceCreateOptionStartWhenScheduled) {
 -        _properties->setObject(kIOHIDRegisterServiceKey, kOSBooleanFalse);
@@ -185,18 +922,25 @@ diff --git a/IOHIDFamily/IOHIDResourceUserClient.cpp b/IOHIDFamily/IOHIDResource
      }
  
      _asyncSupport = true;
-diff --git a/IOHIDFamily/IOHIDPrivateKeys.h b/IOHIDFamily/IOHIDPrivateKeys.h
---- a/IOHIDFamily/IOHIDPrivateKeys.h
-+++ b/IOHIDFamily/IOHIDPrivateKeys.h
-@@ -31,6 +31,11 @@
- #include <IOKit/hid/IOHIDEventServiceKeys_Private.h>
+@@ -1141,7 +1141,7 @@ IOReturn IOHIDResourceDeviceUserClient::setPropertiesGated(OSObject *properties)
  
- __BEGIN_DECLS
-+
-+// Project-scoped controls for this public source port. The upstream private
-+// registration/DriverKit-start key strings are unpublished and are not guessed.
-+#define kDaliPublicHidRegisterServiceKey "DaliPublicHIDRegisterService"
-+#define kDaliPublicHidDKStartKey "DaliPublicHIDDKStart"
+     require((propertyDict = OSDynamicCast(OSDictionary, properties)), exit);
  
- /*!
-     @defined HID Device Property Keys
+-    if ((suspend = OSDynamicCast(OSBoolean, propertyDict->getObject(kIOHIDUserDeviceSuspendKey)))) {
++    if ((suspend = OSDynamicCast(OSBoolean, propertyDict->getObject(kDaliPublicHidUserDeviceSuspendKey)))) {
+         _suspended = suspend->getValue();
+     } else {
+         require_action(_device, exit, ret = kIOReturnOffline);
+diff --git a/IOHIDFamily/IOHIDUserDevice.cpp b/IOHIDFamily/IOHIDUserDevice.cpp
+index e183d4d..3f85f41 100644
+--- a/IOHIDFamily/IOHIDUserDevice.cpp
++++ b/IOHIDFamily/IOHIDUserDevice.cpp
+@@ -74,7 +74,7 @@ bool IOHIDUserDevice::initWithProperties(OSDictionary * properties)
+     _properties->retain();
+     
+     
+-    OSBoolean *nonVirtualUserDeviceCreateEntitlement = (OSBoolean*)getProperty(kIOHIDDevicePrivilegedKey);
++    OSBoolean *nonVirtualUserDeviceCreateEntitlement = (OSBoolean*)getProperty(kDaliPublicHidDevicePrivilegedKey);
+ 
+     // check if user has entitlements to create a non-virtual user device
+     // case user -> Valid Property , Valid Entitlements (OK -> user property value)
