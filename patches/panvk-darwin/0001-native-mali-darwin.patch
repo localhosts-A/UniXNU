@@ -478,3 +478,16 @@ diff --git a/src/vulkan/runtime/vk_image.h b/src/vulkan/runtime/vk_image.h
     /* VK_EXT_drm_format_modifier
      *
      * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's
+diff --git a/include/drm-uapi/mali_kbase_ioctl.h b/include/drm-uapi/mali_kbase_ioctl.h
+--- a/include/drm-uapi/mali_kbase_ioctl.h
++++ b/include/drm-uapi/mali_kbase_ioctl.h
+@@ -23,5 +23,9 @@
+ #pragma once
+ 
++#ifdef __APPLE__
++#include <drm-uapi/drm.h>
++#else
+ #include <linux/ioctl.h>
+ #include <linux/types.h>
++#endif
+ 
