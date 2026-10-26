@@ -1,0 +1,206 @@
+diff --git a/bsd/sys/mount.h b/bsd/sys/mount.h
+--- a/bsd/sys/mount.h
++++ b/bsd/sys/mount.h
+@@ -562,6 +562,7 @@ struct vfsioattr {
+ #define VFS_TBLVNOP_NOUPDATEID_RENAME   0x8000  /* vfs should not call vnode_update_ident on rename */
+ #define VFS_TBLVNOP_SECLUDE_RENAME      0x10000
+ #define VFS_TBLCANMOUNTROOT             0x20000
++#define VFS_TBLKERNELARGS               0x40000 /* filesystem accepts kernel-owned local mount args */
+ 
+ 
+ struct vfs_fsentry {
+@@ -1356,6 +1357,7 @@ void    vfs_setmntsystemdata(mount_t mp);
+ void    vfs_setmntswap(mount_t mp);
+ boolean_t vfs_is_basesystem(mount_t mp);
+ boolean_t vfs_iskernelmount(mount_t mp);
++boolean_t vfs_is_kernel_localargs(mount_t mp);
+ 
+ boolean_t vfs_shutdown_in_progress(void);
+ boolean_t vfs_shutdown_finished(void);
+diff --git a/bsd/sys/mount_internal.h b/bsd/sys/mount_internal.h
+--- a/bsd/sys/mount_internal.h
++++ b/bsd/sys/mount_internal.h
+@@ -284,6 +284,7 @@ extern struct mount * const dead_mountp;
+  */
+ #define MNTK_SUPL_BASESYSTEM    0x00000001
+ #define MNTK_SUPL_USE_FULLSYNC  0x00000002
++#define MNTK_SUPL_KERNEL_LOCALARGS 0x00000004
+ 
+ /*
+  * Mount Lifecycle Flags (stored in mnt_lflag)
+@@ -323,6 +324,7 @@ struct vfstable {
+ /* vfc_vfsflags: */
+ #define VFC_VFSLOCALARGS        0x002
+ #define VFC_VFSGENERICARGS      0x004
++#define VFC_VFSKERNELARGS       0x008
+ #define VFC_VFSNATIVEXATTR      0x010
+ #define VFC_VFSCANMOUNTROOT 0x020
+ #define VFC_VFSPREFLIGHT        0x040
+@@ -358,6 +360,12 @@ struct vfsmount_args {
+ };
+ 
+ 
++/* Kernel-only envelope for an opted-in local filesystem mount. */
++struct kernel_local_mount_args {
++	const char *device_path;
++	void *filesystem_args;
++};
++
+ /*
+  * LP64 *user* version of statfs structure.
+  * NOTE - must be kept in sync with struct statfs in mount.h
+@@ -488,6 +496,7 @@ void mount_iterreset(mount_t);
+ #define KERNEL_MOUNT_DEVFS             0x100 /* kernel startup mount of devfs */
+ #define KERNEL_MOUNT_FMOUNT            0x200 /* is fmount() system call */
+ #define KERNEL_MOUNT_KMOUNT            0x400 /* is kernel_mount() call */
++#define KERNEL_MOUNT_LOCALARGS         0x800 /* kernel-owned local filesystem args */
+ 
+ /* mask for checking if any of the "mount volume by role" flags are set */
+ #define KERNEL_MOUNT_VOLBYROLE_MASK (KERNEL_MOUNT_DATAVOL | KERNEL_MOUNT_VMVOL | KERNEL_MOUNT_PREBOOTVOL | KERNEL_MOUNT_RECOVERYVOL)
+@@ -500,6 +509,7 @@ void mount_iterreset(mount_t);
+  * mounting credentials, as the mount(2) system call does.
+  */
+ int kernel_mount(const char *, vnode_t, vnode_t, const char *, void *, size_t, int, uint32_t, vfs_context_t);
++int kernel_mount_localargs(const char *, const char *, const char *, void *, int, vfs_context_t);
+ 
+ /* Throttled I/O API.  KPI/SPI is in systm.h. */
+ 
+diff --git a/bsd/vfs/kpi_vfs.c b/bsd/vfs/kpi_vfs.c
+--- a/bsd/vfs/kpi_vfs.c
++++ b/bsd/vfs/kpi_vfs.c
+@@ -732,6 +732,13 @@ vfs_is_basesystem(mount_t mp)
+ 	return ((mp->mnt_supl_kern_flag & MNTK_SUPL_BASESYSTEM) == 0) ? false : true;
+ }
+ 
++boolean_t
++vfs_is_kernel_localargs(mount_t mp)
++{
++	return ((mp->mnt_kern_flag & MNTK_KERNEL_MOUNT) != 0 &&
++	    (mp->mnt_supl_kern_flag & MNTK_SUPL_KERNEL_LOCALARGS) != 0);
++}
++
+ /* return a pointer to the RO vfs_statfs associated with mount_t */
+ struct vfsstatfs *
+ vfs_statfs(mount_t mp)
+@@ -1003,6 +1010,11 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t *handle)
+ 		newvfstbl->vfc_vfsflags |= VFC_VFSGENERICARGS;
+ 	}
+ 
++	if (vfe->vfe_flags &  VFS_TBLKERNELARGS) &&
++	    (newvfstbl->vfc_vfsflags & VFC_VFSLOCALARGS)) {
++		newvfstbl->vfc_vfsflags |= VFC_VFSKERNELARGS;
++	}
++
+ 	if (vfe->vfe_flags &  VFS_TBLNATIVEXATTR) {
+ 		newvfstbl->vfc_vfsflags |= VFC_VFSNATIVEXATTR;
+ 	}
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -295,7 +295,7 @@ vfs_iskernelmount(mount_t mp)
+ __private_extern__
+ int
+ kernel_mount(const char *fstype, vnode_t pvp, vnode_t vp, const char *path,
+-    void *data, __unused size_t datalen, int syscall_flags, uint32_t kern_flags,
++    void *data, size_t datalen, int syscall_flags, uint32_t kern_flags,
+     vfs_context_t ctx)
+ {
+ 	struct nameidata nd;
+@@ -307,6 +307,11 @@ kernel_mount(const char *fstype, vnode_t pvp, vnode_t vp, const char *path,
+ 
+ 	kern_flags &= KERNEL_MOUNT_SANITIZE_MASK;
+ 
++	if ((kern_flags & KERNEL_MOUNT_LOCALARGS) &&
++	    (data == NULL || datalen != sizeof(struct kernel_local_mount_args))) {
++		return EINVAL;
++	}
++
+ 	/*
+ 	 * Get the vnode to be covered if it's not supplied
+ 	 */
+@@ -342,6 +347,26 @@ kernel_mount(const char *fstype, vnode_t pvp, vnode_t vp, const char *path,
+ 	return error;
+ }
+ 
++__private_extern__
++int
++kernel_mount_localargs(const char *fstype, const char *path,
++    const char *device_path, void *filesystem_args, int syscall_flags,
++    vfs_context_t ctx)
++{
++	struct kernel_local_mount_args args;
++
++	if (fstype == NULL || path == NULL || device_path == NULL ||
++	    device_path[0] == '\0' || filesystem_args == NULL ||
++	    (syscall_flags & (MNT_UPDATE | MNT_RELOAD | MNT_FORCE)) != 0) {
++		return EINVAL;
++	}
++	syscall_flags |= MNT_NOSUID | MNT_NODEV | MNT_NOEXEC;
++	args.device_path = device_path;
++	args.filesystem_args = filesystem_args;
++	return kernel_mount(fstype, NULLVP, NULLVP, path, &args, sizeof(args),
++	    syscall_flags, KERNEL_MOUNT_LOCALARGS, ctx);
++}
++
+ int
+ vfs_mount_at_path(const char *fstype, const char *path,
+     vnode_t pvp, vnode_t vp, void *data, size_t datalen,
+@@ -1167,13 +1192,26 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
+ 		goto out1;
+ 	}
+ 
++	if (internal_flags & KERNEL_MOUNT_LOCALARGS) {
++		if (!kernelmount ||
++		    (vfsp->vfc_vfsflags & (VFC_VFSLOCALARGS | VFC_VFSKERNELARGS)) !=
++		    (VFC_VFSLOCALARGS | VFC_VFSKERNELARGS) ||
++		    (internal_flags & (KERNEL_MOUNT_SNAPSHOT |
++		    KERNEL_MOUNT_VOLBYROLE_MASK | KERNEL_MOUNT_BASESYSTEMROOT)) != 0 ||
++		    (flags & (MNT_UPDATE | MNT_RELOAD | MNT_FORCE)) != 0) {
++			error = EINVAL;
++			goto out1;
++		}
++	}
++
+ 	/*
+ 	 * VFC_VFSLOCALARGS is not currently supported for kernel mounts,
+ 	 * except in ROSV configs and for the initial BaseSystem root.
+ 	 */
+ 	if (kernelmount && (vfsp->vfc_vfsflags & VFC_VFSLOCALARGS) &&
+ 	    ((internal_flags & KERNEL_MOUNT_VOLBYROLE_MASK) == 0) &&
+-	    ((internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) == 0)) {
++	    ((internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) == 0) &&
++	    ((internal_flags & KERNEL_MOUNT_LOCALARGS) == 0)) {
+ 		error = EINVAL;  /* unsupported request */
+ 		goto out1;
+ 	}
+@@ -1334,6 +1372,20 @@ update:
+ 		}
+ #endif // CONFIG_BASESYSTEMROOT
+ 
++		if (internal_flags & KERNEL_MOUNT_LOCALARGS) {
++			struct kernel_local_mount_args *local_args =
++			    (struct kernel_local_mount_args *)fsmountargs;
++			if (local_args == NULL || local_args->device_path == NULL ||
++			    local_args->filesystem_args == NULL) {
++				error = EINVAL;
++				goto out1;
++			}
++			devpath = CAST_USER_ADDR_T(local_args->device_path);
++			fsmountargs = CAST_USER_ADDR_T(local_args->filesystem_args);
++			do_copyin_devpath = false;
++			mp->mnt_supl_kern_flag |= MNTK_SUPL_KERNEL_LOCALARGS;
++		}
++
+ 		if (do_copyin_devpath) {
+ 			if (vfs_context_is64bit(ctx)) {
+ 				if ((error = copyin(fsmountargs, (caddr_t)&devpath, sizeof(devpath)))) {
+@@ -1361,6 +1413,9 @@ update:
+ 				seg = UIO_SYSSPACE;
+ 			}
+ #endif // CONFIG_BASESYSTEMROOT
++			if (internal_flags & KERNEL_MOUNT_LOCALARGS) {
++				seg = UIO_SYSSPACE;
++			}
+ 
+ 			NDINIT(&nd, LOOKUP, OP_MOUNT, FOLLOW, seg, devpath, ctx);
+ 			if ((error = namei(&nd))) {

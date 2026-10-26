@@ -44,6 +44,45 @@ class SourceMsdosfsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'phase changed'):
                     FAT.kernel_sources(root)
 
+    def test_kernel_localargs_transform_is_exact_and_preserves_user_copyin(self):
+        original = (
+            '\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));\n'
+            '\t\tvfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | '
+            'VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED;\n')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'msdosfs_vfsops.c'
+            output = root / 'generated/msdosfs_vfsops.c'
+            source.write_text(original)
+            FAT.prepare_kernel_localargs_source(source, output)
+            transformed = output.read_text()
+            self.assertEqual(source.read_text(), original)
+            self.assertIn('if (vfs_is_kernel_localargs(mp))', transformed)
+            self.assertIn('bcopy((const void *)data, &args, sizeof(args));', transformed)
+            self.assertIn('else {\n\t\t\terror = copyin(data, &args, sizeof(struct msdosfs_args));',
+                          transformed)
+            self.assertIn('VFS_TBLREADDIR_EXTENDED | VFS_TBLKERNELARGS;', transformed)
+            with self.assertRaisesRegex(ValueError, 'Refusing to patch'):
+                FAT.prepare_kernel_localargs_source(source, source)
+
+    def test_kernel_localargs_transform_rejects_source_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'msdosfs_vfsops.c'
+            output = root / 'generated/msdosfs_vfsops.c'
+            source.write_text('error = copyin(data, &args, sizeof(args));\n')
+            with self.assertRaisesRegex(ValueError, 'source anchor changed'):
+                FAT.prepare_kernel_localargs_source(source, output)
+            self.assertFalse(output.exists())
+
+    def test_kernel_localargs_patch_is_in_the_xnu_patch_set(self):
+        patch = (ROOT / 'patches/xnu/source-kernel-local-mount-args.patch').read_text()
+        self.assertIn('KERNEL_MOUNT_LOCALARGS', patch)
+        self.assertIn('VFC_VFSKERNELARGS', patch)
+        self.assertIn('VFS_TBLKERNELARGS', patch)
+        self.assertIn('vfs_is_kernel_localargs', patch)
+        self.assertIn('MNT_NOSUID | MNT_NODEV | MNT_NOEXEC', patch)
+
     def test_disabled_and_invalid_modes_do_not_call_apple_tools(self):
         with patch.object(FAT, 'build', side_effect=AssertionError('Apple tools called')):
             with patch.dict(FAT.os.environ, {'XNU_SOURCE_MSDOSFS': '0'}), redirect_stdout(io.StringIO()) as output:
@@ -67,6 +106,11 @@ class SourceMsdosfsTests(unittest.TestCase):
                     FAT.check_symbols(global_defs, private_defined=private_defs)
                 with self.assertRaisesRegex(ValueError, 'Missing resolved'):
                     FAT.check_symbols(defined, 'U ' + name, private_defined)
+
+    def test_final_kernel_must_define_and_resolve_the_localargs_accessor(self):
+        symbol = FAT.KERNEL_LOCALARGS_SUPPORT_SYMBOLS[0]
+        self.assertEqual(FAT.kernel_localargs_support('00000000 T ' + symbol), {symbol: True})
+        self.assertEqual(FAT.kernel_localargs_support('', 'U ' + symbol), {symbol: False})
 
     def test_feed_is_fetched_only_for_the_selected_kernel_profile(self):
         modules = {('refer', 'msdosfs'): SimpleNamespace(name='msdosfs', kind='refer', origin='git')}
