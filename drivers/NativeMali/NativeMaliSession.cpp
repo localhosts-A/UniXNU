@@ -208,6 +208,10 @@ uint32_t Session::call(const nml_request &r, nml_response *out) {
     }
     if(r.operation==NML_QUEUE_KICK){
         if(!scheduler_->owns(r.object,as_)||r.offset>=Scheduler::MaxStreams)return NML_INVALID;
+        // Host-coherent Vulkan allocations use uncached CPU aliases. Drain CPU
+        // stores and invalidate stale GPU cache lines before publishing INSERT.
+        for(auto &b:buffers_)if(b.handle&&!b.parent)ops_.memory.publish(ops_.memory.cookie,b.allocation,0,b.pages*4096);
+        if(boot_->hardware().synchronizeMemory(timeout_)!=HardwareResult::Ok)return fail();
         const auto q=scheduler_->kick(r.object,uint32_t(r.offset),r.value);
         return q==QueueResult::Ok?NML_OK:q==QueueResult::Invalid?NML_INVALID:fail();
     }

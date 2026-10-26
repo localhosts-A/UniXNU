@@ -8,7 +8,9 @@
 #include <unistd.h>
 #include "NativeBridgeMetalFrontend.h"
 
-@interface NativeMaliMetalDevice : NSObject
+@interface _MTLDevice : NSObject
+@end
+@interface NativeMaliMetalDevice : _MTLDevice
 - (id)initWithAcceleratorPort:(unsigned)port;
 @end
 

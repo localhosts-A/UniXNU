@@ -132,6 +132,76 @@ diff --git a/src/panfrost/vulkan/meson.build b/src/panfrost/vulkan/meson.build
  
  panvk_deps = []
  panvk_flags = []
+diff --git a/src/panfrost/vulkan/panvk_device_memory.c b/src/panfrost/vulkan/panvk_device_memory.c
+--- a/src/panfrost/vulkan/panvk_device_memory.c
++++ b/src/panfrost/vulkan/panvk_device_memory.c
+@@ -13,6 +13,9 @@
+ #include "panvk_entrypoints.h"
+ 
+ #include "pan_props.h"
++#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++#include "panfrost/lib/kmod/kbase_kmod.h"
++#endif
+ 
+ #include "util/u_atomic.h"
+ #include "vk_debug_utils.h"
+@@ -105,6 +108,26 @@
+    if (fd_info && !fd_info->handleType)
+       fd_info = NULL;
+ 
++#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++   const VkImportMemoryHostPointerInfoEXT *host_info =
++      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
++   if (host_info) {
++      if (host_info->handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT ||
++          !host_info->pHostPointer || ((uintptr_t)host_info->pHostPointer & 4095) ||
++          !pAllocateInfo->allocationSize || (pAllocateInfo->allocationSize & 4095) ||
++          !(type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
++          (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) || fd_info || can_be_exported) {
++         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++         goto err_destroy_mem;
++      }
++      mem->bo = kbase_kmod_bo_import_host(device->kmod.dev, host_info->pHostPointer,
++                                        pAllocateInfo->allocationSize);
++      if (!mem->bo) {
++         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++         goto err_destroy_mem;
++      }
++   } else
++#endif
+    if (fd_info) {
+       assert(
+          fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+@@ -453,6 +476,29 @@
+ }
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL
++panvk_GetMemoryHostPointerPropertiesEXT(VkDevice _device,
++   VkExternalMemoryHandleTypeFlagBits handleType, const void *pHostPointer,
++   VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
++{
++#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++   VK_FROM_HANDLE(panvk_device, device, _device);
++   const struct panvk_physical_device *pdev = to_panvk_physical_device(device->vk.physical);
++   pMemoryHostPointerProperties->memoryTypeBits = 0;
++   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT ||
++       !pHostPointer || ((uintptr_t)pHostPointer & 4095))
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   for (uint32_t i = 0; i < pdev->memory.type_count; ++i) {
++      VkMemoryPropertyFlags flags = pdev->memory.types[i].propertyFlags;
++      if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !(flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
++         pMemoryHostPointerProperties->memoryTypeBits |= BITFIELD_BIT(i);
++   }
++   return VK_SUCCESS;
++#else
++   return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++#endif
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
+ panvk_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo,
+                      int *pFd)
+ {
 diff --git a/src/panfrost/vulkan/panvk_instance.c b/src/panfrost/vulkan/panvk_instance.c
 --- a/src/panfrost/vulkan/panvk_instance.c
 +++ b/src/panfrost/vulkan/panvk_instance.c
@@ -217,7 +287,17 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
  
     return VK_SUCCESS;
  }
-@@ -1150,6 +1158,10 @@
+@@ -521,6 +529,9 @@
+       .size = heap_size,
+       .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+    };
++#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++   device->memory.heaps[0].size = MIN2(heap_size, 256ull * 1024 * 1024);
++#endif
+ 
+    device->memory.type_count = 0;
+ 
+@@ -1150,6 +1161,10 @@
     uint32_t sync_type_count = 0;
  
     device->drm_syncobj_type = kbase_cpu_sync_type;
@@ -228,11 +308,12 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
     if (pan_arch(device->kmod.dev->props.gpu_id) < 10)
        device->drm_syncobj_type.export_sync_file = NULL;
  
-@@ -1306,6 +1318,20 @@
+@@ -1306,6 +1321,21 @@
     struct vk_features supported_features;
     panvk_arch_dispatch(arch, get_physical_device_features, instance,
                         device, &supported_features);
 +#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++   supported_extensions.EXT_external_memory_host = true;
 +   supported_extensions.KHR_external_memory_fd = false;
 +   supported_extensions.KHR_external_semaphore_fd = false;
 +   supported_extensions.KHR_external_fence_fd = false;
@@ -249,7 +330,7 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
  
     struct vk_physical_device_dispatch_table dispatch_table;
     vk_physical_device_dispatch_table_from_entrypoints(
-@@ -1453,6 +1479,9 @@
+@@ -1453,6 +1483,9 @@
        device->csf.tiler.chunk_size = 1024 * 1024;
        device->csf.tiler.initial_chunks = 10;
        device->csf.tiler.max_chunks = 400;
@@ -259,11 +340,12 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
     }
  
     if (arch != 10)
-@@ -1465,6 +1494,20 @@
+@@ -1465,6 +1498,21 @@
     struct vk_features supported_features;
     panvk_arch_dispatch(arch, get_physical_device_features, instance,
                         device, &supported_features);
 +#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++   supported_extensions.EXT_external_memory_host = true;
 +   supported_extensions.KHR_external_memory_fd = false;
 +   supported_extensions.KHR_external_semaphore_fd = false;
 +   supported_extensions.KHR_external_fence_fd = false;
@@ -280,6 +362,39 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
  
     struct vk_physical_device_dispatch_table dispatch_table;
     vk_physical_device_dispatch_table_from_entrypoints(
+@@ -2548,6 +2596,17 @@
+    VkExternalMemoryHandleTypeFlagBits handleType,
+    VkExternalMemoryProperties *external_properties)
+ {
++#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT ||
++       pImageFormatInfo->tiling != VK_IMAGE_TILING_LINEAR ||
++       pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
++      return VK_ERROR_FORMAT_NOT_SUPPORTED;
++   *external_properties = (VkExternalMemoryProperties){
++      .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
++      .compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++   };
++   return VK_SUCCESS;
++#endif
+    const VkExternalMemoryHandleTypeFlags supported_handle_types =
+       VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+@@ -2888,6 +2947,14 @@
+    const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
+    VkExternalBufferProperties *pExternalBufferProperties)
+ {
++#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++   const bool host = pExternalBufferInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
++   pExternalBufferProperties->externalMemoryProperties = (VkExternalMemoryProperties){
++      .externalMemoryFeatures = host ? VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT : 0,
++      .compatibleHandleTypes = pExternalBufferInfo->handleType,
++   };
++   return;
++#endif
+    if (pExternalBufferInfo->handleType ==
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+       vk_android_get_ahb_buffer_properties(physicalDevice, pExternalBufferInfo,
 diff --git a/src/panfrost/vulkan/panvk_vX_device.c b/src/panfrost/vulkan/panvk_vX_device.c
 --- a/src/panfrost/vulkan/panvk_vX_device.c
 +++ b/src/panfrost/vulkan/panvk_vX_device.c
@@ -329,3 +444,13 @@ diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulka
  
  #include "git_sha1.h"
  
+@@ -1049,6 +1053,9 @@
+ 
+       /* If we can't detect the cacheline size, assume 64 bytes cachelines. */
+       .nonCoherentAtomSize = util_has_cache_ops() ? util_cache_granularity() : 64,
++#ifdef HAVE_PAN_KMOD_NATIVE_MALI
++      .minImportedHostPointerAlignment = 4096,
++#endif
+ 
+       /* Vulkan 1.0 sparse properties */
+       .sparseResidencyNonResidentStrict = false,

@@ -36,6 +36,7 @@ def main():
     command=['xcrun','clang++','-target',triple,'-isysroot',sdk,'-std=c++17','-fobjc-arc','-O2','-g',
              '-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-deprecated-declarations',
              '-fstack-protector-strong','-bundle','-I',kit,ROOT/'drivers/NativeMaliMetal/NativeMaliMetalPlugin.mm',
+             ROOT/'drivers/NativeMaliMetal/NativeMaliFramePresenter.mm',
              kit/'NativeBridgeMetalFrontend.mm',ROOT/f'build/native-mali-metal/bridge/{args.target}/libnative_metal_bridge.a',
              '-Wl,-dead_strip','-lobjc','-framework','Foundation','-framework','Metal','-framework','IOSurface',
              '-framework','CoreFoundation','-o',exe]

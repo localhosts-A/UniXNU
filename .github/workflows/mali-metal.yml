@@ -30,6 +30,11 @@ jobs:
         run: |
           python3 scripts/prepare-native-mali-metal.py
           python3 scripts/prepare-native-mali-metal.py
+      - name: Verify completed-frame ownership without a GPU
+        run: |
+          mkdir -p build/native-mali-metal/frame-test
+          xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror -Idrivers/NativeMaliMetal drivers/NativeMaliMetal/NativeMaliFramePresenter.mm tests/native-mali/frame_presenter.mm -framework Foundation -framework Metal -framework IOSurface -o build/native-mali-metal/frame-test/present
+          build/native-mali-metal/frame-test/present
       - name: Compile and link macOS Metal plugin
         run: python3 scripts/build-mali-metal-plugin.py --fetch --target host --compile-only
       - name: Compile and link iOS17 Metal plugin
@@ -45,5 +50,6 @@ jobs:
             build/native-mali-metal/bridge/Cargo.lock
             build/native-mali-metal/host
             build/native-mali-metal/ios
+            build/native-mali-metal/frame-test
           retention-days: 1
           if-no-files-found: error
