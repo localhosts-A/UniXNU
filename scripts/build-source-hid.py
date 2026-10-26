@@ -47,7 +47,7 @@ IIG_NAMES = ('IOHIDInterface', 'IOHIDDevice', 'IOHIDEventService')
 CLASSES = ('IOHIDDevice', 'IOHIDInterface', 'IOHIDElementPrivate',
            'IOHIDElementContainer', 'IOHIDDeviceElementContainer',
            'IOHIDEvent', 'IOHIDEventService', 'IOHIDEventDriver',
-           'IOHIDKeyboard', 'IOHIDConsumer', 'IOHIDPointing', 'IOHIDSystem',
+           'IOHIDKeyboard', 'IOHIDConsumer', 'IOHIDPointing', 'IOHITablet', 'IOHIDSystem',
            'IOHIKeyboard', 'IOHIPointing')
 # These real units belong to the pinned IOHIDFamily target's Sources phase.
 # The Embedded variant omits the system keyboard/pointer shims even though its
@@ -66,6 +66,7 @@ SYSTEM_SUPPORT_SOURCES = (
     'IOHIDSystem/IOHIDKeyboardEventDevice.cpp',
     'IOHIDSystem/IOHIDPointingDevice.cpp',
     'IOHIDSystem/IOHIDPointingEventDevice.cpp',
+    'IOHIDSystem/IOHITablet.cpp',
     'IOHIDSystem/IOHIDPrivate.cpp',
     'IOHIDSystem/IOHIDSystem.cpp',
     'IOHIDSystem/IOHIDSystemCursorHelper.cpp',

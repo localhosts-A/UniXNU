@@ -76,6 +76,9 @@ class SourceMsdosfsTests(unittest.TestCase):
     def test_kernel_link_force_loads_the_real_msdosfs_archive(self):
         baseline = (ROOT / 'scripts/build-xnu-4k-baseline.sh').read_text()
         self.assertIn('SOURCE_MSDOSFS=${XNU_SOURCE_MSDOSFS:-0}', baseline)
+        self.assertIn('if [ "$BOOTSTRAP" = 1 ]; then', baseline)
+        self.assertIn('SOURCE_MSDOSFS_REGISTER=0', baseline)
+        self.assertIn('.source-msdosfs-registration-mode', baseline)
         self.assertIn('MSDOSFS_ARCHIVE=$ROOT/build/source-msdosfs/libmsdosfs.a', baseline)
         self.assertIn('-Wl,-force_load,$MSDOSFS_ARCHIVE', baseline)
         self.assertIn('KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $MSDOSFS_ARCHIVE"', baseline)

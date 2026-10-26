@@ -16,6 +16,10 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from unixnu import cli
 
 class SourceHidTests(unittest.TestCase):
+    def test_support_archive_includes_the_tablet_base_used_by_iohidpointing(self):
+        self.assertIn('IOHIDSystem/IOHITablet.cpp', HID.SYSTEM_SUPPORT_SOURCES)
+        self.assertIn('IOHITablet', HID.CLASSES)
+
     def test_system_support_sources_are_resolved_from_the_fixed_family_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / 'IOHIDFamily'
