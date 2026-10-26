@@ -31,12 +31,12 @@ jobs:
           .cache/mali-venv/bin/python -m pip install -r scripts/data/mali-build-requirements.txt
       - name: Prepare fixed RC3 compiler sources
         run: python3 scripts/prepare-panvk-darwin.py --fetch
-      - name: Build actual native code generators
-        run: python3 scripts/build-panvk-host-tools.py --dependency-prefix "$(brew --prefix spirv-llvm-translator)" --jobs 4
       - name: Prepare NativeMali source and verify repeated preparation
         run: |
           python3 scripts/prepare-panvk-darwin.py --fetch --darwin
           python3 scripts/prepare-panvk-darwin.py --darwin
+      - name: Build actual native code generators
+        run: python3 scripts/build-panvk-host-tools.py --dependency-prefix "$(brew --prefix spirv-llvm-translator)" --jobs 4
       - name: Compile and link macOS driver against actual IOKit
         run: python3 scripts/build-panvk-darwin.py --target host --jobs 4
       - name: Compile and link arm64 iOS17 driver
