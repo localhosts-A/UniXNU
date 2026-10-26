@@ -143,7 +143,7 @@ diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/
 diff --git a/src/panfrost/vulkan/meson.build b/src/panfrost/vulkan/meson.build
 --- a/src/panfrost/vulkan/meson.build
 +++ b/src/panfrost/vulkan/meson.build
-@@ -67,6 +67,9 @@
+@@ -67,7 +67,15 @@
    'panvk_wsi.c',
  )
  libpanvk_files += [sha1_h]
@@ -153,6 +153,19 @@ diff --git a/src/panfrost/vulkan/meson.build b/src/panfrost/vulkan/meson.build
  
  panvk_deps = []
  panvk_flags = []
++panvk_link_args = []
++if with_native_mali
++  # ld64 rejects Mesa's optional weak WSI overrides unless unresolved references are permitted.
++  panvk_link_args += ['-Wl,-undefined,dynamic_lookup']
++endif
+ panvk_per_arch_libs = []
+@@ -243,5 +251,5 @@
+   c_args : [no_override_init_args, panvk_flags, soong_compat_c_args],
+-  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
++  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id, panvk_link_args],
+   link_depends: vulkan_icd_link_depends,
+   gnu_symbol_visibility : 'hidden',
+   install : true,
 diff --git a/src/panfrost/vulkan/panvk_device_memory.c b/src/panfrost/vulkan/panvk_device_memory.c
 --- a/src/panfrost/vulkan/panvk_device_memory.c
 +++ b/src/panfrost/vulkan/panvk_device_memory.c
