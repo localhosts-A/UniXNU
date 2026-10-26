@@ -132,5 +132,14 @@ static void validation() {
 }
 int main() {
     mapping(); transactions(); validation();
+    {
+        Pool pool; Mmu firmware;
+        assert(firmware.initialize(pool.ops(), 40, 32, true) == MmuResult::Ok);
+        const uint64_t physical = 0x90000000;
+        assert(firmware.map(0, &physical, 1, {}) == MmuResult::Ok);
+        uint64_t translated = 0;
+        assert(firmware.translate(7, &translated) == MmuResult::Ok && translated == physical + 7);
+        assert(firmware.destroy(true) == MmuResult::Ok);
+    }
     puts("PASS: production Mali GPU-MMU core, rollback, aliases and invalid inputs; hardware_exercised=false");
 }

@@ -22,7 +22,10 @@ def main():
     compiler = shutil.which(os.environ.get('CXX', 'clang++'))
     if not compiler:
         raise SystemExit('A C++17 host compiler is required')
-    tests = [('mmu', ['NativeMaliMmu.cpp']), ('firmware', ['NativeMaliFirmware.cpp'])]
+    tests = [('mmu', ['NativeMaliMmu.cpp']), ('firmware', ['NativeMaliFirmware.cpp']),
+             ('resources', ['NativeMaliResources.cpp']),
+             ('csf', ['NativeMaliCsf.cpp']),
+             ('firmware-memory', ['NativeMaliMmu.cpp', 'NativeMaliFirmware.cpp', 'NativeMaliFirmwareMemory.cpp'])]
     report = {'schema': 1, 'compiler': subprocess.check_output([compiler, '--version'], text=True),
               'hardware_exercised': False, 'cases': {}}
     for name, units in tests:

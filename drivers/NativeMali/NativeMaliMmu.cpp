@@ -24,7 +24,7 @@ bool Mmu::pageValid(const TablePage &page) const
 bool Mmu::rangeValid(uint64_t address, size_t count) const
 {
     const uint64_t end = uint64_t(1) << virtualBits_;
-    return initialized_ && address >= PageBytes && !(address & (PageBytes - 1)) &&
+    return initialized_ && (firmwareAddressSpace_ || address >= PageBytes) && !(address & (PageBytes - 1)) &&
            count && address < end && count <= (end - address) / PageBytes;
 }
 bool Mmu::resolve(uint64_t descriptor, TablePage *page) const
@@ -50,13 +50,14 @@ MmuResult Mmu::allocate(TablePage *page)
     ops_.publish(ops_.cookie, *page, 0, PageBytes);
     return MmuResult::Ok;
 }
-MmuResult Mmu::initialize(const TableOps &ops, uint8_t physicalBits, uint8_t virtualBits)
+MmuResult Mmu::initialize(const TableOps &ops, uint8_t physicalBits, uint8_t virtualBits, bool firmwareAddressSpace)
 {
     if (initialized_) return MmuResult::State;
     if (!ops.allocate || !ops.release || !ops.resolve || !ops.publish ||
         physicalBits < 32 || physicalBits > 48 || virtualBits < 32 || virtualBits > 48)
         return MmuResult::Invalid;
     ops_ = ops; physicalBits_ = physicalBits; virtualBits_ = virtualBits;
+    firmwareAddressSpace_ = firmwareAddressSpace;
     const MmuResult result = allocate(&root_);
     if (result != MmuResult::Ok) return result;
     initialized_ = true;

@@ -40,7 +40,9 @@ public:
     static constexpr uint64_t PageBytes = 4096;
     static constexpr size_t Entries = 512;
     static constexpr uint64_t InvalidEntry = 2;
-    MmuResult initialize(const TableOps &, uint8_t physicalBits, uint8_t virtualBits);
+    // Only the privileged MCU firmware address space may map virtual page 0.
+    MmuResult initialize(const TableOps &, uint8_t physicalBits, uint8_t virtualBits,
+                         bool firmwareAddressSpace = false);
     MmuResult map(uint64_t virtualAddress, const uint64_t *physicalPages,
                   size_t count, PageAttributes);
     MmuResult unmap(uint64_t virtualAddress, size_t count);
@@ -57,6 +59,7 @@ private:
     TablePage root_{};
     uint8_t physicalBits_ = 0, virtualBits_ = 0;
     bool initialized_ = false;
+    bool firmwareAddressSpace_ = false;
     uint64_t generation_ = 0;
     bool physicalValid(uint64_t) const;
     bool pageValid(const TablePage &) const;
