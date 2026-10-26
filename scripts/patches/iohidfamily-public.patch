@@ -89,3 +89,114 @@ diff --git a/IOHIDFamily/IOHIDEventData.h b/IOHIDFamily/IOHIDEventData.h
          break;                                                                                                               \
      }                                                                                                                        \
      _IOHIDUnknowDefaultField(event, field)
+diff --git a/IOHIDFamily/AppleUserHIDEventService.cpp b/IOHIDFamily/AppleUserHIDEventService.cpp
+--- a/IOHIDFamily/AppleUserHIDEventService.cpp
++++ b/IOHIDFamily/AppleUserHIDEventService.cpp
+@@ -124,7 +124,7 @@
+     
+     super::setProperty(kIOServiceDEXTEntitlementsKey, kIOHIDEventServiceDextEntitlement);
+     
+-    super::setProperty(kIOHIDRegisterServiceKey, kOSBooleanFalse);
++    super::setProperty(kDaliPublicHidRegisterServiceKey, kOSBooleanFalse);
+ 
+     return true;
+ }
+@@ -154,7 +154,7 @@
+     IOReturn        ret       = kIOReturnSuccess;
+     IOHIDInterface *interface = NULL;
+     
+-    bool dkStart = getProperty(kIOHIDDKStartKey) == kOSBooleanTrue;
++    bool dkStart = getProperty(kDaliPublicHidDKStartKey) == kOSBooleanTrue;
+ 
+     HIDEventServiceLog ("start (state:0x%x)", _state);
+ 
+diff --git a/IOHIDFamily/AppleUserHIDDevice.cpp b/IOHIDFamily/AppleUserHIDDevice.cpp
+--- a/IOHIDFamily/AppleUserHIDDevice.cpp
++++ b/IOHIDFamily/AppleUserHIDDevice.cpp
+@@ -120,7 +120,7 @@
+ 
+     super::setProperty(kIOServiceDEXTEntitlementsKey, kIOHIDDeviceDextEntitlement);
+     
+-    super::setProperty(kIOHIDRegisterServiceKey, kOSBooleanFalse);
++    super::setProperty(kDaliPublicHidRegisterServiceKey, kOSBooleanFalse);
+     
+     ret = true;
+     
+@@ -160,7 +160,7 @@
+     IOReturn ret    = kIOReturnSuccess;
+     bool     status = false;
+    
+-    bool dkStart = getProperty(kIOHIDDKStartKey) == kOSBooleanTrue;
++    bool dkStart = getProperty(kDaliPublicHidDKStartKey) == kOSBooleanTrue;
+     
+     HIDDeviceLog("start (state:0x%x)", _state);
+ 
+diff --git a/IOHIDFamily/IOHIDDevice.cpp b/IOHIDFamily/IOHIDDevice.cpp
+--- a/IOHIDFamily/IOHIDDevice.cpp
++++ b/IOHIDFamily/IOHIDDevice.cpp
+@@ -535,7 +535,7 @@
+     matching->release();
+     require(_deviceNotify, exit);
+     
+-    obj = getProperty(kIOHIDRegisterServiceKey);
++    obj = getProperty(kDaliPublicHidRegisterServiceKey);
+     if (obj != kOSBooleanFalse) {
+         registerService();
+     }
+@@ -2629,7 +2629,7 @@
+ kern_return_t
+ IMPL(IOHIDDevice, _Start)
+ {
+-    setProperty(kIOHIDDKStartKey, kOSBooleanTrue);
++    setProperty(kDaliPublicHidDKStartKey, kOSBooleanTrue);
+     
+     bool ret = start(provider);
+     
+diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.cpp
+--- a/IOHIDFamily/IOHIDEventService.cpp
++++ b/IOHIDFamily/IOHIDEventService.cpp
+@@ -345,7 +345,7 @@
+ 
+     _readyForInputReports = true;
+     
+-    obj = getProperty(kIOHIDRegisterServiceKey);
++    obj = getProperty(kDaliPublicHidRegisterServiceKey);
+     if (obj != kOSBooleanFalse) {
+         registerService(kIOServiceAsynchronous);
+     }
+@@ -2835,7 +2835,7 @@
+ kern_return_t
+ IMPL(IOHIDEventService, _Start)
+ {
+-    setProperty(kIOHIDDKStartKey, kOSBooleanTrue);
++    setProperty(kDaliPublicHidDKStartKey, kOSBooleanTrue);
+     
+     bool ret = start (provider);
+         
+diff --git a/IOHIDFamily/IOHIDResourceUserClient.cpp b/IOHIDFamily/IOHIDResourceUserClient.cpp
+--- a/IOHIDFamily/IOHIDResourceUserClient.cpp
++++ b/IOHIDFamily/IOHIDResourceUserClient.cpp
+@@ -504,7 +504,7 @@
+     _properties->setObject(kIOHIDDevicePrivilegedKey, _privileged ? kOSBooleanTrue : kOSBooleanFalse);
+     
+     if (arguments->scalarInput[0] & kIOHIDUserDeviceCreateOptionStartWhenScheduled) {
+-        _properties->setObject(kIOHIDRegisterServiceKey, kOSBooleanFalse);
++        _properties->setObject(kDaliPublicHidRegisterServiceKey, kOSBooleanFalse);
+     }
+ 
+     _asyncSupport = true;
+diff --git a/IOHIDFamily/IOHIDPrivateKeys.h b/IOHIDFamily/IOHIDPrivateKeys.h
+--- a/IOHIDFamily/IOHIDPrivateKeys.h
++++ b/IOHIDFamily/IOHIDPrivateKeys.h
+@@ -31,6 +31,11 @@
+ #include <IOKit/hid/IOHIDEventServiceKeys_Private.h>
+ 
+ __BEGIN_DECLS
++
++// Project-scoped controls for this public source port. The upstream private
++// registration/DriverKit-start key strings are unpublished and are not guessed.
++#define kDaliPublicHidRegisterServiceKey "DaliPublicHIDRegisterService"
++#define kDaliPublicHidDKStartKey "DaliPublicHIDDKStart"
+ 
+ /*!
+     @defined HID Device Property Keys
