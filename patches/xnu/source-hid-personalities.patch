@@ -2,11 +2,33 @@ diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 index 559a9db..b4817be 100644
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -39,6 +39,25 @@ const char * gIOKernelConfigTables =
+@@ -39,6 +39,47 @@ const char * gIOKernelConfigTables =
      "     'IOProviderClass' = IOPlatformExpertDevice;"
      "     'IOProbeScore'    = 0:32;"
      "   },"
 +#if defined(XNU_SOURCE_HID_FAMILY) && XNU_SOURCE_HID_FAMILY
++    "   {"
++    "     'IOClass'         = IOHIDSystem;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOResourceMatch' = IOBSD;"
++    "     'IOMatchCategory' = IOHID;"
++    "     'HIDPowerOnDelayNS' = 500000000:64;"
++    "     'HIDServiceGlobalModifiersUsage' = 1:32;"
++    "     'HIDServiceSupport' = .true.;"
++    "     'PrimaryUsage' = 23:32;"
++    "     'PrimaryUsagePage' = 65280:32;"
++    "     'VendorID' = 1452:32;"
++    "     'HIDScrollCountBootDefault' = {"
++    "       'HIDScrollCountAccelerationFactor' = 163840:32;"
++    "       'HIDScrollCountIgnoreMomentumScrolls' = .true.;"
++    "       'HIDScrollCountMax' = 2000:32;"
++    "       'HIDScrollCountMaxTimeDeltaBetween' = 600:32;"
++    "       'HIDScrollCountMaxTimeDeltaToSustain' = 250:32;"
++    "       'HIDScrollCountMinDeltaToStart' = 30:32;"
++    "       'HIDScrollCountMinDeltaToSustain' = 20:32;"
++    "       'HIDScrollCountMouseCanReset' = .true.;"
++    "     };"
++    "   },"
 +    "   {"
 +    "     'IOClass'         = IOHIDEventDriver;"
 +    "     'IOProviderClass' = IOHIDInterface;"

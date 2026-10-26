@@ -96,6 +96,12 @@ def build():
     include.mkdir(exist_ok=True)
     shutil.copyfile(conditions, include / conditions.name)
     declaration_inputs = [{'source': str(conditions), 'sha256': digest(conditions)}]
+    # The DEVELOPMENT compile record leaves DEBUG undefined, while msdosfs
+    # also uses it as a C expression in its hibernation diagnostics. Preserve
+    # explicit DEBUG values and give the undefined case its preprocessor value.
+    build_config = include / 'source-msdosfs-config.h'
+    build_config.write_text('#ifndef DEBUG\n#define DEBUG 0\n#endif\n')
+    declaration_inputs.append({'source': str(build_config), 'sha256': digest(build_config)})
     (OUT / 'sdk-inputs.json').write_text(json.dumps(declaration_inputs, indent=2) + '\n')
     xnu = ROOT / '.cache/xnu-work'
     includes = [include, SOURCE / SOURCE_DIR, xnu / 'bsd', xnu / 'iokit', xnu / 'osfmk']
@@ -105,7 +111,7 @@ def build():
         obj.unlink(missing_ok=True)
         command = helper.compile_command(record, source, obj, includes)
         command[3] = 'clang'
-        command += ['-DMSDOSFS_AUTO_UNLOAD=0']
+        command += ['-DMSDOSFS_AUTO_UNLOAD=0', '-include', str(build_config)]
         log = obj.with_suffix('.log')
         row = {'source': str(source.relative_to(ROOT)), 'source_sha256': digest(source), 'command': command}
         (OUT / (source.name + '.command.json')).write_text(json.dumps(command, indent=2) + '\n')

@@ -374,12 +374,18 @@ def verify_kernel(kernel):
     personalities = {'keyboard': 6, 'keypad': 7, 'mouse': 2}
     if b"'IOClass'         = IOHIDEventDriver;" not in data or b"'IOProviderClass' = IOHIDInterface;" not in data:
         raise ValueError('Final XNU kernel lacks the built-in IOHIDEventDriver interface personality')
+    system_personality = (b"'IOClass'         = IOHIDSystem;"
+                          b"     'IOProviderClass' = IOResources;"
+                          b"     'IOResourceMatch' = IOBSD;"
+                          b"     'IOMatchCategory' = IOHID;")
+    if system_personality not in data:
+        raise ValueError('Final XNU kernel lacks the built-in IOHIDSystem IOBSD personality')
     for name, usage in personalities.items():
         marker = ("'DeviceUsage' = " + str(usage) + ':32;').encode()
         if marker not in data:
             raise ValueError('Final XNU kernel lacks the source HID ' + name + ' personality')
     report.update(kernel_link_verified=True, kernel_sha256=digest(kernel), kernel_classes=list(CLASSES),
-                  kernel_personalities=personalities)
+                  kernel_personalities=personalities, system_personality='IOResources/IOBSD/IOHID')
     (OUT / 'kernel-link-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print('PASS: source IOHIDFamily classes resolve in source XNU; HID runtime/hardware remain unqualified')
 
