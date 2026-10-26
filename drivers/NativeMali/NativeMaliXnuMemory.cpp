@@ -77,8 +77,9 @@ bool XnuMemory::allocate(task_t task,uint64_t host,size_t count,bool uncached,bo
 void XnuMemory::release(const FirmwareAllocation &value) {
     auto **link=&allocations_;while(*link&&*link!=value.handle)link=&(*link)->next;
     if(!*link)return;auto *a=*link;
-    // Keep a descriptor whose completion failed pinned, including its cache
-    // references. Such an allocation is never returned to the VM allocator.
+    // GPU use has already quiesced. Restore this allocation's cache references
+    // before unwiring; overlapping live imports keep their own WC reference.
+    // A descriptor whose completion fails remains owned by this adapter.
     for(size_t i=0;i<a->cachePages;++i)dropCache(a->pages[i]);
     a->cachePages=0;
     if(a->prepared&&a->descriptor->complete()!=kIOReturnSuccess)return;

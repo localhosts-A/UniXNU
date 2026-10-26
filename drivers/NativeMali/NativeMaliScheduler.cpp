@@ -182,6 +182,8 @@ QueueResult Scheduler::resume(uint8_t as) {
             uint64_t extract = 0; auto &q = g.queues[j];
             if (!boot_->firmwareMemory().read64(q.io + 4096,&extract) ||
                 !boot_->firmwareMemory().write64(q.io + 8,extract)) return QueueResult::Access;
+            if (boot_->interface().streamRequest(i,j,7,1,false) != CsfResult::Ok ||
+                boot_->interface().notifyStream(i,j) != CsfResult::Ok) return QueueResult::Busy;
         }
         const auto r = groupState(i,3); if (r != QueueResult::Ok) return r;
         g.suspended = false;
@@ -230,16 +232,24 @@ QueueResult Scheduler::poll() {
                     c.streamRead(i,j,0xc0,&start) != CsfResult::Ok || c.streamRead(i,j,0xc4,&end) != CsfResult::Ok ||
                     c.streamRead(i,j,0xcc,&frag) != CsfResult::Ok) return QueueResult::Access;
                 if (!ops_.tilerOom || !ops_.tilerOom(ops_.cookie,g.as,uint64_t(hi) << 32 | lo,start,end,frag,&chunk)) g.error |= 8;
-                if (c.streamWrite(i,j,0x20,uint32_t(chunk)) != CsfResult::Ok || c.streamWrite(i,j,0x24,uint32_t(chunk >> 32)) != CsfResult::Ok ||
+                if (!g.error && (c.streamWrite(i,j,0x20,uint32_t(chunk)) != CsfResult::Ok || c.streamWrite(i,j,0x24,uint32_t(chunk >> 32)) != CsfResult::Ok ||
                     c.streamWrite(i,j,0x28,uint32_t(chunk)) != CsfResult::Ok || c.streamWrite(i,j,0x2c,uint32_t(chunk >> 32)) != CsfResult::Ok)
-                    return QueueResult::Access;
+                    ) return QueueResult::Access;
             }
-            // Do not ACK unsupported protected execution or a fault as success.
-            const uint32_t accepted = pending & 0x04000000;
+            // A fatal OOM is terminated without publishing an OOM reply that
+            // would resume execution with an old chunk pointer. Fault ACK only
+            // confirms receipt; the latched error remains visible to clients.
+            if ((pending & 0xc0000000) && c.streamAccept(i,j,pending & 0xc0000000) != CsfResult::Ok) return QueueResult::Access;
+            const uint32_t accepted = g.error ? 0 : pending & 0x04000000;
             if (accepted && !g.suspended) {
                 if (c.streamAccept(i,j,accepted) != CsfResult::Ok) return QueueResult::Access;
                 const auto r = notify(i,int(j)); if (r != QueueResult::Ok) return r;
             }
+        }
+        if (g.error && g.started) {
+            const auto stopped = groupState(i,0);
+            if (stopped != QueueResult::Ok) return stopped;
+            g.started = g.suspended = false;
         }
     }
     if (notifyNeeded && boot_->hardware().ringDoorbell(0) != HardwareResult::Ok) return QueueResult::Access;

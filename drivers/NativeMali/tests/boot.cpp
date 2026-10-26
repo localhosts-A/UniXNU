@@ -219,6 +219,11 @@ int main() {
         assert(scheduler.kick(group,0,128)==QueueResult::Ok);
         assert(scheduler.kick(group,0,64)==QueueResult::Invalid);
         assert(scheduler.poll()==QueueResult::Ok&&scheduler.error(1)==0);
+        *m.gpu(0x04007020)=0xdeadbeef;
+        *m.gpu(0x0400a000)|=0x04000000; // Firmware actor requests a heap chunk.
+        assert(scheduler.poll()==QueueResult::Ok&&(scheduler.error(1)&8));
+        assert((*m.gpu(0x04006800)&7)==0&&*m.gpu(0x04007020)==0xdeadbeef);
+        assert(scheduler.kick(group,0,192)==QueueResult::State);
         assert(scheduler.destroy(group)==QueueResult::Ok&&!scheduler.owns(group,1));
         assert(scheduler.create(1,1,&fourth)==QueueResult::Ok&&fourth!=group);
         m.queueWorks=false;
