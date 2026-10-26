@@ -61,8 +61,8 @@ def main():
     elif (bundle/'libvulkan_native_mali.dylib').exists():
         raise SystemExit('Compile-only output must not contain an old ICD')
     for item in ([bundle/driver.name] if not args.compile_only else [])+[bundle]:
-        subprocess.run(['codesign','--force','--sign','-','--pagesize','4096','--identifier',
-                        'org.unixnu.NativeMaliMetal.'+args.target if item==bundle else 'org.unixnu.NativeMali.ICD.'+args.target,item],check=True)
+        identifier='org.unixnu.NativeMaliMetal' if item==bundle else 'org.unixnu.NativeMali.ICD'
+        subprocess.run(['codesign','--force','--sign','-','--pagesize','4096','--identifier',identifier,item],check=True)
         subprocess.run(['codesign','--verify','--strict',item],check=True)
         detail=subprocess.run(['codesign','--display','--verbose=4',item],capture_output=True,text=True,check=True).stderr
         if not re.search(r'^Page size=4096$',detail,re.M):raise SystemExit('Signature page size is not 4096')

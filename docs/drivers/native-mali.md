@@ -122,7 +122,9 @@ physical device remains unqualified. Before a user-authorized trial:
    result before exercising a queue.
 5. For NativeMetal, verify plugin discovery, one harmless allocation, a real
    kernel completion/value wait, IOSurface import/cache visibility, then
-   successful-frame handoff and the display's own frame acknowledgement.
+   register a process-lifetime sink with
+   `native_mali_metal_set_frame_sink` and verify successful-frame handoff and
+   the display's own frame acknowledgement.
    Separate GPU completion from panel presentation; the offline frame test
    does not prove vblank or scanout.
 

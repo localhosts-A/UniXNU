@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 
 ROOT=Path(__file__).resolve().parents[1]
 SOURCE=ROOT/'.cache/gpu-reference/metal2vulkan'
@@ -15,6 +16,10 @@ PROFILE=SOURCE/'crates/metal2vulkan-validation/profiles/vk12-bare.json'
 
 
 def main():
+    # Recheck the parent-owned patch set and refresh the exact Cargo lock from
+    # tracked inputs; the AIR validation is reproducible as a standalone gate.
+    subprocess.run([sys.executable,ROOT/'scripts/build-native-metal-bridge.py','--backend','mali',
+                    '--target','host','--fetch','--manifest-only'],check=True)
     pin=json.loads((ROOT/'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']['commit']
     actual=subprocess.check_output(['git','-C',SOURCE,'rev-parse','HEAD'],text=True).strip()
     if actual!=pin:raise SystemExit(f'translator pin mismatch: {actual}')
