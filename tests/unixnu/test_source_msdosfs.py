@@ -73,6 +73,13 @@ class SourceMsdosfsTests(unittest.TestCase):
                 cli.prepare(ctx, ['kernel'])
             self.assertEqual('msdosfs' in fetch.call_args.kwargs['only'], enabled)
 
+    def test_kernel_link_force_loads_the_real_msdosfs_archive(self):
+        baseline = (ROOT / 'scripts/build-xnu-4k-baseline.sh').read_text()
+        self.assertIn('SOURCE_MSDOSFS=${XNU_SOURCE_MSDOSFS:-0}', baseline)
+        self.assertIn('MSDOSFS_ARCHIVE=$ROOT/build/source-msdosfs/libmsdosfs.a', baseline)
+        self.assertIn('-Wl,-force_load,$MSDOSFS_ARCHIVE', baseline)
+        self.assertIn('KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $MSDOSFS_ARCHIVE"', baseline)
+
 
 if __name__ == '__main__':
     unittest.main()
