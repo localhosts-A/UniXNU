@@ -239,7 +239,9 @@ uint32_t Session::call(const nml_request &r, nml_response *out) {
                 if(!(b->flags&NML_BUFFER_UNCACHED)&&boot_->hardware().synchronizeMemory(timeout_)!=HardwareResult::Ok)return fail();
                 ops_.memory.acquire(ops_.memory.cookie,b->allocation,offset,8);
                 out->value=__atomic_load_n(reinterpret_cast<uint64_t *>(b->allocation.cpu+offset),__ATOMIC_ACQUIRE);
-                if(out->value>r.value)return NML_OK;
+                // The CQS word can be GPU-uncached while payload BOs are
+                // cached. Drain their GPU writes before returning a host fence.
+                if(out->value>r.value)return boot_->hardware().synchronizeMemory(timeout_)==HardwareResult::Ok?NML_OK:fail();
             }else return NML_OK;
             if(ops_.nowNs(ops_.memory.cookie)-start>=r.timeout_ns)return NML_TIMEOUT;
             ops_.delayUs(ops_.memory.cookie,1000);
