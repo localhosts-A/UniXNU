@@ -324,3 +324,100 @@ index be2fcaf..7bdd27a 100644
  
  /*!
      @defined HID Device Property Keys
+diff --git a/IOHIDFamily/IOHIDConsumer.cpp b/IOHIDFamily/IOHIDConsumer.cpp
+index 4741a92..ffca888 100644
+--- a/IOHIDFamily/IOHIDConsumer.cpp
++++ b/IOHIDFamily/IOHIDConsumer.cpp
+@@ -170,6 +170,7 @@ void IOHIDConsumer::dispatchConsumerEvent(
+                 break;
+         }
+     }	
++#if DALI_HID_PRIVATE_APPLE_USAGES
+     else if (usagePage == kHIDPage_AppleVendorTopCase)
+     {
+         switch (usage)
+@@ -194,6 +195,7 @@ void IOHIDConsumer::dispatchConsumerEvent(
+                 break; 
+         }
+     }
++#endif
+     else if ((usagePage == kHIDPage_KeyboardOrKeypad) &&
+                 (usage == kHIDUsage_KeyboardLockingNumLock))
+     {
+diff --git a/IOHIDFamily/IOHIDKeyboard.cpp b/IOHIDFamily/IOHIDKeyboard.cpp
+index 5a0886a..5985e90 100755
+--- a/IOHIDFamily/IOHIDKeyboard.cpp
++++ b/IOHIDFamily/IOHIDKeyboard.cpp
+@@ -222,7 +222,9 @@ void IOHIDKeyboard::dispatchKeyboardEvent(
+ 	switch (usagePage)
+ 	{
+ 		case kHIDPage_KeyboardOrKeypad:
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorKeyboard:
++#endif
+             if (repeat != _repeat)
+             {
+                 _repeat = repeat;
+@@ -238,6 +240,7 @@ void IOHIDKeyboard::dispatchKeyboardEvent(
+ 
+                     keycode = _usb_2_adb_keymap[alpha];
+                 }
++#if DALI_HID_PRIVATE_APPLE_USAGES
+                 else {
+                     if ( alpha >= (sizeof(_usb_apple_2_adb_keymap)/sizeof(_usb_apple_2_adb_keymap[0])) ) {
+                         HIDLogError("usage unexpectedly large %02x:%02x", (int)usagePage, (int)usage);
+@@ -255,13 +258,18 @@ void IOHIDKeyboard::dispatchKeyboardEvent(
+                 else {
+                     super::dispatchKeyboardEvent(keycode, keyDown, timeStamp);
+                 }
++#else
++                super::dispatchKeyboardEvent(keycode, keyDown, timeStamp);
++#endif
+             } while ( 0 );
+             break;
+             
++#if DALI_HID_PRIVATE_APPLE_USAGES
+         case kHIDPage_AppleVendorTopCase:
+             if ((usage == kHIDUsage_AV_TopCase_KeyboardFn) && _containsFKey)
+                 super::dispatchKeyboardEvent(0x3f, keyDown, timeStamp);
+ 			break;
++#endif
+ 	}
+     
+     clearLastPageAndUsage();
+diff --git a/IOHIDSystem/IOHIDSystem.cpp b/IOHIDSystem/IOHIDSystem.cpp
+index 1c16c62..981f911 100644
+--- a/IOHIDSystem/IOHIDSystem.cpp
++++ b/IOHIDSystem/IOHIDSystem.cpp
+@@ -31,7 +31,7 @@
+ #include "IOHIDEvent.h"
+ #include <IOKit/system.h>
+ #include <IOKit/assert.h>
+-#include <IOKit/IOReporter.h>
++#include <IOKit/IOKernelReporters.h>
+ 
+ #include <libkern/c++/OSContainers.h>
+ #include <libkern/c++/OSCollectionIterator.h>
+diff --git a/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h b/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h
+index 7ac20b1..a98a04f 100644
+--- a/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h
++++ b/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h
+@@ -26,8 +26,6 @@
+ 
+ #include <sys/cdefs.h>
+ 
+-__BEGIN_DECLS
+-
+ #if KERNEL
+ #include <IOKit/system.h>
+ #else /* !KERNEL */
+@@ -40,6 +38,9 @@ __BEGIN_DECLS
+ #include <IOKit/hidsystem/IOHIDTypes.h>
+ #include <IOKit/hidsystem/IOLLEvent.h>
+ 
++// Included XNU headers contain C++ templates; only our declarations have C linkage.
++__BEGIN_DECLS
++
+ /*
+  * Identify this driver as one that uses the new driverkit and messaging API
+  */
