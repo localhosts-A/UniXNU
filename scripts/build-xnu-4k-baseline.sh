@@ -195,6 +195,11 @@ fi
 if [ "$SOURCE_HID_FAMILY" = 1 ]; then
   PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_SOURCE_HID_FAMILY=1"
 fi
+SOURCE_MSDOSFS=${XNU_SOURCE_MSDOSFS:-0}
+if [ "$SOURCE_MSDOSFS" != 0 ] && [ "$SOURCE_MSDOSFS" != 1 ]; then
+  echo 'XNU_SOURCE_MSDOSFS must be 0 or 1' >&2
+  exit 1
+fi
 NATIVE_VIRTIO_CONSOLE=${XNU_NATIVE_VIRTIO_CONSOLE:-0}
 if [ "$NATIVE_VIRTIO_CONSOLE" != 0 ] && [ "$NATIVE_VIRTIO_CONSOLE" != 1 ]; then
   echo 'XNU_NATIVE_VIRTIO_CONSOLE must be 0 or 1' >&2
@@ -349,7 +354,7 @@ if [ "$(cat "$SHENG_PMGR_STAMP" 2>/dev/null || echo 0)" != "$SHENG_PMGR" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o"
   printf '%s\n' "$SHENG_PMGR" > "$SHENG_PMGR_STAMP"
 fi
-EXTRA_MAKE_ARGS+=("bsd_init.o_CFLAGS_ADD=-DXNU_SHENG_PMGR=$SHENG_PMGR -DXNU_VERIFIED_ROOT_PROBE=$OWNER_ROOT_PROBE -DXNU_OWNER_ROOT_AUDIT=$OWNER_ROOT_AUDIT -DXNU_OWNER_ROOT_TRUST=$OWNER_ROOT_TRUST -DXNU_ADRENO_FIRMWARE_PROBE=$ADRENO_FIRMWARE_PROBE -DXNU_ADRENO_PM4_PROBE=$ADRENO_PM4_PROBE -DXNU_SMMU4K_PROBE=$SMMU4K_PROBE -DXNU_CONSTANT_UPLOADS_PROBE=$CONSTANT_UPLOADS_PROBE -DXNU_NATIVE_LEGACY_DISPLAY=${XNU_NATIVE_LEGACY_DISPLAY:-0} -DXNU_NATIVE_OFFLINE_GPU=$NATIVE_OFFLINE_GPU")
+EXTRA_MAKE_ARGS+=("bsd_init.o_CFLAGS_ADD=-DXNU_SHENG_PMGR=$SHENG_PMGR -DXNU_VERIFIED_ROOT_PROBE=$OWNER_ROOT_PROBE -DXNU_OWNER_ROOT_AUDIT=$OWNER_ROOT_AUDIT -DXNU_OWNER_ROOT_TRUST=$OWNER_ROOT_TRUST -DXNU_ADRENO_FIRMWARE_PROBE=$ADRENO_FIRMWARE_PROBE -DXNU_ADRENO_PM4_PROBE=$ADRENO_PM4_PROBE -DXNU_SMMU4K_PROBE=$SMMU4K_PROBE -DXNU_CONSTANT_UPLOADS_PROBE=$CONSTANT_UPLOADS_PROBE -DXNU_NATIVE_LEGACY_DISPLAY=${XNU_NATIVE_LEGACY_DISPLAY:-0} -DXNU_NATIVE_OFFLINE_GPU=$NATIVE_OFFLINE_GPU -DXNU_SOURCE_MSDOSFS=$SOURCE_MSDOSFS")
 NATIVE_MOBILE_DISPLAY=${XNU_NATIVE_MOBILE_DISPLAY:-0}
 if [ "$NATIVE_MOBILE_DISPLAY" != 0 ] && [ "$NATIVE_MOBILE_DISPLAY" != 1 ]; then
   echo 'XNU_NATIVE_MOBILE_DISPLAY must be 0 or 1' >&2
@@ -781,6 +786,7 @@ python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-a
   "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/native-adreno/libNativeAdreno.a" \
   "$SOURCE_STORAGE_FAMILY" "$ROOT/build/source-storage/libIOStorageFamily.a" \
   "$SOURCE_HID_FAMILY" "$ROOT/build/source-hid/libIOHIDFamily.a" \
+  "$SOURCE_MSDOSFS" "$ROOT/build/source-msdosfs/libmsdosfs.a" \
   "${XNU_EXTRA_KERNEL_ARCHIVE_DEPENDENCIES:-}" <<'PY'
 import hashlib
 from pathlib import Path
@@ -810,7 +816,8 @@ if not stamp.exists() or stamp.read_text() != identity:
     # Make does not track selection of an older alternative external archive.
     # Rebuild the conditional personality and relink when this input changes.
     for relative in ('mach.development.bcm2837.unstripped.noctf',
-                     'iokit/DEVELOPMENT/KernelConfigTables.cpo'):
+                     'iokit/DEVELOPMENT/KernelConfigTables.cpo',
+                     'bsd/DEVELOPMENT/bsd_init.o'):
         (directory / relative).unlink(missing_ok=True)
     directory.mkdir(parents=True, exist_ok=True)
     stamp.write_text(identity)

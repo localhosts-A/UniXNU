@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Build and verify pinned Apple msdosfs with the source XNU C ABI.
+
+The six kernel implementation units come from the fixed Xcode target, with
+no userspace filesystem library or replacement vnode operations. Registration
+uses the upstream module entry point after XNU has initialized its VFS tables.
+"""
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+REVISION = 'f8d71e40f171f152b558c8163a971fee68c8072b'
+PHASE = '4D3DCB3608E084D300C78A0B'
+SOURCE = ROOT / 'refer/msdosfs'
+SOURCE_DIR = Path('msdosfs.kextproj/msdosfs.kmodproj')
+SOURCES = ('msdosfs_conv.c', 'msdosfs_denode.c', 'msdosfs_fat.c',
+           'msdosfs_lookup.c', 'msdosfs_vfsops.c', 'msdosfs_vnops.c')
+OUT = ROOT / 'build/source-msdosfs'
+ARCHIVE = OUT / 'libmsdosfs.a'
+REGISTRATION = ROOT / 'scripts/fixtures/source-msdosfs.c'
+PATCH = ROOT / 'patches/xnu/source-msdosfs-registration.patch'
+SYMBOLS = ('_msdosfs_module_start', '_msdosfs_vfsops',
+           '_msdosfs_vnodeop_opv_desc', '_msdosfs_fat_vnodeop_opv_desc',
+           '_msdosfs_vfs_mount', '_msdosfs_vfs_sync', '_msdosfs_vfs_unmount',
+           '_source_msdosfs_register')
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def helpers():
+    spec = importlib.util.spec_from_file_location('msdosfs_build_helpers', ROOT / 'scripts/build-source-storage.py')
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper
+
+
+def kernel_sources(source=SOURCE):
+    project = (source / 'msdosfs.xcodeproj/project.pbxproj').read_text()
+    match = re.search(r'\b' + PHASE + r' /\* Sources \*/ = \{(.*?)\n\s*\};', project, re.S)
+    if not match or 'isa = PBXSourcesBuildPhase;' not in match[1]:
+        raise ValueError('Pinned msdosfs kernel source phase is absent')
+    names = re.findall(r'/\* ([^*]+) in Sources \*/', match[1])
+    if tuple(names) != SOURCES:
+        raise ValueError('Pinned msdosfs kernel source phase changed')
+    paths = [source / SOURCE_DIR / name for name in names]
+    if not all(path.is_file() for path in paths):
+        raise ValueError('Pinned msdosfs kernel implementation is missing')
+    return paths
+
+
+def c_record(objects):
+    path = objects / 'bsd/DEVELOPMENT/vfs_conf.o.json'
+    record = json.loads(path.read_text().strip().rstrip(','))
+    if not str(record.get('file', '')).endswith('/vfs_conf.c') or not isinstance(record.get('arguments'), list):
+        raise ValueError('The actual XNU VFS C compile record is required')
+    return path, record
+
+
+def check_symbols(defined, undefined=''):
+    # Compare exact final tokens, so e.g. a function name embedded in a longer
+    # symbol or debug metadata cannot satisfy a missing implementation.
+    definitions = {line.split()[-1] for line in defined.splitlines() if line.split()}
+    unresolved = {line.split()[-1] for line in undefined.splitlines() if line.split()}
+    for name in SYMBOLS:
+        if name not in definitions or name in unresolved:
+            raise ValueError('Missing resolved source msdosfs implementation: ' + name)
+
+
+def build():
+    revision = subprocess.check_output(['git', '-C', SOURCE, 'rev-parse', 'HEAD'], text=True).strip()
+    if revision != REVISION or subprocess.check_output(['git', '-C', SOURCE, 'status', '--porcelain'], text=True).strip():
+        raise ValueError('msdosfs must use its clean fixed source revision')
+    inputs = kernel_sources() + [REGISTRATION]
+    objects = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
+    record_path, record = c_record(objects)
+    helper = helpers()
+    OUT.mkdir(parents=True, exist_ok=True)
+    ARCHIVE.unlink(missing_ok=True)
+    (OUT / 'build-report.json').unlink(missing_ok=True)
+    (OUT / 'compile-failures.json').unlink(missing_ok=True)
+    xnu = ROOT / '.cache/xnu-work'
+    includes = [SOURCE / SOURCE_DIR, xnu / 'bsd', xnu / 'iokit', xnu / 'osfmk']
+
+    def compile_unit(source):
+        obj = OUT / (source.name + '.o')
+        obj.unlink(missing_ok=True)
+        command = helper.compile_command(record, source, obj, includes)
+        command[3] = 'clang'
+        command += ['-DMSDOSFS_AUTO_UNLOAD=0']
+        log = obj.with_suffix('.log')
+        row = {'source': str(source.relative_to(ROOT)), 'source_sha256': digest(source), 'command': command}
+        (OUT / (source.name + '.command.json')).write_text(json.dumps(command, indent=2) + '\n')
+        try:
+            helper.run_logged(command, Path(record['directory']), log)
+            helper.validate_object(obj)
+        except (RuntimeError, ValueError) as error:
+            return obj, dict(row, error=str(error), log_sha256=digest(log) if log.exists() else None)
+        return obj, dict(row, object_sha256=digest(obj), log_sha256=digest(log))
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(compile_unit, inputs))
+    failures = [row for _, row in results if 'error' in row]
+    (OUT / 'compile-failures.json').write_text(json.dumps(failures, indent=2) + '\n')
+    if failures:
+        raise RuntimeError('msdosfs source compile failures: ' + str(len(failures)) + '\n' +
+                           '\n'.join(row['source'] + ': ' + row['error'][:1200] for row in failures))
+    subprocess.run(['xcrun', 'ar', 'rcs', ARCHIVE, *[obj for obj, _ in results]], check=True)
+    defined = subprocess.check_output(['xcrun', 'nm', '-gU', ARCHIVE], text=True)
+    check_symbols(defined)
+    report = {'source_revision': revision, 'source_phase': PHASE,
+              'source_files': list(SOURCES), 'objects': [row for _, row in results],
+              'registration_source_sha256': digest(REGISTRATION), 'registration_patch_sha256': digest(PATCH),
+              'compile_record_sha256': digest(record_path), 'archive_sha256': digest(ARCHIVE),
+              'source_archive_built': True, 'kernel_link_verified': False,
+              'registration_runtime_qualified': False, 'fat32_runtime_qualified': False,
+              'hardware_qualified': False}
+    (OUT / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
+    print('PASS: actual source msdosfs archive built; kernel link, VFS and FAT32 runtime require verification')
+
+
+def verify_kernel(kernel):
+    report = json.loads((OUT / 'build-report.json').read_text())
+    if (report.get('source_revision') != REVISION or report.get('source_files') != list(SOURCES) or
+            report.get('source_archive_built') is not True or report.get('archive_sha256') != digest(ARCHIVE) or
+            report.get('registration_source_sha256') != digest(REGISTRATION) or
+            report.get('registration_patch_sha256') != digest(PATCH)):
+        raise ValueError('Source msdosfs archive/registration/report mismatch')
+    defined = subprocess.check_output(['xcrun', 'nm', '-gU', kernel], text=True)
+    undefined = subprocess.check_output(['xcrun', 'nm', '-u', kernel], text=True)
+    check_symbols(defined, undefined)
+    caller = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o'
+    references = subprocess.check_output(['xcrun', 'nm', '-u', caller], text=True)
+    if '_source_msdosfs_register' not in {line.split()[-1] for line in references.splitlines() if line.split()}:
+        raise ValueError('Compiled bsd_init does not call source msdosfs registration')
+    report.update(kernel_link_verified=True, kernel_sha256=digest(kernel),
+                  registration_caller_sha256=digest(caller), registration_hook_compiled=True)
+    (OUT / 'kernel-link-report.json').write_text(json.dumps(report, indent=2) + '\n')
+    print('PASS: source msdosfs implementations and VFS registration hook linked; FAT32 runtime remains unqualified')
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify-kernel', type=Path)
+    args = parser.parse_args(argv)
+    mode = os.environ.get('XNU_SOURCE_MSDOSFS', '0')
+    if mode == '0':
+        print('SKIP: source msdosfs disabled')
+    elif mode != '1':
+        raise SystemExit('XNU_SOURCE_MSDOSFS must be 0 or 1')
+    elif args.verify_kernel:
+        verify_kernel(args.verify_kernel.resolve())
+    else:
+        build()
+
+
+if __name__ == '__main__':
+    main()

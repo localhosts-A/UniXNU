@@ -22,6 +22,8 @@ REVISION = 'b126cf696bf1c6eede740b92d3bfca7e62d09c06'
 SOURCE = ROOT / 'refer/IOHIDFamily'
 EVENT_SOURCE = ROOT / 'refer/IOHIDEventHeaders'
 EVENT_REVISION = '2365347f5147a1e2a46de21acd08d27fe0906e85'
+APPLE_USAGES_SOURCE = ROOT / 'refer/IOHIDAppleUsageTables'
+APPLE_USAGES_REVISION = '12d918c6280fcd5e8312e4fb47b4e0e9c48a0fac'
 # Public 2031 omits its schema/generator. This explicit source port retains
 # the published 1915 event layout; it does not claim the private 2031 event ABI.
 EVENT_SCHEMA = 'IOHIDFamily-1915.140.3'
@@ -137,7 +139,7 @@ def system_support_sources(source=SOURCE):
         result.append(path)
     return result
 
-def prepare_headers(source, out, macos_sdk, event_headers=None):
+def prepare_headers(source, out, macos_sdk, event_headers=None, apple_usages=None):
     include = out / 'include'
     (include / 'IOKit').mkdir(parents=True, exist_ok=True)
     mappings = {'hid': source / 'IOHIDFamily', 'hidevent': source / 'IOHIDFamily',
@@ -169,12 +171,27 @@ def prepare_headers(source, out, macos_sdk, event_headers=None):
     conditions = macos_sdk / 'usr/include/TargetConditionals.h'
     shutil.copyfile(conditions, include / conditions.name)
     imported.append({'source': str(conditions), 'sha256': digest(conditions)})
+    # Only IOHIDSystem's NXEvent wrapper imports this official published table,
+    # inside a private C++ namespace. Do not enable unverified vendor parsing.
+    apple_usages = apple_usages or APPLE_USAGES_SOURCE / 'IOHIDFamily/AppleHIDUsageTables.h'
+    if not apple_usages.is_file():
+        raise ValueError('Missing pinned published Apple usage declaration: ' + str(apple_usages))
+    shutil.copyfile(apple_usages, include / 'DaliPublishedAppleUsages.h')
+    imported.append({'source': str(apple_usages), 'sha256': digest(apple_usages),
+                     'scope': 'IOHIDSystem NXEvent wrapper only'})
     return include, imported
 
 def verify_event_headers(source):
     revision = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
     if revision != EVENT_REVISION or subprocess.check_output(['git', '-C', source, 'status', '--porcelain'], text=True).strip():
         raise ValueError('Generated HID declarations must use their clean fixed source pin')
+    return revision
+
+
+def verify_apple_usages(source):
+    revision = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
+    if revision != APPLE_USAGES_REVISION or subprocess.check_output(['git', '-C', source, 'status', '--porcelain'], text=True).strip():
+        raise ValueError('Published Apple usage table must use its clean fixed source pin')
     return revision
 
 def c_record(objects):
@@ -194,10 +211,14 @@ def audit_inputs(source):
     inputs = embedded_sources(source) + system_support_sources(source)
     header_source = source.parent / 'IOHIDEventHeaders'
     header_revision = verify_event_headers(header_source)
+    usages_source = source.parent / 'IOHIDAppleUsageTables'
+    usages_revision = verify_apple_usages(usages_source)
     sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
-    _, imported = prepare_headers(source, OUT / 'input-audit', sdk, header_source / 'IOHIDFamily')
+    _, imported = prepare_headers(source, OUT / 'input-audit', sdk, header_source / 'IOHIDFamily',
+                                  usages_source / 'IOHIDFamily/AppleHIDUsageTables.h')
     OUT.mkdir(parents=True, exist_ok=True)
     report = {'source_revision': revision, 'event_header_revision': header_revision,
+              'apple_usage_revision': usages_revision,
               'event_schema': EVENT_SCHEMA, 'unsupported_event_features': list(UNSUPPORTED_EVENTS),
               'unsupported_hid_features': list(UNSUPPORTED_HID_FEATURES),
               'public_port_patch_sha256': digest(PUBLIC_PATCH),
@@ -219,6 +240,7 @@ def build():
         raise ValueError('IOHIDFamily must be a clean checkout of the fixed revision')
     inputs = embedded_sources() + system_support_sources()
     header_revision = verify_event_headers(EVENT_SOURCE)
+    usages_revision = verify_apple_usages(APPLE_USAGES_SOURCE)
     helper = storage_helpers()
     objects = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
     cpp_path, cpp = helper.compiler_record(objects)
@@ -313,6 +335,7 @@ def build():
         if name + '10gMetaClassE' not in defined:
             raise ValueError('Source HID archive lacks the real class: ' + name)
     report = {'source_revision': revision, 'event_header_revision': header_revision,
+              'apple_usage_revision': usages_revision,
               'event_schema': EVENT_SCHEMA, 'unsupported_event_features': list(UNSUPPORTED_EVENTS),
               'unsupported_hid_features': list(UNSUPPORTED_HID_FEATURES),
               'embedded_phase': PHASE, 'support_source_phase': SYSTEM_SUPPORT_PHASE,
@@ -334,6 +357,8 @@ def verify_kernel(kernel):
     report = json.loads((OUT / 'build-report.json').read_text())
     if report.get('source_revision') != REVISION or not report.get('source_archive_built') or report.get('archive_sha256') != digest(ARCHIVE):
         raise ValueError('Source HID archive/report mismatch')
+    if report.get('apple_usage_revision') != APPLE_USAGES_REVISION:
+        raise ValueError('Source HID published usage revision mismatch')
     if report.get('private_compatibility_patch_sha256') != digest(PRIVATE_COMPAT_PATCH):
         raise ValueError('Source HID compatibility patch/report mismatch')
     if report.get('kernel_personality_patch_sha256') != digest(PERSONALITY_PATCH):

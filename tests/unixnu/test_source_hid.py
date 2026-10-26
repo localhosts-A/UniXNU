@@ -90,10 +90,13 @@ class SourceHidTests(unittest.TestCase):
             (root / 'sdk/usr/include').mkdir(parents=True)
             (root / 'sdk/usr/include/TargetConditionals.h').write_text('/* fixture SDK */\n')
             (family / 'IOHIDDeviceTypes.h').write_text('/* fixture types */\n')
+            usages = root / 'published-apple-usages.h'
+            usages.write_text('/* fixture published usage declarations */\n')
             for name in HID.GENERATED_EVENT_HEADERS:
                 (event_headers / name).write_text('/* fixture generated declaration ' + name + ' */\n')
-            include, imported = HID.prepare_headers(root / 'source', root / 'out', root / 'sdk', event_headers)
-            self.assertEqual(len(imported), 5)
+            include, imported = HID.prepare_headers(root / 'source', root / 'out', root / 'sdk', event_headers, usages)
+            self.assertEqual(len(imported), 6)
+            self.assertEqual((include / 'DaliPublishedAppleUsages.h').read_bytes(), usages.read_bytes())
             for name in HID.GENERATED_EVENT_HEADERS:
                 self.assertFalse((family / name).exists())
                 self.assertEqual((include / 'IOKit/hid' / name).read_bytes(), (event_headers / name).read_bytes())

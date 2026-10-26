@@ -83,3 +83,17 @@ kind = "refer"
 git = "https://github.com/apple-oss-distributions/IOHIDFamily.git"
 ref = "IOHIDFamily-1915.140.3"
 commit = "2365347f5147a1e2a46de21acd08d27fe0906e85"
+
+[[source]]
+name = "msdosfs"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/msdosfs.git"
+ref = "msdosfs-608.120.4"
+commit = "f8d71e40f171f152b558c8163a971fee68c8072b"
+
+[[source]]
+name = "IOHIDAppleUsageTables"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOHIDFamily.git"
+ref = "IOHIDFamily-1035.41.2"
+commit = "12d918c6280fcd5e8312e4fb47b4e0e9c48a0fac"

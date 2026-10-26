@@ -84,7 +84,9 @@ def prepare(ctx, steps=()):
     modules = feeds.resolve(ctx)
     wanted = {name for step in steps for name in REFERENCES.get(step, ())}
     if 'kernel' in steps and ctx.need_config().get('XNU_SOURCE_HID_FAMILY'):
-        wanted.update(('IOHIDFamily', 'IOHIDEventHeaders'))
+        wanted.update(('IOHIDFamily', 'IOHIDEventHeaders', 'IOHIDAppleUsageTables'))
+    if 'kernel' in steps and ctx.need_config().get('XNU_SOURCE_MSDOSFS'):
+        wanted.add('msdosfs')
     feeds.fetch(ctx, modules, only={m.name for m in modules.values() if m.origin == 'git' and (m.kind != 'refer' or m.name in wanted)})
     tree.assemble(ctx, modules)
     return modules

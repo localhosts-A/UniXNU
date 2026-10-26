@@ -1,0 +1,17 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -787,6 +787,13 @@
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
++#if defined(XNU_SOURCE_MSDOSFS) && XNU_SOURCE_MSDOSFS
++	{
++		/* Register the real source driver before any optional USB VFS test. */
++		extern void source_msdosfs_register(void);
++		source_msdosfs_register();
++	}
++#endif
+ #if DEVELOPMENT || DEBUG
+ 	native_apfs_load_probe();
+ 	native_mobile_graphics_load_probe();

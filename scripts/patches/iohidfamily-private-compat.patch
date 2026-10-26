@@ -386,10 +386,22 @@ index 5a0886a..5985e90 100755
      
      clearLastPageAndUsage();
 diff --git a/IOHIDSystem/IOHIDSystem.cpp b/IOHIDSystem/IOHIDSystem.cpp
-index 1c16c62..981f911 100644
+index 1c16c62..3b1add7 100644
 --- a/IOHIDSystem/IOHIDSystem.cpp
 +++ b/IOHIDSystem/IOHIDSystem.cpp
-@@ -31,7 +31,7 @@
+@@ -24,6 +24,11 @@
+ #define DEBUG_ASSERT_COMPONENT_NAME_STRING "IOHIDSystem"
+ //#define DEBUG_ASSERT_PRODUCTION_CODE 0
+ 
++// Official published usages are scoped to this NXEvent transport wrapper.
++// Other Apple vendor parsing remains disabled by DALI_HID_PRIVATE_APPLE_USAGES.
++namespace DaliPublishedNxEvent {
++#include <DaliPublishedAppleUsages.h>
++}
+ 
+ #include <AssertMacros.h>
+ #include "IOHIDKeys.h"
+@@ -31,7 +36,7 @@
  #include "IOHIDEvent.h"
  #include <IOKit/system.h>
  #include <IOKit/assert.h>
@@ -398,6 +410,17 @@ index 1c16c62..981f911 100644
  
  #include <libkern/c++/OSContainers.h>
  #include <libkern/c++/OSCollectionIterator.h>
+@@ -1665,8 +1670,8 @@ void IOHIDSystem::postEvent(int           what,
+ 
+     event = IOHIDEvent::vendorDefinedEvent(
+                                   ts,
+-                                  kHIDPage_AppleVendor,
+-                                  kHIDUsage_AppleVendor_NXEvent,
++                                  DaliPublishedNxEvent::kHIDPage_AppleVendor,
++                                  DaliPublishedNxEvent::kHIDUsage_AppleVendor_NXEvent,
+                                   0,
+                                   (uint8_t*)&nxEvent,
+                                   sizeof(nxEvent),
 diff --git a/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h b/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h
 index 7ac20b1..a98a04f 100644
 --- a/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h
