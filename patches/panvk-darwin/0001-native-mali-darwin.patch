@@ -329,7 +329,7 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
     if (pan_arch(device->kmod.dev->props.gpu_id) < 10)
        device->drm_syncobj_type.export_sync_file = NULL;
  
-@@ -1306,6 +1321,21 @@
+@@ -1306,6 +1321,20 @@
     struct vk_features supported_features;
     panvk_arch_dispatch(arch, get_physical_device_features, instance,
                         device, &supported_features);
@@ -340,7 +340,6 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
 +   supported_extensions.KHR_external_fence_fd = false;
 +   supported_extensions.EXT_external_memory_dma_buf = false;
 +   supported_extensions.EXT_physical_device_drm = false;
-+   supported_extensions.EXT_memory_map_placed = false;
 +   supported_extensions.KHR_performance_query = false;
 +   supported_features.bufferDeviceAddressCaptureReplay = false;
 +   supported_features.sparseBinding = false;
@@ -361,7 +360,7 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
     }
  
     if (arch != 10)
-@@ -1465,6 +1498,21 @@
+@@ -1465,6 +1498,20 @@
     struct vk_features supported_features;
     panvk_arch_dispatch(arch, get_physical_device_features, instance,
                         device, &supported_features);
@@ -372,7 +371,6 @@ diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/p
 +   supported_extensions.KHR_external_fence_fd = false;
 +   supported_extensions.EXT_external_memory_dma_buf = false;
 +   supported_extensions.EXT_physical_device_drm = false;
-+   supported_extensions.EXT_memory_map_placed = false;
 +   supported_extensions.KHR_performance_query = false;
 +   supported_features.bufferDeviceAddressCaptureReplay = false;
 +   supported_features.sparseBinding = false;
