@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Compile and run actual NativeMali core fixtures; no GPU/device is accessed."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--sanitize', action='store_true')
+    args = parser.parse_args()
+    source = ROOT / 'drivers/NativeMali'
+    out = ROOT / 'build/native-mali-host'
+    out.mkdir(parents=True, exist_ok=True)
+    compiler = shutil.which(os.environ.get('CXX', 'clang++'))
+    if not compiler:
+        raise SystemExit('A C++17 host compiler is required')
+    tests = [('mmu', ['NativeMaliMmu.cpp']), ('firmware', ['NativeMaliFirmware.cpp'])]
+    report = {'schema': 1, 'compiler': subprocess.check_output([compiler, '--version'], text=True),
+              'hardware_exercised': False, 'cases': {}}
+    for name, units in tests:
+        files = [source / unit for unit in units] + [source / 'tests' / (name + '.cpp')]
+        command = [compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
+                   '-fno-exceptions', '-fno-rtti', '-I', str(source)]
+        if args.sanitize:
+            command += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
+        executable = out / name
+        command += [*map(str, files), '-o', str(executable)]
+        subprocess.run(command, check=True)
+        env = dict(os.environ, UBSAN_OPTIONS='halt_on_error=1', ASAN_OPTIONS='detect_leaks=1:abort_on_error=1')
+        result = subprocess.run([str(executable)], env=env, check=True, capture_output=True, text=True)
+        print(result.stdout, end='')
+        report['cases'][name] = {'command': command, 'output': result.stdout,
+                                'sources': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                            for p in files + sorted(source.glob('*.h'))}}
+    (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

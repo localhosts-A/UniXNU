@@ -1,0 +1,30 @@
+name: Mali offline
+on:
+  push:
+    branches: [codex/dali-mali-metal-offline]
+    paths:
+      - drivers/NativeMali/**
+      - scripts/check-native-mali-host.py
+      - .github/workflows/mali-offline.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mali-offline-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Production MMU and CSF image parser fixtures
+        run: python3 scripts/check-native-mali-host.py --sanitize
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mali-core-${{ matrix.os }}
+          path: build/native-mali-host/report.json
+          retention-days: 3

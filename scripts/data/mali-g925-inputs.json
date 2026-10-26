@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "panvk": {
+    "repository": "https://github.com/zenithblue-oss/panvk-kbase-android.git",
+    "commit": "fd6ed91eff1c8d3a83307a2348b959bb93797011",
+    "release": "panvk-kbase-v0.1.0-rc3",
+    "sparse": ["patches", "profiles", "scripts", "meson", "docs", "LICENSES", "tests/kbase-probe"],
+    "families": ["common", "android", "kbase-common", "app-loader", "wsi", "csf", "csf-v11", "jm-v9"]
+  },
+  "mesa": {
+    "repository": "https://gitlab.freedesktop.org/mesa/mesa.git",
+    "commit": "5a07217f034b3e50d8c7c7794f97a2df1742613b"
+  },
+  "kernel_reference": {
+    "repository": "https://github.com/MiCode/MTK_kernel_modules.git",
+    "commit": "fe0fa7ff68a2de0dec7ce1a04f5db6f07fd4a3b9",
+    "path": "gpu/gpu_mali/mali_avalon/mali-r44p0",
+    "version": "r44p0",
+    "role": "hardware protocol reference; running r49 remains separately qualified"
+  },
+  "target": {
+    "soc": "MT6991",
+    "gpu": "Immortalis-G925 MC12",
+    "pan_arch": 13,
+    "frontend": "CSF",
+    "cpu_page_size": 4096,
+    "deployment_target": "arm64-apple-ios17.0"
+  },
+  "translator_patch_0008": {
+    "repository": "https://github.com/UniXNU/NativeMetal.git",
+    "commit": "ed654b40df5720dbc58bb6bfdb8fbb1cc86ff3b9",
+    "path": "bridge/patches/0008-alias-padded-rows-of-written-textures.patch"
+  }
+}

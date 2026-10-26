@@ -18,16 +18,28 @@ PIN = json.loads((ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text(
 SOURCE = ROOT / '.cache/gpu-reference/metal2vulkan'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--target', choices=['ios', 'host'], default='ios')
+parser.add_argument('--fetch', action='store_true', help='fetch the exact translator commit when its cache is absent')
 parser.add_argument('--manifest-only', action='store_true',
                     help='write build/native-metal-bridge/Cargo.toml (patched source, fixtures) and stop before cargo, for `cargo fetch`')
 args = parser.parse_args()
+if args.fetch and not SOURCE.exists():
+    translator = json.loads((ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']
+    SOURCE.mkdir(parents=True)
+    subprocess.run(['git', 'init', '-q', str(SOURCE)], check=True)
+    subprocess.run(['git', '-C', str(SOURCE), 'remote', 'add', 'origin', translator['repository']], check=True)
+    subprocess.run(['git', '-C', str(SOURCE), 'fetch', '--depth=1', '--filter=blob:none', 'origin', PIN], check=True)
+    subprocess.run(['git', '-C', str(SOURCE), 'checkout', '--detach', PIN], check=True)
 if subprocess.check_output(['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], text=True).strip() != PIN:
     raise SystemExit('Translator revision differs from the qualified source pin')
 PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     '0001-optional-constant-output-members.patch', '0002-resource-wait-storage-dependencies.patch',
     '0003-cache-device-entry-point-priming.patch', '0004-fold-constant-global-field-loads.patch',
     '0005-keep-module-decodes-and-profile-fingerprints.patch', '0006-skip-draws-without-a-pipeline.patch',
-    '0007-accept-two-plane-rgb-surfaces.patch', '0008-alias-padded-rows-of-written-textures.patch']]
+    '0007-accept-two-plane-rgb-surfaces.patch']]
+# The pinned NativeMetal gitlink predates this upstream patch. Keep the exact
+# upstream patch in the parent source graph rather than depending on a moving
+# submodule branch. Provenance is fixed in mali-g925-inputs.json.
+PATCHES.append(ROOT / 'patches/metal2vulkan/0008-alias-padded-rows-of-written-textures.patch')
 tree_diff = subprocess.check_output(['git', '-C', str(SOURCE), 'diff', 'HEAD', '--'], text=True)
 def canonical_diff(diff):
     # Independent patches touch disjoint files; Git orders the combined diff by
