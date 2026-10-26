@@ -80,6 +80,13 @@ diff --git a/src/panfrost/lib/kmod/pan_kmod.c b/src/panfrost/lib/kmod/pan_kmod.c
 diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
 --- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
 +++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -719,5 +719,5 @@
+    if (dev->debug.decode_ctx && PANVK_DEBUG(DUMP)) {
+       pandecode_user_msg(dev->debug.decode_ctx,
+-         "\nSubqueue %d Ringbuffer Trampoline [job %lu, gpu_va: %lx, cpu=%p, Size %u bytes, to %lx]:\n",
++         "\nSubqueue %u Ringbuffer Trampoline [job %" PRIu64 ", gpu_va: %" PRIx64 ", cpu=%p, Size %u bytes, to %" PRIx64 "]:\n",
+          subqueue, subq->kbase.emitted_jobs, subq->kbase.ringbuf_dev + offset,
+          subq->kbase.ringbuf_cpu + offset, padded_size, stream_addr);
 @@ -752,6 +752,10 @@
      * CS_ACTIVE again after ringing it; if a suspend raced the write, the
      * scheduler kick below safely resumes the group. */
@@ -119,6 +126,20 @@ diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/
  
        if (cell->error) {
           /* CS output block mirrors the CS registers. cell->error is only
+@@ -942,4 +956,4 @@
+             //    subq->kbase.ringbuf_cpu + offset, padded_size, stream_addr);
+-            mesa_logi("kbase: csf timeout on subqueue %d @ job %lu / %lu: insert %lu (gpu_va: %lx), extract %lu (gpu_va: %lx)"
+-               ", last_job_offset %u (gpu_va: %lx), last_last_job_offset %u (gpu_va: %lx)",
++            mesa_logi("kbase: csf timeout on subqueue %u @ job %" PRIu64 " / %" PRIu64 ": insert %" PRIu64 " (gpu_va: %" PRIx64 "), extract %" PRIu64 " (gpu_va: %" PRIx64 ")"
++               ", last_job_offset %u (gpu_va: %" PRIx64 "), last_last_job_offset %u (gpu_va: %" PRIx64 ")",
+                subqueue, cell->seqno, target_seqno, insert, subq->kbase.ringbuf_dev + insert,
+@@ -983,4 +997,4 @@
+             //    subq->kbase.ringbuf_cpu + offset, padded_size, stream_addr);
+-            mesa_logi("kbase: csf error/potential timeout (error=%d) on subqueue %d @ job %lu / %lu: insert %lu (gpu_va: %lx), extract %lu (gpu_va: %lx)"
+-               ", last_job_offset %u (gpu_va: %lx), last_last_job_offset %u (gpu_va: %lx)",
++            mesa_logi("kbase: csf error/potential timeout (error=%d) on subqueue %u @ job %" PRIu64 " / %" PRIu64 ": insert %" PRIu64 " (gpu_va: %" PRIx64 "), extract %" PRIu64 " (gpu_va: %" PRIx64 ")"
++               ", last_job_offset %u (gpu_va: %" PRIx64 "), last_last_job_offset %u (gpu_va: %" PRIx64 ")",
+                error_type, subqueue, cell->seqno, target_seqno, insert, subq->kbase.ringbuf_dev + insert,
 diff --git a/src/panfrost/vulkan/meson.build b/src/panfrost/vulkan/meson.build
 --- a/src/panfrost/vulkan/meson.build
 +++ b/src/panfrost/vulkan/meson.build
