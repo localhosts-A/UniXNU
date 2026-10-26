@@ -22,6 +22,12 @@ The memory limit is a temporary conservative ownership policy; a resource
 property alone is not an XNU VM reservation. The firmware is a private input
 and is not included in source or public CI artifacts.
 
+For the published render path, the IOGPUFamily plugin initializes in
+`backboardd` and PanVK opens the `DaliMali` service there. The service publishes
+`NativeSandboxGrantProcess=backboardd` before registration; the generic XNU
+grant checks that exact process name. Plugin discovery and sandbox access
+remain pending device validation.
+
 AS0 is private to the MCU. Each connection gets one available AS1..15, its
 own page tables, generation-scoped handles and a 256 MiB allocation budget.
 No physical addresses, firmware input pages, or MMIO doorbells are exported.
