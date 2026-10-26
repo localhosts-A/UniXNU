@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "NativeMaliFirmwareMemory.h"
+#include "NativeMaliFirmwareSetup.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -85,12 +86,17 @@ static void lifecycle() {
     assert(memory.read32(0, &word) && word == 0xdecafbad);
     assert(memory.read32(128, &word) && word == 0);
     assert(!memory.write32(0, 7));
+    assert(!memory.initialize32(0,7)); // Executable memory cannot become metadata.
     assert(memory.write32(0x100000, 0x12345678));
     assert(memory.read32(0x100000, &word) && word == 0x12345678);
     assert(!memory.read32(1, &word) && !memory.read32(0x200000, &word));
     assert(!memory.write32(0x101000, 9));
     assert(mmu.translate(0, &physical, &descriptor) == MmuResult::Ok && !(descriptor & (1ull << 54)));
     assert(mmu.translate(0x100000, &physical, &descriptor) == MmuResult::Ok && (descriptor & 0x1c) == 0x14);
+    assert(memory.seal() && !memory.initialize32(0x100000,9));
+    uint32_t dynamic = 99;
+    assert(memory.allocateShared(1,&dynamic) == FirmwareMemoryResult::Busy && !dynamic);
+    assert(memory.write32(0x100000,17)); // Runtime shared protocol still writable.
     assert(memory.unload(false) == FirmwareMemoryResult::Busy && pool.allocations.size() == 2);
     assert(memory.load(image, mmu, pool.memoryOps(), {}) == FirmwareMemoryResult::State);
     assert(memory.unload(true) == FirmwareMemoryResult::Ok && pool.allocations.empty());
@@ -121,8 +127,62 @@ static void rollback() {
     assert(mmu.translate(0x100000, &physical) == MmuResult::Ok && physical == page);
     assert(mmu.destroy(true) == MmuResult::Ok);
 }
+static std::vector<uint8_t> metadataFixture() {
+    std::vector<uint8_t> data(272);
+    put(data,0,0xc3f13a6e); data[4] = 3; put(data,16,152);
+    for (size_t i = 0; i < 2; ++i) {
+        const size_t off = 20 + i * 32;
+        const uint32_t address = i ? 0x04000000 : 0;
+        put(data,off,32 << 8);
+        put(data,off+4,FirmwareImage::Read | FirmwareImage::Zero | (i ? FirmwareImage::Shared | FirmwareImage::Write : 0));
+        put(data,off+8,address); put(data,off+12,address + (i ? 65536 : 4096));
+        put(data,off+16,256); put(data,off+20,272); data[off+24] = 'a'+i; put(data,off+26,address);
+    }
+    put(data,84,1 | (28 << 8)); put(data,88,0x80); put(data,92,0); put(data,96,7);
+    data[100]='c';
+    put(data,112,3 | (40 << 8)); put(data,116,1);
+    for (size_t i = 0; i < 5; ++i) put(data,120 + i*4,0x20 + i*4);
+    put(data,140,33); data[144]='t'; return data;
+}
+static void metadata() {
+    auto data = metadataFixture(); FirmwareImage image;
+    assert(image.parse(data.data(),data.size()) == FirmwareResult::Ok);
+    for (bool fail : {false,true}) {
+        Pool pool; Mmu mmu; FirmwareMemory memory; FirmwareSetup setup;
+        assert(mmu.initialize(pool.tableOps(),40,32,true) == MmuResult::Ok);
+        assert(memory.load(image,mmu,pool.memoryOps(),{}) == FirmwareMemoryResult::Ok);
+        if (fail) pool.budget = 1; // Allocate index page, then fail data backing.
+        const auto result = setup.prepare(image,memory);
+        assert(result == (fail ? FirmwareSetupResult::Allocation : FirmwareSetupResult::Ok));
+        assert(setup.prepare(image,memory) == FirmwareSetupResult::State);
+        if (!fail) {
+            assert(setup.prepared() && setup.traceCount() == 1 && setup.sharedBytes() == 65536);
+            assert(memory.pageCount() == 22);
+            uint32_t value = 0;
+            assert(memory.read32(0x20,&value) && value == 16384);
+            assert(memory.read32(0x24,&value) && value == 0x04010000);
+            assert(memory.read32(0x28,&value) && value == 0x04010040);
+            assert(memory.read32(0x2c,&value) && value == 0x04011000);
+            assert(memory.accessible(value,16384,FirmwareImage::Shared | FirmwareImage::Write));
+            assert(memory.read32(0x80,&value) && value == 0); // Compiled config default retained.
+            assert(!memory.write32(0x20,0)); // MCU RO remains RO in runtime API.
+        } else assert(!setup.prepared());
+        assert(memory.unload(true) == FirmwareMemoryResult::Ok);
+        assert(mmu.destroy(true) == MmuResult::Ok);
+    }
+    // Invalid metadata must fail before any dynamic allocation or firmware write.
+    put(data,88,0x123000);
+    assert(image.parse(data.data(),data.size()) == FirmwareResult::Ok);
+    Pool pool; Mmu mmu; FirmwareMemory memory; FirmwareSetup setup;
+    assert(mmu.initialize(pool.tableOps(),40,32,true) == MmuResult::Ok);
+    assert(memory.load(image,mmu,pool.memoryOps(),{}) == FirmwareMemoryResult::Ok);
+    const auto count = pool.allocations.size();
+    assert(setup.prepare(image,memory) == FirmwareSetupResult::Layout && pool.allocations.size() == count);
+    assert(memory.unload(true) == FirmwareMemoryResult::Ok);
+    assert(mmu.destroy(true) == MmuResult::Ok);
+}
 int main(int argc, char **argv) {
-    lifecycle(); rollback();
+    lifecycle(); rollback(); metadata();
     puts("PASS: production MCU memory copy/zero/cache permissions, protected skip and rollback; hardware_exercised=false");
     if (argc == 2) {
         std::ifstream input(argv[1], std::ios::binary);
@@ -133,8 +193,14 @@ int main(int argc, char **argv) {
         const auto result = memory.load(image, mmu, pool.memoryOps(), {});
         printf("Private MCU image: result=%u pages=%zu protected=%zu; GPU not accessed\n",
                unsigned(result), memory.pageCount(), memory.skippedProtected());
-        if (result == FirmwareMemoryResult::Ok) assert(memory.unload(true) == FirmwareMemoryResult::Ok);
+        FirmwareSetup setup; FirmwareSetupResult metadata = FirmwareSetupResult::State;
+        if (result == FirmwareMemoryResult::Ok) {
+            metadata = setup.prepare(image,memory);
+            printf("Private MCU metadata: result=%u entry=%u shared=%u traces=%zu total_pages=%zu; GPU not accessed\n",
+                   unsigned(metadata),setup.errorEntry(),setup.sharedBytes(),setup.traceCount(),memory.pageCount());
+            assert(memory.unload(true) == FirmwareMemoryResult::Ok);
+        }
         assert(mmu.destroy(true) == MmuResult::Ok);
-        return result == FirmwareMemoryResult::Ok ? 0 : 1;
+        return result == FirmwareMemoryResult::Ok && metadata == FirmwareSetupResult::Ok ? 0 : 1;
     }
 }

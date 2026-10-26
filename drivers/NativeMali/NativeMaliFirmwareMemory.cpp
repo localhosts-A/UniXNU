@@ -17,7 +17,7 @@ FirmwareMemoryResult FirmwareMemory::clear()
         ops_.release(ops_.cookie, region.memory);
         region = {}; --count_;
     }
-    prepared_ = false; totalPages_ = 0; mmu_ = nullptr;
+    prepared_ = false; sealed_ = false; totalPages_ = 0; mmu_ = nullptr;
     return FirmwareMemoryResult::Ok;
 }
 FirmwareMemoryResult FirmwareMemory::load(const FirmwareImage &image, Mmu &mmu,
@@ -36,7 +36,12 @@ FirmwareMemoryResult FirmwareMemory::load(const FirmwareImage &image, Mmu &mmu,
         if (count > policy.maxPages - pages) return FirmwareMemoryResult::Capacity;
         pages += count;
     }
-    ops_ = ops; mmu_ = &mmu; skipped_ = 0;
+    ops_ = ops; policy_ = policy; mmu_ = &mmu; skipped_ = 0; sharedNext_ = 0x04000000;
+    for (size_t i = 0; i < image.regionCount(); ++i) {
+        const auto &r = image.regions()[i];
+        if (r.start < 0x08000000 && r.end > sharedNext_)
+            sharedNext_ = r.end < 0x08000000 ? r.end : 0x08000000;
+    }
     FirmwareMemoryResult failure = FirmwareMemoryResult::Ok;
     for (size_t i = 0; i < image.regionCount(); ++i) {
         const auto &layout = image.regions()[i];
@@ -83,6 +88,57 @@ FirmwareMemoryResult FirmwareMemory::unload(bool mcuQuiesced)
     if (!prepared_ && !count_) return FirmwareMemoryResult::State;
     if (!mcuQuiesced) return FirmwareMemoryResult::Busy;
     return clear();
+}
+FirmwareMemoryResult FirmwareMemory::allocateShared(size_t count, uint32_t *address)
+{
+    if (address) *address = 0;
+    if (!prepared_) return FirmwareMemoryResult::State;
+    if (sealed_) return FirmwareMemoryResult::Busy;
+    if (!address || !count) return FirmwareMemoryResult::Invalid;
+    if (count_ == FirmwareImage::MaxRegions || count > policy_.maxPages - totalPages_ ||
+        count > (0x08000000 - sharedNext_) / 4096) return FirmwareMemoryResult::Capacity;
+    FirmwareAllocation memory{};
+    if (!ops_.allocate(ops_.cookie, count, true, &memory)) return FirmwareMemoryResult::Allocation;
+    if (!memory.cpu || (reinterpret_cast<uintptr_t>(memory.cpu) & 4095) ||
+        memory.pageCount != count || !memory.physicalPages) {
+        ops_.release(ops_.cookie, memory); return FirmwareMemoryResult::Allocation;
+    }
+    for (size_t i = 0; i < count * 4096; ++i) memory.cpu[i] = 0;
+    ops_.publish(ops_.cookie, memory, 0, count * 4096);
+    PageAttributes attributes{};
+    attributes.memoryIndex = policy_.uncachedAttribute; attributes.writable = true;
+    if (mmu_->map(sharedNext_, memory.physicalPages, count, attributes) != MmuResult::Ok) {
+        ops_.release(ops_.cookie, memory); return FirmwareMemoryResult::Mapping;
+    }
+    Region &region = regions_[count_++]; region = {};
+    region.memory = memory; region.mapped = true;
+    region.layout.flags = FirmwareImage::Read | FirmwareImage::Write | FirmwareImage::Shared;
+    region.layout.start = sharedNext_; region.layout.end = sharedNext_ + uint32_t(count * 4096);
+    *address = sharedNext_; sharedNext_ = region.layout.end; totalPages_ += count;
+    return FirmwareMemoryResult::Ok;
+}
+bool FirmwareMemory::accessible(uint32_t address, size_t bytes, uint32_t flags) const
+{
+    if (!prepared_ || !bytes || bytes > uint64_t(0x100000000) - address) return false;
+    for (size_t i = 0; i < count_; ++i) {
+        const auto &r = regions_[i].layout;
+        if (address >= r.start && uint64_t(address) + bytes <= r.end && (r.flags & flags) == flags) return true;
+    }
+    return false;
+}
+bool FirmwareMemory::initializable(uint32_t address, size_t bytes) const
+{
+    return !sealed_ && accessible(address,bytes,FirmwareImage::Read) &&
+           !accessible(address,bytes,FirmwareImage::Execute);
+}
+bool FirmwareMemory::initialize32(uint32_t address, uint32_t value)
+{
+    if (!initializable(address,4)) return false;
+    Region *region = containing(address,false);
+    if (!region) return false;
+    const size_t offset = address - region->layout.start;
+    __atomic_store_n(reinterpret_cast<uint32_t *>(region->memory.cpu + offset),value,__ATOMIC_RELEASE);
+    ops_.publish(ops_.cookie,region->memory,offset,4); return true;
 }
 FirmwareMemory::Region *FirmwareMemory::containing(uint32_t address, bool write)
 {

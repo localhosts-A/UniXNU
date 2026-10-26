@@ -31,6 +31,13 @@ class FirmwareMemory {
 public:
     FirmwareMemoryResult load(const FirmwareImage &, Mmu &, const FirmwareMemoryOps &, FirmwareMemoryPolicy);
     FirmwareMemoryResult unload(bool mcuQuiesced);
+    FirmwareMemoryResult allocateShared(size_t pages, uint32_t *virtualAddress);
+    bool accessible(uint32_t address, size_t bytes, uint32_t requiredFlags) const;
+    bool initializable(uint32_t address, size_t bytes) const;
+    // Firmware data can be MCU read-only while the host initializes trace
+    // pointers. Seal this path before publishing AS0/starting the MCU.
+    bool initialize32(uint32_t address, uint32_t value);
+    bool seal() { if (!prepared_) return false; sealed_ = true; return true; }
     bool read32(uint32_t virtualAddress, uint32_t *);
     bool write32(uint32_t virtualAddress, uint32_t);
     bool prepared() const { return prepared_; }
@@ -39,9 +46,11 @@ public:
 private:
     struct Region { FirmwareRegion layout{}; FirmwareAllocation memory{}; bool mapped = false; } regions_[FirmwareImage::MaxRegions]{};
     FirmwareMemoryOps ops_{};
+    FirmwareMemoryPolicy policy_{};
     Mmu *mmu_ = nullptr;
     size_t count_ = 0, totalPages_ = 0, skipped_ = 0;
-    bool prepared_ = false;
+    uint32_t sharedNext_ = 0x04000000;
+    bool prepared_ = false, sealed_ = false;
     Region *containing(uint32_t address, bool write);
     FirmwareMemoryResult clear();
 };

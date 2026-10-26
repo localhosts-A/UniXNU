@@ -25,7 +25,9 @@ def main():
     tests = [('mmu', ['NativeMaliMmu.cpp']), ('firmware', ['NativeMaliFirmware.cpp']),
              ('resources', ['NativeMaliResources.cpp']),
              ('csf', ['NativeMaliCsf.cpp']),
-             ('firmware-memory', ['NativeMaliMmu.cpp', 'NativeMaliFirmware.cpp', 'NativeMaliFirmwareMemory.cpp'])]
+             ('hardware', ['NativeMaliHardware.cpp']),
+             ('firmware-memory', ['NativeMaliMmu.cpp', 'NativeMaliFirmware.cpp',
+                                  'NativeMaliFirmwareMemory.cpp', 'NativeMaliFirmwareSetup.cpp'])]
     report = {'schema': 1, 'compiler': subprocess.check_output([compiler, '--version'], text=True),
               'hardware_exercised': False, 'cases': {}}
     for name, units in tests:
