@@ -449,6 +449,66 @@ int usb_host_start_storage(struct usb_host_device *device)
     return usb_bot_capacity(&device->bot);
 }
 
+int usb_host_boot_report_descriptor(enum usb_host_hid_kind kind,
+                                    const uint8_t **descriptor, size_t *length)
+{
+    static const uint8_t keyboard[] = {
+        0x05,0x01, 0x09,0x06, 0xa1,0x01, 0x05,0x07,
+        0x19,0xe0, 0x29,0xe7, 0x15,0x00, 0x25,0x01,
+        0x75,0x01, 0x95,0x08, 0x81,0x02,
+        0x75,0x08, 0x95,0x01, 0x81,0x01,
+        0x15,0x00, 0x26,0xff,0x00, 0x19,0x00, 0x2a,0xff,0x00,
+        0x75,0x08, 0x95,0x06, 0x81,0x00, 0xc0
+    };
+    static const uint8_t mouse[] = {
+        0x05,0x01, 0x09,0x02, 0xa1,0x01, 0x09,0x01, 0xa1,0x00,
+        0x05,0x09, 0x19,0x01, 0x29,0x05, 0x15,0x00, 0x25,0x01,
+        0x95,0x05, 0x75,0x01, 0x81,0x02, 0x95,0x01, 0x75,0x03, 0x81,0x01,
+        0x05,0x01, 0x09,0x30, 0x09,0x31, 0x15,0x80, 0x25,0x7f,
+        0x75,0x08, 0x95,0x02, 0x81,0x06, 0xc0,0xc0
+    };
+    if (!descriptor || !length) return USB_INVALID;
+    if (kind == USB_HOST_HID_KEYBOARD) {
+        *descriptor = keyboard; *length = sizeof(keyboard);
+    } else if (kind == USB_HOST_HID_MOUSE) {
+        *descriptor = mouse; *length = sizeof(mouse);
+    } else return USB_UNSUPPORTED;
+    return USB_OK;
+}
+
+int usb_host_read_boot_report(struct usb_host_device *device, uint8_t hid_index,
+                              uint8_t *buffer, size_t capacity, size_t *actual,
+                              uint32_t timeout_ms)
+{
+    if (!actual) return USB_INVALID;
+    *actual = 0;
+    if (!device || !buffer || !timeout_ms || timeout_ms > 10000 ||
+        hid_index >= device->hid_count || hid_index >= USB_HOST_MAX_HID_INTERFACES ||
+        !device->ops.interrupt) return USB_INVALID;
+    if (device->state != USB_HOST_CONFIGURED) return USB_DISCONNECTED;
+    const struct usb_host_hid_interface *binding = &device->hid[hid_index];
+    size_t required;
+    if (binding->kind == USB_HOST_HID_KEYBOARD) required = 8;
+    else if (binding->kind == USB_HOST_HID_MOUSE) required = 3;
+    else return USB_UNSUPPORTED;
+    if (!binding->active || capacity < required || binding->max_packet < required ||
+        binding->max_packet > 1024) return USB_INVALID;
+    uint8_t report[1024];
+    size_t received = 0;
+    int result = device->ops.interrupt(device->ops.context, &device->route,
+                                      device->address, binding->endpoint,
+                                      report, binding->max_packet, &received, timeout_ms);
+    if (result) return result;
+    if (received > binding->max_packet ||
+        (binding->kind == USB_HOST_HID_KEYBOARD && (received != 8 || report[1])) ||
+        (binding->kind == USB_HOST_HID_MOUSE &&
+         ((received != 3 && received != 4) || (report[0] & 0xe0))))
+        return USB_PHASE_ERROR;
+    for (size_t i = 0; i < required; ++i) buffer[i] = report[i];
+    *actual = required;
+    return USB_OK;
+}
+
 int usb_host_poll_input(struct usb_host_device *device, usb_key_event key_event,
                         usb_pointer_event pointer_event, void *event_context,
                         uint32_t timeout_ms)

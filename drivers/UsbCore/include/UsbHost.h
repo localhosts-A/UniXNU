@@ -153,6 +153,20 @@ int usb_host_enumerate(struct usb_host_device *, const struct usb_host_ops *,
                        const struct usb_host_route *, enum usb_host_speed,
                        uint8_t preferred_address);
 int usb_host_start_storage(struct usb_host_device *);
+/* These descriptors describe SET_PROTOCOL(BOOT), not the device's Report
+ * protocol descriptor. No Report ID; keyboard input is 8 bytes, mouse 3.
+ * Mouse buttons 1-5 are retained; a fourth vendor wheel byte is discarded by
+ * read_boot_report and remains available only through the legacy translator.
+ * The descriptor pointer has static lifetime. */
+int usb_host_boot_report_descriptor(enum usb_host_hid_kind, const uint8_t **, size_t *);
+/* Synchronous copied report for an OS HID consumer. The owner serializes this
+ * call with poll/disconnect and keeps the device alive until it returns.
+ * AGAIN/TIMEOUT/DISCONNECTED do not stop or release the device: the owner must
+ * close HID admission, stop endpoints, then detach child services. Failed
+ * transfers leave the caller buffer unchanged and set actual to zero. */
+int usb_host_read_boot_report(struct usb_host_device *, uint8_t hid_index,
+                              uint8_t *, size_t capacity, size_t *actual,
+                              uint32_t timeout_ms);
 int usb_host_poll_input(struct usb_host_device *, usb_key_event, usb_pointer_event,
                         void *event_context, uint32_t timeout_ms);
 int usb_host_disconnect(struct usb_host_device *, usb_key_event, usb_pointer_event,

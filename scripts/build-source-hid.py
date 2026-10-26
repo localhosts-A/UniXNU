@@ -188,7 +188,10 @@ def build():
                    '-I' + str(objects / 'bsd'), '-I' + str(xnu / 'EXTERNAL_HEADERS'),
                    '-I' + str(include), '-I' + str(source_tree), '-isysroot', sdk,
                    '-x', 'c++', '-std=gnu++2b', '-D__IIG=1', '-DDRIVERKIT_PRIVATE=1',
-                   '-DPRIVATE_WIFI_ONLY=1', '-DXNU_PLATFORM_iPhoneOS=1', *helper.include_flags(cpp)]
+                   # The restored public DriverKit/IOTypes.h selects its plain
+                   # integer declarations with this frontend-only platform flag.
+                   # Generated C++ still uses the actual kernel compile record.
+                   '-DPRIVATE_WIFI_ONLY=1', '-DXNU_PLATFORM_DriverKit=1', *helper.include_flags(cpp)]
         # Preserve the exact frontend invocation even when generation fails.
         (OUT / (name + '.iig-command.json')).write_text(json.dumps(command, indent=2) + '\n')
         helper.run_logged(command, Path(cpp['directory']), OUT / (name + '.iig.log'))

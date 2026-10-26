@@ -28,6 +28,9 @@ struct mock_controller {
     bool short_first_descriptor, overlong_first_descriptor, oversize_config, short_config, disconnected;
     bool high_bandwidth;
     bool invalid_high_interval;
+    size_t raw_length;
+    int raw_error;
+    bool keyboard_reserved, mouse_reserved;
 };
 struct input_events { unsigned key_count, pointer_count; uint16_t usages[8]; bool down[8]; uint8_t buttons; int16_t x,y,wheel; };
 
@@ -137,15 +140,20 @@ static int interrupt_transfer(void *context, const struct usb_host_route *route,
     struct mock_controller *m = context; assert(route && address == 5 && actual && timeout_ms);
     ++m->interrupts; *actual = 0;
     if (m->disconnected) return USB_DISCONNECTED;
+    if (m->raw_error) return m->raw_error;
     if (endpoint == 0x81) {
         assert(capacity == 8);
         uint8_t pressed[8] = {0,0,4,0,0,0,0,0};
         if (!m->keyboard_reads++) { memcpy(data, pressed, sizeof(pressed)); *actual = sizeof(pressed); }
         else { memset(data, 0, sizeof(pressed)); *actual = sizeof(pressed); }
+        if (m->raw_length) *actual = m->raw_length;
+        if (m->keyboard_reserved) ((uint8_t *)data)[1] = 1;
         return USB_OK;
     }
     assert(endpoint == 0x82 && capacity == 4);
     uint8_t pointer[4] = {1,2,0xff,1}; memcpy(data, pointer, sizeof(pointer)); *actual = sizeof(pointer);
+    if (m->raw_length) *actual = m->raw_length;
+    if (m->mouse_reserved) ((uint8_t *)data)[0] = 0xe0;
     ++m->mouse_reads; return USB_OK;
 }
 static int bulk_transfer(void *context, const struct usb_host_route *route,
@@ -317,10 +325,65 @@ static void test_optional_class_and_errors(void)
     assert(device.state == USB_HOST_EMPTY && events.key_count == 2 && !events.down[1]);
 }
 
+static void test_copied_boot_reports(void)
+{
+    struct mock_controller m = {0}; struct usb_host_device device = {0};
+    enumerate(&m, &device);
+    uint8_t report[9]; memset(report, 0xa5, sizeof(report)); size_t actual = 99;
+    assert(usb_host_read_boot_report(&device, 0, report, 7, &actual, 20) == USB_INVALID);
+    assert(!actual && !m.interrupts && report[0] == 0xa5);
+    assert(usb_host_read_boot_report(&device, 0, report, 8, &actual, 20) == USB_OK);
+    const uint8_t pressed[8] = {0,0,4,0,0,0,0,0};
+    assert(actual == 8 && !memcmp(report, pressed, 8) && report[8] == 0xa5);
+    assert(usb_host_read_boot_report(&device, 0, report, 8, &actual, 20) == USB_OK);
+    const uint8_t released[8] = {0};
+    assert(actual == 8 && !memcmp(report, released, 8));
+    memset(report, 0xa5, sizeof(report));
+    assert(usb_host_read_boot_report(&device, 1, report, 3, &actual, 20) == USB_OK);
+    assert(actual == 3 && report[0] == 1 && report[1] == 2 && report[2] == 0xff && report[3] == 0xa5);
+    /* The legacy fourth wheel byte is excluded from the three-byte descriptor. */
+    m.raw_length = 3;
+    assert(usb_host_read_boot_report(&device, 1, report, 3, &actual, 20) == USB_OK && actual == 3);
+    for (size_t length = 1; length <= 9; ++length) {
+        if (length == 8) continue;
+        m.raw_length = length; memset(report, 0xa5, sizeof(report));
+        assert(usb_host_read_boot_report(&device, 0, report, 8, &actual, 20) == USB_PHASE_ERROR);
+        assert(!actual && report[0] == 0xa5 && report[8] == 0xa5);
+    }
+    m.raw_length = 0; m.keyboard_reserved = true;
+    assert(usb_host_read_boot_report(&device, 0, report, 8, &actual, 20) == USB_PHASE_ERROR && !actual);
+    m.keyboard_reserved = false; m.mouse_reserved = true;
+    assert(usb_host_read_boot_report(&device, 1, report, 3, &actual, 20) == USB_PHASE_ERROR && !actual);
+    m.mouse_reserved = false;
+    const int errors[] = {USB_AGAIN, USB_TIMEOUT, USB_IO, USB_DISCONNECTED};
+    for (size_t i = 0; i < sizeof(errors)/sizeof(errors[0]); ++i) {
+        m.raw_error = errors[i]; memset(report, 0xa5, sizeof(report));
+        assert(usb_host_read_boot_report(&device, 0, report, 8, &actual, 20) == errors[i]);
+        assert(!actual && report[0] == 0xa5 && device.state == USB_HOST_CONFIGURED && !m.disables);
+    }
+    m.raw_error = 0; m.fail_disable = true;
+    assert(usb_host_disconnect(&device, NULL, NULL, NULL) == USB_TIMEOUT);
+    assert(usb_host_read_boot_report(&device, 0, report, 8, &actual, 20) == USB_DISCONNECTED && !actual);
+    m.fail_disable = false;
+    assert(usb_host_disconnect(&device, NULL, NULL, NULL) == USB_OK);
+
+    const uint8_t *descriptor = NULL; size_t length = 0;
+    assert(usb_host_boot_report_descriptor(USB_HOST_HID_KEYBOARD, &descriptor, &length) == USB_OK);
+    assert(descriptor && length && descriptor[length-1] == 0xc0);
+    const uint8_t *keyboard = descriptor; size_t keyboard_length = length;
+    assert(usb_host_boot_report_descriptor(USB_HOST_HID_MOUSE, &descriptor, &length) == USB_OK);
+    assert(descriptor && length && descriptor[length-1] == 0xc0 && descriptor != keyboard);
+    assert(usb_host_boot_report_descriptor((enum usb_host_hid_kind)9, &descriptor, &length) == USB_UNSUPPORTED);
+    assert(usb_host_boot_report_descriptor(USB_HOST_HID_KEYBOARD, NULL, &length) == USB_INVALID);
+    assert(usb_host_boot_report_descriptor(USB_HOST_HID_KEYBOARD, &descriptor, &length) == USB_OK);
+    assert(descriptor == keyboard && length == keyboard_length);
+}
+
 int main(void)
 {
     test_enum_hid_bot_and_disconnect();
     test_optional_class_and_errors();
+    test_copied_boot_reports();
     puts("PASS: USB production host enumeration/HID/BOT class routing, cleanup retention and fault cases");
     return 0;
 }
