@@ -86,7 +86,7 @@ diff --git a/bsd/vfs/kpi_vfs.c b/bsd/vfs/kpi_vfs.c
  		newvfstbl->vfc_vfsflags |= VFC_VFSGENERICARGS;
  	}
  
-+	if (vfe->vfe_flags &  VFS_TBLKERNELARGS) &&
++	if ((vfe->vfe_flags & VFS_TBLKERNELARGS) &&
 +	    (newvfstbl->vfc_vfsflags & VFC_VFSLOCALARGS)) {
 +		newvfstbl->vfc_vfsflags |= VFC_VFSKERNELARGS;
 +	}
