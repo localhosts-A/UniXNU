@@ -24,7 +24,10 @@ jobs:
       - name: Production MMU and CSF image parser fixtures
         run: python3 scripts/check-native-mali-host.py --sanitize
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: mali-core-${{ matrix.os }}
-          path: build/native-mali-host/report.json
+          path: |
+            build/native-mali-host/report.json
+            build/native-mali-host/*.log
           retention-days: 3

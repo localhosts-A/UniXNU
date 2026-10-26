@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,8 +34,15 @@ def main():
         executable = out / name
         command += [*map(str, files), '-o', str(executable)]
         subprocess.run(command, check=True)
-        env = dict(os.environ, UBSAN_OPTIONS='halt_on_error=1', ASAN_OPTIONS='detect_leaks=1:abort_on_error=1')
-        result = subprocess.run([str(executable)], env=env, check=True, capture_output=True, text=True)
+        # Apple clang's ASan does not support LeakSanitizer. Enabling it aborts
+        # before main(), independently of the production core under test.
+        asan = 'abort_on_error=1' if sys.platform == 'darwin' else 'detect_leaks=1:abort_on_error=1'
+        env = dict(os.environ, UBSAN_OPTIONS='halt_on_error=1', ASAN_OPTIONS=asan)
+        result = subprocess.run([str(executable)], env=env, capture_output=True, text=True)
+        (out / (name + '.log')).write_text(result.stdout + result.stderr)
+        if result.returncode:
+            print(result.stdout + result.stderr, file=sys.stderr)
+            result.check_returncode()
         print(result.stdout, end='')
         report['cases'][name] = {'command': command, 'output': result.stdout,
                                 'sources': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
