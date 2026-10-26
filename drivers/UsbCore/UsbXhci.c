@@ -399,6 +399,22 @@ int usb_xhci_transfer_ring_complete_through(struct usb_xhci_transfer_ring *ring,
     return USB_OK;
 }
 
+int usb_xhci_transfer_ring_complete_event(struct usb_xhci_transfer_ring *ring,
+                                          const struct usb_xhci_event *event,
+                                          uint32_t *completed_trbs)
+{
+    if (completed_trbs) *completed_trbs = 0;
+    if (!ring || !event || !completed_trbs) return USB_INVALID;
+    if (event->kind != USB_XHCI_EVENT_TRANSFER || event->type != USB_XHCI_TRB_TRANSFER_EVENT ||
+        event->data.transfer.event_data || !event->data.transfer.trb_pointer_valid ||
+        event->completion_code == USB_XHCI_CC_INVALID ||
+        event->completion_code == USB_XHCI_CC_RING_UNDERRUN ||
+        event->completion_code == USB_XHCI_CC_RING_OVERRUN ||
+        event->completion_code == USB_XHCI_CC_VF_EVENT_RING_FULL) return USB_INVALID;
+    return usb_xhci_transfer_ring_complete_through(ring, event->data.transfer.pointer_or_data,
+                                                   completed_trbs);
+}
+
 int usb_xhci_transfer_ring_halted(struct usb_xhci_transfer_ring *ring)
 {
     if (!ring || !ring->trbs.cpu || !ring->controller_active) return USB_INVALID;
@@ -500,6 +516,65 @@ int usb_xhci_event_ring_read(struct usb_xhci_event_ring *ring, struct usb_xhci_t
         ring->dequeue_index = 0;
         ring->consumer_cycle ^= 1u;
     }
+    return USB_OK;
+}
+
+int usb_xhci_event_decode(const struct usb_xhci_trb *trb, struct usb_xhci_event *event)
+{
+    struct usb_xhci_event decoded;
+    uint32_t dword0, dword1, dword2, dword3;
+    uint64_t parameter;
+
+    if (!trb || !event) return USB_INVALID;
+    zero_bytes(&decoded, sizeof(decoded));
+    copy_bytes(decoded.raw.bytes, trb->bytes, USB_XHCI_TRB_BYTES);
+    dword0 = get_le32(decoded.raw.bytes);
+    dword1 = get_le32(decoded.raw.bytes + 4u);
+    dword2 = get_le32(decoded.raw.bytes + 8u);
+    dword3 = get_le32(decoded.raw.bytes + 12u);
+    decoded.type = (uint8_t)((dword3 >> USB_XHCI_TRB_TYPE_SHIFT) & USB_XHCI_TRB_TYPE_MASK);
+    decoded.cycle = (dword3 & USB_XHCI_TRB_CYCLE) ? 1u : 0u;
+    decoded.completion_code = (uint8_t)(dword2 >> 24);
+    parameter = ((uint64_t)dword1 << 32) | dword0;
+
+    switch (decoded.type) {
+    case USB_XHCI_TRB_TRANSFER_EVENT:
+        decoded.kind = USB_XHCI_EVENT_TRANSFER;
+        decoded.data.transfer.pointer_or_data = parameter;
+        decoded.data.transfer.residual_bytes = dword2 & 0x00ffffffu;
+        decoded.data.transfer.event_data = (dword3 & USB_XHCI_TRB_EVENT_DATA) != 0;
+        decoded.data.transfer.endpoint_id = (uint8_t)((dword3 >> 16) & 0x1fu);
+        decoded.data.transfer.slot_id = (uint8_t)(dword3 >> 24);
+        decoded.data.transfer.trb_pointer_valid =
+            !decoded.data.transfer.event_data &&
+            decoded.completion_code != USB_XHCI_CC_INVALID &&
+            decoded.completion_code != USB_XHCI_CC_RING_UNDERRUN &&
+            decoded.completion_code != USB_XHCI_CC_RING_OVERRUN &&
+            decoded.completion_code != USB_XHCI_CC_VF_EVENT_RING_FULL;
+        break;
+    case USB_XHCI_TRB_COMMAND_EVENT:
+        decoded.kind = USB_XHCI_EVENT_COMMAND_COMPLETION;
+        decoded.data.command.command_trb_pointer = parameter & ~UINT64_C(0x0f);
+        decoded.data.command.completion_parameter = dword2 & 0x00ffffffu;
+        decoded.data.command.vf_id = (uint8_t)((dword3 >> 16) & 0xffu);
+        decoded.data.command.slot_id = (uint8_t)(dword3 >> 24);
+        decoded.data.command.command_trb_pointer_valid =
+            decoded.completion_code != USB_XHCI_CC_INVALID &&
+            decoded.completion_code != USB_XHCI_CC_COMMAND_RING_STOPPED;
+        break;
+    case USB_XHCI_TRB_PORT_STATUS_EVENT:
+        decoded.kind = USB_XHCI_EVENT_PORT_STATUS_CHANGE;
+        decoded.data.port_status.port_id = (uint8_t)(dword0 >> 24);
+        break;
+    case USB_XHCI_TRB_HOST_CONTROLLER_EVENT:
+        decoded.kind = USB_XHCI_EVENT_HOST_CONTROLLER;
+        break;
+    default:
+        decoded.kind = USB_XHCI_EVENT_RAW;
+        break;
+    }
+
+    copy_bytes(event, &decoded, sizeof(decoded));
     return USB_OK;
 }
 

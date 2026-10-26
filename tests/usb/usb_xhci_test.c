@@ -249,6 +249,153 @@ static void simulate_event(struct usb_xhci_event_ring *ring, uint32_t index, uin
                           (cycle ? USB_XHCI_TRB_CYCLE : 0u));
 }
 
+static struct usb_xhci_trb make_event_trb(uint32_t type, uint32_t cycle, uint32_t control_fields,
+                                           uint32_t dword0, uint32_t dword1, uint32_t dword2)
+{
+    struct usb_xhci_trb event = {{0}};
+    put_le32(event.bytes, dword0);
+    put_le32(event.bytes + 4u, dword1);
+    put_le32(event.bytes + 8u, dword2);
+    put_le32(event.bytes + 12u, control_fields | (type << USB_XHCI_TRB_TYPE_SHIFT) |
+                                  (cycle ? USB_XHCI_TRB_CYCLE : 0u));
+    return event;
+}
+
+static void test_transfer_completion_event_guard(void)
+{
+    struct dma_model m; initialize_dma(&m); struct usb_dma_ops dma = dma_ops(&m);
+    struct usb_xhci_transfer_ring ring;
+    assert(usb_xhci_transfer_ring_init(&ring, &dma, 8) == USB_OK);
+    assert(usb_xhci_transfer_ring_mark_active(&ring) == USB_OK);
+    struct usb_xhci_trb trbs[3] = {
+        make_trb(USB_XHCI_TRB_NORMAL, 1u), make_trb(USB_XHCI_TRB_NORMAL, 2u),
+        make_trb(USB_XHCI_TRB_NORMAL, 3u)
+    };
+    assert(usb_xhci_transfer_ring_enqueue(&ring, trbs, 3u, NULL) == USB_OK);
+
+    struct usb_xhci_event event;
+    struct usb_xhci_trb raw = make_event_trb(USB_XHCI_TRB_TRANSFER_EVENT, 1u,
+        USB_XHCI_TRB_EVENT_DATA, (uint32_t)(ring.trbs.address + USB_XHCI_TRB_BYTES), 0u,
+        (uint32_t)USB_XHCI_CC_SUCCESS << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    uint32_t completed = 99u;
+    assert(usb_xhci_transfer_ring_complete_event(&ring, &event, &completed) == USB_INVALID);
+    assert(completed == 0u && ring.outstanding == 3u && !ring.faulted);
+
+    const uint8_t invalid_codes[] = {
+        USB_XHCI_CC_INVALID, USB_XHCI_CC_RING_UNDERRUN, USB_XHCI_CC_RING_OVERRUN,
+        USB_XHCI_CC_VF_EVENT_RING_FULL
+    };
+    for (size_t i = 0; i < sizeof(invalid_codes) / sizeof(invalid_codes[0]); ++i) {
+        raw = make_event_trb(USB_XHCI_TRB_TRANSFER_EVENT, 1u, 0u,
+            (uint32_t)(ring.trbs.address + USB_XHCI_TRB_BYTES), 0u,
+            (uint32_t)invalid_codes[i] << 24);
+        assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+        completed = 99u;
+        assert(usb_xhci_transfer_ring_complete_event(&ring, &event, &completed) == USB_INVALID);
+        assert(completed == 0u && ring.outstanding == 3u && !ring.faulted);
+    }
+
+    raw = make_event_trb(USB_XHCI_TRB_TRANSFER_EVENT, 1u, 0u,
+        (uint32_t)(ring.trbs.address + USB_XHCI_TRB_BYTES), 0u,
+        (uint32_t)USB_XHCI_CC_SHORT_PACKET << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(usb_xhci_transfer_ring_complete_event(&ring, &event, &completed) == USB_OK);
+    assert(completed == 2u && ring.outstanding == 1u && !ring.faulted);
+    assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);
+    assert(usb_xhci_transfer_ring_destroy(&ring) == USB_OK);
+    puts("PASS: xHCI transfer completion rejects event-data and invalid pointers");
+}
+
+static void test_event_decode(void)
+{
+    struct usb_xhci_event event;
+    struct usb_xhci_trb raw = make_event_trb(USB_XHCI_TRB_TRANSFER_EVENT, 1u,
+        (9u << 24) | (5u << 16), 0x76543210u, 0x12345678u, (1u << 24) | 0x00abcdefu);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.kind == USB_XHCI_EVENT_TRANSFER && event.type == USB_XHCI_TRB_TRANSFER_EVENT);
+    assert(event.cycle == 1u && event.completion_code == USB_XHCI_CC_SUCCESS);
+    assert(!event.data.transfer.event_data && event.data.transfer.trb_pointer_valid);
+    assert(event.data.transfer.pointer_or_data == UINT64_C(0x1234567876543210));
+    assert(event.data.transfer.residual_bytes == 0x00abcdefu);
+    assert(event.data.transfer.endpoint_id == 5u && event.data.transfer.slot_id == 9u);
+    assert(!memcmp(&event.raw, &raw, sizeof(raw)));
+
+    raw = make_event_trb(USB_XHCI_TRB_TRANSFER_EVENT, 0u,
+        USB_XHCI_TRB_EVENT_DATA | (2u << 16) | (4u << 24),
+        0x55667788u, 0x11223344u, (1u << 24) | 7u);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.data.transfer.event_data && !event.data.transfer.trb_pointer_valid);
+    assert(event.data.transfer.pointer_or_data == UINT64_C(0x1122334455667788));
+
+    const uint8_t invalid_transfer_codes[] = {
+        USB_XHCI_CC_INVALID, USB_XHCI_CC_RING_UNDERRUN, USB_XHCI_CC_RING_OVERRUN,
+        USB_XHCI_CC_VF_EVENT_RING_FULL
+    };
+    for (size_t i = 0; i < sizeof(invalid_transfer_codes) / sizeof(invalid_transfer_codes[0]); ++i) {
+        uint32_t status = (uint32_t)invalid_transfer_codes[i] << 24;
+        raw = make_event_trb(USB_XHCI_TRB_TRANSFER_EVENT, 1u, 0u, 0x81000000u, 0u, status);
+        assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+        assert(event.completion_code == invalid_transfer_codes[i]);
+        assert(!event.data.transfer.event_data && !event.data.transfer.trb_pointer_valid);
+    }
+
+    raw = make_event_trb(USB_XHCI_TRB_COMMAND_EVENT, 1u,
+        (0x22u << 16) | (0x33u << 24), 0x81000030u, 0x00000012u,
+        (1u << 24) | 0x0055aa11u);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.kind == USB_XHCI_EVENT_COMMAND_COMPLETION && event.cycle == 1u);
+    assert(event.completion_code == USB_XHCI_CC_SUCCESS);
+    assert(event.data.command.command_trb_pointer == UINT64_C(0x0000001281000030));
+    assert(event.data.command.command_trb_pointer_valid);
+    assert(event.data.command.completion_parameter == 0x0055aa11u);
+    assert(event.data.command.vf_id == 0x22u && event.data.command.slot_id == 0x33u);
+
+    raw = make_event_trb(USB_XHCI_TRB_COMMAND_EVENT, 0u, 0u, 0x81000040u, 0x12u,
+                         (uint32_t)USB_XHCI_CC_COMMAND_RING_STOPPED << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.completion_code == USB_XHCI_CC_COMMAND_RING_STOPPED);
+    assert(event.data.command.command_trb_pointer == UINT64_C(0x0000001281000040));
+    assert(!event.data.command.command_trb_pointer_valid);
+    raw = make_event_trb(USB_XHCI_TRB_COMMAND_EVENT, 1u, 0u, 0x81000050u, 0u,
+                         (uint32_t)USB_XHCI_CC_COMMAND_ABORTED << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.completion_code == USB_XHCI_CC_COMMAND_ABORTED);
+    assert(event.data.command.command_trb_pointer_valid);
+    raw = make_event_trb(USB_XHCI_TRB_COMMAND_EVENT, 1u, 0u, 0x81000060u, 0u,
+                         (uint32_t)USB_XHCI_CC_VF_EVENT_RING_FULL << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.completion_code == USB_XHCI_CC_VF_EVENT_RING_FULL);
+    assert(event.data.command.command_trb_pointer_valid);
+
+    raw = make_event_trb(USB_XHCI_TRB_PORT_STATUS_EVENT, 1u, 0u,
+                         7u << 24, 0u, (uint32_t)USB_XHCI_CC_SUCCESS << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE && event.data.port_status.port_id == 7u);
+    assert(event.completion_code == USB_XHCI_CC_SUCCESS);
+    raw = make_event_trb(USB_XHCI_TRB_PORT_STATUS_EVENT, 0u, 0u, 3u << 24, 0u, 4u << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.data.port_status.port_id == 3u && event.completion_code == 4u);
+
+    raw = make_event_trb(USB_XHCI_TRB_HOST_CONTROLLER_EVENT, 1u, 0u, 0u, 0u,
+                         (uint32_t)USB_XHCI_CC_EVENT_RING_FULL << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.kind == USB_XHCI_EVENT_HOST_CONTROLLER);
+    assert(event.completion_code == USB_XHCI_CC_EVENT_RING_FULL);
+
+    raw = make_event_trb(63u, 1u, 0u, 0x12345678u, 0x9abcdef0u, 0xa5123456u);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.kind == USB_XHCI_EVENT_RAW && event.type == 63u && event.completion_code == 0xa5u);
+    assert(!memcmp(&event.raw, &raw, sizeof(raw)));
+
+    memset(&event, 0x5a, sizeof(event));
+    struct usb_xhci_event before = event;
+    assert(usb_xhci_event_decode(NULL, &event) == USB_INVALID);
+    assert(!memcmp(&event, &before, sizeof(event)));
+    assert(usb_xhci_event_decode(&raw, NULL) == USB_INVALID);
+    puts("PASS: xHCI event type, status and pointer decoding");
+}
+
 static void test_event_ring_cycle_and_stop(void)
 {
     struct dma_model m; initialize_dma(&m); struct usb_dma_ops dma = dma_ops(&m);
@@ -296,6 +443,8 @@ int main(void)
     test_capability_discovery();
     test_transfer_ring_cycle_wrap_and_completion();
     test_transfer_ring_fault_retention();
+    test_transfer_completion_event_guard();
+    test_event_decode();
     test_event_ring_cycle_and_stop();
     return 0;
 }

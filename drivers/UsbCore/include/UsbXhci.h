@@ -18,6 +18,7 @@ extern "C" {
 #define USB_XHCI_TRB_TYPE_MASK 0x3fu
 #define USB_XHCI_TRB_CYCLE 0x00000001u
 #define USB_XHCI_TRB_TOGGLE_CYCLE 0x00000002u
+#define USB_XHCI_TRB_EVENT_DATA 0x00000004u
 
 enum usb_xhci_trb_type {
     USB_XHCI_TRB_NORMAL = 1,
@@ -39,10 +40,69 @@ enum usb_xhci_trb_type {
     USB_XHCI_TRB_TRANSFER_EVENT = 32,
     USB_XHCI_TRB_COMMAND_EVENT = 33,
     USB_XHCI_TRB_PORT_STATUS_EVENT = 34,
+    USB_XHCI_TRB_BANDWIDTH_EVENT = 35,
+    USB_XHCI_TRB_DOORBELL_EVENT = 36,
     USB_XHCI_TRB_HOST_CONTROLLER_EVENT = 37
 };
 
 struct usb_xhci_trb { uint8_t bytes[USB_XHCI_TRB_BYTES]; };
+
+enum usb_xhci_completion_code {
+    USB_XHCI_CC_INVALID = 0,
+    USB_XHCI_CC_SUCCESS = 1,
+    USB_XHCI_CC_SHORT_PACKET = 13,
+    USB_XHCI_CC_RING_UNDERRUN = 14,
+    USB_XHCI_CC_RING_OVERRUN = 15,
+    USB_XHCI_CC_VF_EVENT_RING_FULL = 16,
+    USB_XHCI_CC_EVENT_RING_FULL = 21,
+    USB_XHCI_CC_COMMAND_RING_STOPPED = 24,
+    USB_XHCI_CC_COMMAND_ABORTED = 25,
+    USB_XHCI_CC_STOPPED = 26,
+    USB_XHCI_CC_STOPPED_LENGTH_INVALID = 27,
+    USB_XHCI_CC_STOPPED_SHORT_PACKET = 28
+};
+
+enum usb_xhci_event_kind {
+    USB_XHCI_EVENT_RAW = 0,
+    USB_XHCI_EVENT_TRANSFER,
+    USB_XHCI_EVENT_COMMAND_COMPLETION,
+    USB_XHCI_EVENT_PORT_STATUS_CHANGE,
+    USB_XHCI_EVENT_HOST_CONTROLLER
+};
+
+struct usb_xhci_event {
+    struct usb_xhci_trb raw;
+    enum usb_xhci_event_kind kind;
+    uint8_t type;
+    uint8_t cycle;
+    uint8_t completion_code;
+    union {
+        struct {
+            uint64_t pointer_or_data;
+            uint32_t residual_bytes;
+            uint8_t endpoint_id;
+            uint8_t slot_id;
+            bool event_data;
+            /* False for Event Data and completion codes with no TRB pointer. */
+            bool trb_pointer_valid;
+        } transfer;
+        struct {
+            uint64_t command_trb_pointer;
+            uint32_t completion_parameter;
+            uint8_t vf_id;
+            uint8_t slot_id;
+            /* False for Invalid and Command Ring Stopped completions. */
+            bool command_trb_pointer_valid;
+        } command;
+        struct { uint8_t port_id; } port_status;
+    } data;
+};
+
+/* Decode little-endian Event TRB fields without normalizing completion codes.
+ * Unhandled, optional and vendor event types are returned as RAW with bytes
+ * preserved in raw. Event-specific pointer-valid flags encode only the xHCI
+ * cases that must not be treated as completed TRB addresses. */
+int usb_xhci_event_decode(const struct usb_xhci_trb *, struct usb_xhci_event *);
 
 struct usb_xhci_capabilities {
     uint16_t version;
@@ -86,6 +146,9 @@ int usb_xhci_transfer_ring_enqueue(struct usb_xhci_transfer_ring *, const struct
                                    size_t count, uint64_t *first_trb_address);
 int usb_xhci_transfer_ring_complete_through(struct usb_xhci_transfer_ring *, uint64_t trb_address,
                                             uint32_t *completed_trbs);
+/* Complete through a decoded transfer event only when it names a real TRB. */
+int usb_xhci_transfer_ring_complete_event(struct usb_xhci_transfer_ring *, const struct usb_xhci_event *,
+                                          uint32_t *completed_trbs);
 /* Call only after a fresh controller/endpoint stop proof. */
 int usb_xhci_transfer_ring_halted(struct usb_xhci_transfer_ring *);
 int usb_xhci_transfer_ring_destroy(struct usb_xhci_transfer_ring *);
