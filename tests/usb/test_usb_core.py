@@ -32,7 +32,8 @@ class UsbCoreTests(unittest.TestCase):
 
     def test_host_enumeration(self):
         self.run_fixture("usb_host_test.c", "PASS: USB production host enumeration",
-                         production=[str(ROOT / "drivers/UsbCore/UsbHost.c")])
+                         production=[str(ROOT / "drivers/UsbCore/UsbHost.c"),
+                                     str(ROOT / "drivers/UsbCore/UsbStorage.c")])
 
     def test_host_hub(self):
         self.run_fixture("usb_hub_test.c", "PASS: USB production hub",

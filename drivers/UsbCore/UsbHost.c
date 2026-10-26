@@ -276,13 +276,14 @@ static int host_bot_clear_halt(void *context, uint8_t endpoint)
 
 static int abort_enumeration(struct usb_host_device *device, int failure)
 {
-    if (device->address && device->ops.disable_device) {
+    if (device->address) {
+        device->state = USB_HOST_FAULTED;
+        if (!device->ops.disable_device) return USB_IO;
+        device->lifecycle_busy = true;
         int stopped = device->ops.disable_device(device->ops.context, &device->route,
                                                  device->address);
-        if (stopped) {
-            device->state = USB_HOST_FAULTED;
-            return stopped;
-        }
+        device->lifecycle_busy = false;
+        if (stopped) return stopped;
     }
     clear_bytes(device, sizeof(*device));
     return failure;
@@ -315,12 +316,15 @@ int usb_host_enumerate(struct usb_host_device *device, const struct usb_host_ops
                                  preferred_address, &address);
     if (result) return abort_enumeration(device, result);
     if (!address || address > 127) {
-        if (ops->disable_device(ops->context, route, address)) {
-            device->address = address;
-            device->state = USB_HOST_FAULTED;
-            return USB_RANGE;
-        }
-        return abort_enumeration(device, USB_RANGE);
+        device->address = address;
+        device->state = USB_HOST_FAULTED;
+        device->invalid_address_cleanup = true;
+        device->lifecycle_busy = true;
+        int stopped = ops->disable_device(ops->context, route, address);
+        device->lifecycle_busy = false;
+        if (stopped) return USB_RANGE;
+        clear_bytes(device, sizeof(*device));
+        return USB_RANGE;
     }
     device->address = address;
     device->state = USB_HOST_ADDRESSED;
@@ -555,13 +559,10 @@ int usb_host_poll_input(struct usb_host_device *device, usb_key_event key_event,
     return first_error;
 }
 
-int usb_host_disconnect(struct usb_host_device *device, usb_key_event key_event,
-                        usb_pointer_event pointer_event, void *event_context)
+static int validate_disconnect_events(const struct usb_host_device *device,
+                                      usb_key_event key_event,
+                                      usb_pointer_event pointer_event)
 {
-    if (!device) return USB_INVALID;
-    if (device->state == USB_HOST_EMPTY) return USB_OK;
-    if (!device->ops.disable_device ||
-        (!device->address && device->state != USB_HOST_FAULTED)) return USB_IO;
     for (uint8_t h = 0; h < device->hid_count; ++h) {
         const struct usb_host_hid_interface *binding = &device->hid[h];
         if (binding->kind == USB_HOST_HID_KEYBOARD) {
@@ -570,12 +571,45 @@ int usb_host_disconnect(struct usb_host_device *device, usb_key_event key_event,
             if (held && !key_event) return USB_INVALID;
         } else if (binding->state.mouse.buttons && !pointer_event) return USB_INVALID;
     }
+    return USB_OK;
+}
+
+int usb_host_stop_device(struct usb_host_device *device)
+{
+    if (!device) return USB_INVALID;
+    if (device->lifecycle_busy) return USB_BUSY;
+    if (device->state == USB_HOST_EMPTY || device->stop_proven) return USB_OK;
+    if (device->stop_invalid) return USB_IO;
+    bool invalid_address = (!device->address || device->address > 127) &&
+                           !device->invalid_address_cleanup;
+    /* Close host admission even if the backend is missing or stop needs retry. */
+    device->state = USB_HOST_FAULTED;
+    if (invalid_address) {
+        /* A malformed live address without cleanup provenance cannot prove stop. */
+        device->stop_invalid = true;
+        return USB_IO;
+    }
+    if (!device->ops.disable_device) return USB_IO;
+    device->lifecycle_busy = true;
     int result = device->ops.disable_device(device->ops.context, &device->route,
                                             device->address);
-    if (result) {
-        device->state = USB_HOST_FAULTED;
-        return result;
-    }
+    if (!result) device->stop_proven = true;
+    device->lifecycle_busy = false;
+    return result;
+}
+
+int usb_host_release_stopped_device(struct usb_host_device *device,
+                                    usb_key_event key_event,
+                                    usb_pointer_event pointer_event,
+                                    void *event_context)
+{
+    if (!device) return USB_INVALID;
+    if (device->lifecycle_busy) return USB_BUSY;
+    if (device->state == USB_HOST_EMPTY) return USB_OK;
+    if (!device->stop_proven) return USB_BUSY;
+    int result = validate_disconnect_events(device, key_event, pointer_event);
+    if (result) return result;
+    device->lifecycle_busy = true;
     for (uint8_t h = 0; h < device->hid_count; ++h) {
         struct usb_host_hid_interface *binding = &device->hid[h];
         if (binding->kind == USB_HOST_HID_KEYBOARD && key_event)
@@ -586,6 +620,25 @@ int usb_host_disconnect(struct usb_host_device *device, usb_key_event key_event,
     if (device->has_bot) usb_bot_detach(&device->bot);
     clear_bytes(device, sizeof(*device));
     return USB_OK;
+}
+
+int usb_host_disconnect(struct usb_host_device *device, usb_key_event key_event,
+                        usb_pointer_event pointer_event, void *event_context)
+{
+    if (!device) return USB_INVALID;
+    if (device->lifecycle_busy) return USB_BUSY;
+    if (device->state == USB_HOST_EMPTY) return USB_OK;
+    if (!device->stop_proven &&
+        (device->stop_invalid || !device->ops.disable_device ||
+         ((!device->address || device->address > 127) &&
+          !device->invalid_address_cleanup)))
+        return usb_host_stop_device(device);
+    int result = validate_disconnect_events(device, key_event, pointer_event);
+    if (result) return result;
+    result = usb_host_stop_device(device);
+    if (result) return result;
+    return usb_host_release_stopped_device(device, key_event, pointer_event,
+                                           event_context);
 }
 
 #define USB_HUB_DESCRIPTOR_TYPE 0x29u

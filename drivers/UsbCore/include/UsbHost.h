@@ -37,7 +37,8 @@ struct usb_host_ops {
                    const struct usb_setup *, void *, size_t capacity,
                    size_t *actual, uint32_t timeout_ms);
     /* xHCI Address Device (or equivalent) owns address assignment and EP0 setup.
-     * If it returns failure it must leave no live slot or DMA ownership behind. */
+     * If it returns failure it must leave no live slot or DMA ownership behind.
+     * A successful assignment must return a USB address in 1..127. */
     int (*address_device)(void *, const struct usb_host_route *, enum usb_host_speed,
                          uint8_t ep0_max_packet, uint8_t preferred_address,
                          uint8_t *assigned_address);
@@ -52,7 +53,10 @@ struct usb_host_ops {
     int (*reset_endpoint)(void *, const struct usb_host_route *, uint8_t address,
                           uint8_t endpoint);
     /* Must halt/cancel every endpoint and release slot/DMA only after a fresh
-     * stop proof. Failure keeps the device object intact for retry. */
+     * stop proof. Failure keeps the device object intact for retry. If a
+     * successful address_device returned an invalid address, use the route and
+     * independently retained slot ownership to clean up; never treat that
+     * invalid address alone as a slot identifier or proof. */
     int (*disable_device)(void *, const struct usb_host_route *, uint8_t address);
     /* Monotonic millisecond clock used by the nonblocking hub power/reset state machine. */
     uint32_t (*now_ms)(void *);
@@ -97,6 +101,10 @@ struct usb_host_device {
     struct usb_bot bot;
     struct usb_transport bot_transport;
     bool has_bot;
+    bool stop_proven;
+    bool lifecycle_busy;
+    bool stop_invalid;
+    bool invalid_address_cleanup;
 };
 
 enum usb_host_hub_event_kind {
@@ -167,8 +175,25 @@ int usb_host_boot_report_descriptor(enum usb_host_hid_kind, const uint8_t **, si
 int usb_host_read_boot_report(struct usb_host_device *, uint8_t hid_index,
                               uint8_t *, size_t capacity, size_t *actual,
                               uint32_t timeout_ms);
+/* Legacy translated-input path. A disconnect automatically stops and clears
+ * host state; do not use while any external child retains that state or BOT.
+ * Its event callbacks must not reenter host operations. */
 int usb_host_poll_input(struct usb_host_device *, usb_key_event, usb_pointer_event,
                         void *event_context, uint32_t timeout_ms);
+/* The owner serializes host calls and quiesces child services before stop.
+ * This closes host admission and asks the backend to stop every endpoint. A
+ * failed stop leaves the device faulted and all host/BOT state retained for a
+ * retry. Reentrant lifecycle calls from stop/release callbacks return BUSY.
+ * The owner retains exclusive backend ownership and must not restart or reuse
+ * this device while the stop proof is held. */
+int usb_host_stop_device(struct usb_host_device *);
+/* Requires a successful usb_host_stop_device(). Call after child services have
+ * detached; legacy translated-HID releases and BOT cleanup happen before host
+ * state clears. The raw-report XNU HID child sends its own neutral report
+ * during its earlier quiesce. */
+int usb_host_release_stopped_device(struct usb_host_device *, usb_key_event,
+                                    usb_pointer_event, void *event_context);
+/* Convenience stop-and-release path for devices without retained OS children. */
 int usb_host_disconnect(struct usb_host_device *, usb_key_event, usb_pointer_event,
                         void *event_context);
 
