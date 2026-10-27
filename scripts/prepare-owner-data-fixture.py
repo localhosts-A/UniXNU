@@ -23,12 +23,29 @@ IMAGE_BYTES = 32 * MIB
 
 
 def select_whole_disk(system_entities):
-    devices = [entry.get('dev-entry') for entry in system_entities
+    entities = [entry for entry in system_entities if isinstance(entry, dict)]
+    devices = [entry for entry in entities
                if isinstance(entry.get('dev-entry'), str) and
                re.fullmatch(r'/dev/disk[0-9]+', entry['dev-entry'])]
-    if len(devices) != 1:
-        raise SystemExit('Require one read-only whole-disk mapping for the Data seed image')
-    return devices[0]
+    partitioned = [entry for entry in devices if entry.get('content-hint') == 'GUID_partition_scheme']
+    if len(partitioned) == 1:
+        return partitioned[0]['dev-entry']
+    if len(partitioned) > 1:
+        raise SystemExit('Require one GUID partition-scheme parent for the Data seed image')
+
+    apfs_parents = {match.group(1) for entry in entities
+                    if entry.get('content-hint') == 'Apple_APFS' and
+                    isinstance(entry.get('dev-entry'), str)
+                    for match in [re.fullmatch(r'(/dev/disk[0-9]+)s[0-9]+', entry['dev-entry'])]
+                    if match}
+    matching = [entry['dev-entry'] for entry in devices if entry['dev-entry'] in apfs_parents]
+    if len(matching) == 1:
+        return matching[0]
+    if not matching and len(devices) == 1:
+        return devices[0]['dev-entry']
+    summary = ', '.join(f"{entry.get('dev-entry')}:{entry.get('content-hint', '?')}" for entry in entities)
+    raise SystemExit('Require one GUID partition-scheme parent for the Data seed image; '
+                     f'attach reported [{summary}]')
 
 
 def select_apfs_partition(whole_device, listing):

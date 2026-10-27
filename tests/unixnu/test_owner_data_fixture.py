@@ -13,14 +13,16 @@ spec.loader.exec_module(fixture)
 class OwnerDataFixtureDiskSelectionTests(unittest.TestCase):
     def test_selects_one_whole_disk_and_ignores_source_os_and_partition_nodes(self):
         entities = [
-            {'dev-entry': '/dev/disk9'},
-            {'dev-entry': '/dev/disk9s1'},
+            {'dev-entry': '/dev/disk9', 'content-hint': 'GUID_partition_scheme'},
+            {'dev-entry': '/dev/disk9s1', 'content-hint': 'Apple_APFS'},
+            {'dev-entry': '/dev/disk10', 'content-hint': 'EF57347C-0000-11AA-AA11-0030654'},
+            {'dev-entry': '/dev/disk10s1', 'content-hint': '41504653-0000-11AA-AA11-0030654'},
         ]
         self.assertEqual(fixture.select_whole_disk(entities), '/dev/disk9')
 
     def test_rejects_missing_or_ambiguous_whole_disk(self):
         for entities in ([], [{'dev-entry': '/dev/disk9'}, {'dev-entry': '/dev/disk10'}]):
-            with self.subTest(entities=entities), self.assertRaisesRegex(SystemExit, 'whole-disk'):
+            with self.subTest(entities=entities), self.assertRaisesRegex(SystemExit, 'GUID partition-scheme'):
                 fixture.select_whole_disk(entities)
 
     def test_selects_exact_apfs_partition_from_diskutil_list(self):
