@@ -586,6 +586,7 @@ int usb_xhci_event_decode(const struct usb_xhci_trb *trb, struct usb_xhci_event 
         decoded.data.command.vf_id = (uint8_t)((dword3 >> 16) & 0xffu);
         decoded.data.command.slot_id = (uint8_t)(dword3 >> 24);
         decoded.data.command.command_trb_pointer_valid =
+            (parameter & 0x0fu) == 0 &&
             decoded.completion_code != USB_XHCI_CC_INVALID &&
             decoded.completion_code != USB_XHCI_CC_COMMAND_RING_STOPPED;
         break;

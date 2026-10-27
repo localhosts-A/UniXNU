@@ -204,12 +204,30 @@ struct usb_xhci_controller {
     uint16_t scratch_count;
     uint16_t scratch_allocated;
     enum usb_xhci_controller_state state;
+    uint64_t pending_command;
+    uint64_t acknowledged_event;
+    bool command_pending;
     bool reset_proven;
 };
 int usb_xhci_controller_start(struct usb_xhci_controller *, const struct usb_mmio *,
                               const struct usb_dma_ops *, int (*guard)(void *),
                               void *guard_context, uint8_t slots,
                               uint32_t command_entries, uint32_t event_entries);
+/* Submit one command TRB and ring DB0. Caller owns command parameters and any
+ * referenced DMA until its completion event or a successful controller stop.
+ * A failed publication/doorbell may have taken effect: stop before release.
+ * The owner serializes calls, consumes every event and applies a bounded timeout;
+ * on timeout it must stop the controller, never reuse the pending command. */
+int usb_xhci_controller_submit_command(struct usb_xhci_controller *,
+                                       const struct usb_xhci_trb *);
+/* Returns each event in ring order, including unrelated/unknown events. A
+ * matching command completion retires the pending command; its completion code
+ * is returned unmodified in the event. AGAIN means no event. An invalid or
+ * unexpected or aborted command completion, DMA/MMIO error or controller error
+ * faults the controller: retain buffers and stop. Output is unchanged on failure. Each
+ * event advances ERDP at most to the last handled entry; an empty-ring poll
+ * advances to the empty slot. */
+int usb_xhci_controller_next_event(struct usb_xhci_controller *, struct usb_xhci_event *);
 /* Stop submissions and children first. Stop requires fresh halt and reset
  * proof before releasing any controller-visible memory; errors are retryable. */
 int usb_xhci_controller_stop(struct usb_xhci_controller *);

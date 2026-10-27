@@ -415,6 +415,13 @@ static void test_event_decode(void)
     assert(event.data.command.completion_parameter == 0x0055aa11u);
     assert(event.data.command.vf_id == 0x22u && event.data.command.slot_id == 0x33u);
 
+    raw = make_event_trb(USB_XHCI_TRB_COMMAND_EVENT, 1u, 0u, 0x81000031u, 0x12u,
+                         (uint32_t)USB_XHCI_CC_SUCCESS << 24);
+    assert(usb_xhci_event_decode(&raw, &event) == USB_OK);
+    assert(event.data.command.command_trb_pointer == UINT64_C(0x0000001281000030));
+    assert(!event.data.command.command_trb_pointer_valid);
+    assert(!memcmp(&event.raw, &raw, sizeof(raw)));
+
     raw = make_event_trb(USB_XHCI_TRB_COMMAND_EVENT, 0u, 0u, 0x81000040u, 0x12u,
                          (uint32_t)USB_XHCI_CC_COMMAND_RING_STOPPED << 24);
     assert(usb_xhci_event_decode(&raw, &event) == USB_OK);

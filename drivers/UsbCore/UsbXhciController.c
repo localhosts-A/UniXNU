@@ -232,6 +232,7 @@ int usb_xhci_controller_start(struct usb_xhci_controller *c, const struct usb_mm
     if (result) return result;
     result = program_schedule(c, slots);
     if (result) return result;
+    c->acknowledged_event = c->events.trbs.address;
     result = guarded_read(c, caps.operational_offset + OP_CMD, &command);
     if (result) return result;
     result = guarded_write(c, caps.operational_offset + OP_CMD, (command & ~CMD_EIE) | CMD_RUN);
@@ -242,6 +243,93 @@ int usb_xhci_controller_start(struct usb_xhci_controller *c, const struct usb_mm
     if (result) return result;
     if (status & (STS_NOT_READY | STS_ERROR)) return USB_IO;
     c->state = USB_XHCI_CONTROLLER_RUNNING;
+    return USB_OK;
+}
+
+static int controller_ready(struct usb_xhci_controller *c)
+{
+    uint32_t status;
+    if (!c || c->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    int result = guarded_read(c, c->caps.operational_offset + OP_STS, &status);
+    if (result || (status & (STS_HALTED | STS_NOT_READY | STS_ERROR))) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return result ? result : USB_IO;
+    }
+    return USB_OK;
+}
+
+int usb_xhci_controller_submit_command(struct usb_xhci_controller *c,
+                                       const struct usb_xhci_trb *trb)
+{
+    if (!c || !trb) return USB_INVALID;
+    if (c->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    if (c->command_pending) return USB_BUSY;
+    uint32_t control = (uint32_t)trb->bytes[12] | ((uint32_t)trb->bytes[13] << 8) |
+                       ((uint32_t)trb->bytes[14] << 16) | ((uint32_t)trb->bytes[15] << 24);
+    uint32_t type = (control >> USB_XHCI_TRB_TYPE_SHIFT) & USB_XHCI_TRB_TYPE_MASK;
+    if (!((type >= USB_XHCI_TRB_ENABLE_SLOT && type <= USB_XHCI_TRB_RESET_DEVICE) ||
+          type == USB_XHCI_TRB_NOOP_COMMAND)) return USB_INVALID;
+    int result = controller_ready(c);
+    if (result) return result;
+    uint64_t address = 0;
+    result = usb_xhci_transfer_ring_enqueue(&c->commands, trb, 1u, &address);
+    if (result) {
+        if (c->commands.faulted) c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return result;
+    }
+    c->pending_command = address;
+    c->command_pending = true; /* Publication precedes any uncertain MMIO. */
+    result = guarded_write(c, c->caps.doorbell_offset, 0u);
+    if (!result) {
+        uint32_t posted;
+        result = guarded_read(c, c->caps.doorbell_offset, &posted);
+    }
+    if (result) c->state = USB_XHCI_CONTROLLER_FAULTED;
+    return result;
+}
+
+int usb_xhci_controller_next_event(struct usb_xhci_controller *c, struct usb_xhci_event *out)
+{
+    if (!c || !out) return USB_INVALID;
+    int result = controller_ready(c);
+    if (result) return result;
+    uint64_t current;
+    result = usb_xhci_event_ring_dequeue_address(&c->events, &current);
+    if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+    struct usb_xhci_trb raw;
+    result = usb_xhci_event_ring_read(&c->events, &raw);
+    if (result != USB_OK && result != USB_AGAIN) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+    /* When another event is present, ERDP may advance only to this handled
+     * TRB. When the cycle mismatches, current is the observed empty slot.
+     * Never write the same pointer twice. */
+    if (current != c->acknowledged_event) {
+        int ack = write_address(c, c->caps.runtime_offset + RT_ERDP, current | 8u);
+        if (ack) { c->state = USB_XHCI_CONTROLLER_FAULTED; return ack; }
+        c->acknowledged_event = current;
+    }
+    if (result == USB_AGAIN) return result;
+    struct usb_xhci_event event;
+    result = usb_xhci_event_decode(&raw, &event);
+    if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+    if (event.kind == USB_XHCI_EVENT_COMMAND_COMPLETION) {
+        if (!c->command_pending || !event.data.command.command_trb_pointer_valid ||
+            event.completion_code == USB_XHCI_CC_COMMAND_ABORTED ||
+            event.data.command.command_trb_pointer != c->pending_command) {
+            c->state = USB_XHCI_CONTROLLER_FAULTED;
+            return USB_PHASE_ERROR;
+        }
+        uint32_t completed = 0;
+        result = usb_xhci_transfer_ring_complete_through(&c->commands, c->pending_command, &completed);
+        if (result || completed != 1u) {
+            c->state = USB_XHCI_CONTROLLER_FAULTED;
+            return result ? result : USB_PHASE_ERROR;
+        }
+        c->command_pending = false;
+        c->pending_command = 0;
+    } else if (event.kind == USB_XHCI_EVENT_HOST_CONTROLLER) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+    }
+    *out = event;
     return USB_OK;
 }
 

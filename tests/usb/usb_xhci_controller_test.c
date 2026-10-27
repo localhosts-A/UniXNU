@@ -148,6 +148,97 @@ static uint64_t get_le64(const uint8_t *p)
     for (unsigned i = 0; i < 8; ++i) value |= (uint64_t)p[i] << (8u * i);
     return value;
 }
+static void put_le32(uint8_t *p, uint32_t value)
+{
+    for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(value >> (8u * i));
+}
+static void event_at(struct usb_xhci_controller *c, uint32_t index, uint8_t cycle,
+                     uint32_t type, uint64_t parameter, uint8_t code, uint32_t fields)
+{
+    uint8_t *p = (uint8_t *)c->events.trbs.cpu + (size_t)index * USB_XHCI_TRB_BYTES;
+    put_le32(p, (uint32_t)parameter); put_le32(p + 4, (uint32_t)(parameter >> 32));
+    put_le32(p + 8, (uint32_t)code << 24);
+    put_le32(p + 12, (type << USB_XHCI_TRB_TYPE_SHIFT) | fields | cycle);
+}
+
+static void test_commands_and_events(void)
+{
+    struct model m; init_model(&m, 0); struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    struct usb_xhci_trb command = {{0}};
+    put_le32(command.bytes + 12, USB_XHCI_TRB_NOOP_COMMAND << USB_XHCI_TRB_TYPE_SHIFT);
+    assert(usb_xhci_controller_submit_command(c, &command) == USB_OK);
+    uint64_t pending = c->pending_command;
+    assert(c->command_pending && pending == c->commands.trbs.address && c->commands.outstanding == 1);
+    assert(usb_xhci_controller_submit_command(c, &command) == USB_BUSY);
+    struct usb_xhci_event event, unchanged; memset(&event, 0xa5, sizeof(event)); unchanged = event;
+    assert(usb_xhci_controller_next_event(c, &event) == USB_AGAIN && !memcmp(&event, &unchanged, sizeof(event)));
+    event_at(c, 0, 1, USB_XHCI_TRB_PORT_STATUS_EVENT, 3u << 24, USB_XHCI_CC_SUCCESS, 0);
+    event_at(c, 1, 1, USB_XHCI_TRB_TRANSFER_EVENT, 0x1230u, USB_XHCI_CC_SUCCESS, (2u << 24) | (1u << 16));
+    event_at(c, 2, 1, USB_XHCI_TRB_COMMAND_EVENT, pending, USB_XHCI_CC_SUCCESS, 0);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK && event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE);
+    assert(event.data.port_status.port_id == 3 && c->command_pending);
+    assert(m.regs[(RT + 0x38u) / 4u] == (uint32_t)c->events.trbs.address);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK && event.kind == USB_XHCI_EVENT_TRANSFER);
+    assert(c->command_pending && c->commands.outstanding == 1);
+    assert(m.regs[(RT + 0x38u) / 4u] == (uint32_t)(c->events.trbs.address + 16u) + 8u);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK && event.kind == USB_XHCI_EVENT_COMMAND_COMPLETION);
+    assert(event.completion_code == USB_XHCI_CC_SUCCESS && !c->command_pending && !c->commands.outstanding);
+    /* Command failure still retires the completed command and preserves status. */
+    assert(usb_xhci_controller_submit_command(c, &command) == USB_OK);
+    event_at(c, 3, 1, USB_XHCI_TRB_COMMAND_EVENT, c->pending_command, 5u, 0);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK && event.completion_code == 5u);
+    assert(!c->command_pending && !c->commands.outstanding);
+    /* Unknown events remain visible. */
+    event_at(c, 4, 1, 63u, 0x1234u, 9u, 0);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK && event.kind == USB_XHCI_EVENT_RAW && event.type == 63u);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_AGAIN);
+    assert(m.regs[(RT + 0x38u) / 4u] == (uint32_t)(c->events.trbs.address + 5u * 16u) + 8u);
+    for (uint32_t i = 5; i < 16; ++i)
+        event_at(c, i, 1, USB_XHCI_TRB_PORT_STATUS_EVENT, (uint64_t)(i + 1u) << 24,
+                 USB_XHCI_CC_SUCCESS, 0);
+    event_at(c, 0, 0, USB_XHCI_TRB_TRANSFER_EVENT, 0x4560u, USB_XHCI_CC_SHORT_PACKET, (2u << 24) | (1u << 16));
+    for (uint32_t i = 5; i < 16; ++i) {
+        assert(usb_xhci_controller_next_event(c, &event) == USB_OK && event.data.port_status.port_id == i + 1u);
+        if (i > 5) assert(m.regs[(RT + 0x38u) / 4u] == (uint32_t)(c->events.trbs.address + i * 16u) + 8u);
+    }
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_TRANSFER && event.completion_code == USB_XHCI_CC_SHORT_PACKET);
+    assert(m.regs[(RT + 0x38u) / 4u] == (uint32_t)c->events.trbs.address + 8u);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_AGAIN);
+    assert(m.regs[(RT + 0x38u) / 4u] == (uint32_t)(c->events.trbs.address + 16u) + 8u);
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    for (unsigned failure = 0; failure < 7; ++failure) {
+        init_model(&m, 0); c = new_controller(); assert(start(&m, c) == USB_OK);
+        if (failure == 0) {
+            m.fail_access = m.accesses + 2u; m.applied_error = true; /* DB0 write applied, error */
+            assert(usb_xhci_controller_submit_command(c, &command) == USB_IO);
+        } else {
+            assert(usb_xhci_controller_submit_command(c, &command) == USB_OK);
+            if (failure == 3 || failure == 4) {
+                event_at(c, 0, 1, USB_XHCI_TRB_PORT_STATUS_EVENT, 1u << 24, USB_XHCI_CC_SUCCESS, 0);
+                assert(usb_xhci_controller_next_event(c, &event) == USB_OK);
+            }
+            uint64_t ptr = c->pending_command;
+            event_at(c, failure == 3 || failure == 4 ? 1u : 0u, 1, USB_XHCI_TRB_COMMAND_EVENT,
+                     failure == 1 ? ptr + 16u : failure == 5 ? ptr | 1u : ptr,
+                     failure == 2 ? USB_XHCI_CC_COMMAND_RING_STOPPED :
+                     failure == 6 ? USB_XHCI_CC_COMMAND_ABORTED : USB_XHCI_CC_SUCCESS, 0);
+            if (failure == 3 || failure == 4) { m.fail_access = m.accesses + failure - 1u; m.applied_error = true; }
+            memset(&event, 0xa5, sizeof(event)); unchanged = event;
+            int result = usb_xhci_controller_next_event(c, &event);
+            assert(result == (failure == 3 || failure == 4 ? USB_IO : USB_PHASE_ERROR));
+            assert(!memcmp(&event, &unchanged, sizeof(event)));
+        }
+        assert(c->state == USB_XHCI_CONTROLLER_FAULTED && c->command_pending && m.releases == 0);
+        m.fail_access = 0;
+        assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+        free(c);
+    }
+    puts("PASS: xHCI command doorbell, shared event delivery and retained faults");
+}
 static void test_running_schedule(void)
 {
     struct model m; init_model(&m, 3);
@@ -307,7 +398,7 @@ static void test_guards_and_timeouts(void)
 }
 int main(void)
 {
-    test_running_schedule(); test_failure_retention(); test_guards_and_timeouts();
+    test_running_schedule(); test_failure_retention(); test_guards_and_timeouts(); test_commands_and_events();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
 }

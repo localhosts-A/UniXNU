@@ -56,8 +56,12 @@ platform lease, resets a halted controller, allocates DCBAA/scratchpads and
 command/event rings, programs their registers and runs the controller. Stop
 retains memory until a fresh halt and reset are confirmed. This path uses
 4 KiB controller pages and refuses scratchpad arrays larger than one page;
-larger-page selection is not implemented. It does not issue
-commands or doorbells, translate IRQs, provide a DMA/IOMMU mapping, populate
+larger-page selection is not implemented. It can submit one command, ring DB0
+and deliver every primary-ring event in order; a matched command completion
+retires the command, while errors preserve ownership until stop. The owner must
+enforce timeouts, handle all events and retain any command-referenced memory.
+It does not construct device contexts or USB transfers, translate IRQs,
+provide a DMA/IOMMU mapping, populate
 `usb_host_ops`, or publish HID/BOT services. Those runtime owners remain required.
 
 `UsbStorage.c` serializes block requests around a BOT device using caller-owned
