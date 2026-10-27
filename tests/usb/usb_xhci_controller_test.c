@@ -1074,13 +1074,19 @@ static void test_xhci_host_adapter(void)
            devices[1].slot.route.tt_hub_slot == 1u && devices[1].slot.route.tt_port == 16u &&
            devices[1].slot.route.multi_tt);
     m.device_descriptor[7] = 8u;
+    struct usb_setup get_descriptor = {0x80, 6, 0x100, 0, 8};
+    uint8_t descriptor[8] = {0}; size_t actual = 99u;
+    m.allow_live_release = true;
+    assert(ops.control(ops.context, &child_route, 0u, &get_descriptor, descriptor,
+                       sizeof(descriptor), &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == sizeof(descriptor) && descriptor[0] == 18u && descriptor[7] == 8u);
     uint8_t child_address = 0;
     assert(ops.address_device(ops.context, &child_route, USB_HOST_FULL_SPEED, 8u, 56u,
                               &child_address) == USB_OK && child_address == 2u);
 
     queue_model_event(&m, USB_XHCI_TRB_PORT_STATUS_EVENT, 3u << 24, USB_XHCI_CC_SUCCESS, 0);
-    struct usb_setup get_descriptor = {0x80, 6, 0x100, 0, 8};
-    uint8_t descriptor[8] = {0}; size_t actual = 99u;
+    actual = 99u;
     m.allow_live_release = true;
     assert(ops.control(ops.context, &child_route, child_address, &get_descriptor, descriptor,
                        sizeof(descriptor), &actual, 100u) == USB_OK);
@@ -1143,6 +1149,44 @@ static void test_xhci_host_adapter(void)
     assert(!lock_state.held && lock_state.acquisitions == lock_state.releases);
     free(c);
     puts("PASS: xHCI usb_host_ops adapter routes, transfers and stopped cleanup");
+}
+
+static void test_xhci_host_adapter_cleanup_retention(void)
+{
+    struct model m; init_model(&m, 0); m.auto_commands = true;
+    struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    struct usb_xhci_host_device devices[1];
+    memset(devices, 0, sizeof(devices));
+    struct adapter_lock_state lock_state = {0};
+    struct usb_xhci_host_adapter adapter;
+    assert(usb_xhci_host_adapter_init(&adapter, c, devices, 1u,
+                                     adapter_test_lock, adapter_test_unlock, &lock_state,
+                                     NULL, NULL, 100u) == USB_OK);
+    struct usb_host_ops ops = {0};
+    assert(usb_xhci_host_adapter_get_ops(&adapter, &ops) == USB_OK && !ops.now_ms);
+    struct usb_host_route route = {.root_port = 1u};
+    m.slot = &devices[0].slot;
+    m.fail_allocate = m.allocation_attempts + 1u;
+    bool cleanup = false;
+    assert(ops.prepare_device(ops.context, &route, USB_HOST_HIGH_SPEED, &cleanup) == USB_NO_MEMORY);
+    assert(cleanup && devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_ENABLED);
+
+    m.fail_allocate = 0;
+    m.fail_access = m.accesses + 2u; /* Apply the Disable Slot doorbell, then report I/O failure. */
+    m.applied_error = true;
+    assert(ops.disable_device(ops.context, &route, 0u) == USB_IO);
+    assert(devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_ENABLED &&
+           c->state == USB_XHCI_CONTROLLER_FAULTED);
+    m.fail_access = 0;
+    m.applied_error = false;
+    assert(usb_xhci_controller_stop(c) == USB_OK);
+    assert(usb_xhci_host_adapter_release_stopped(&adapter) == USB_OK);
+    assert(!devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_EMPTY &&
+           m.allocations == m.releases);
+    assert(!lock_state.held && lock_state.acquisitions == lock_state.releases);
+    free(c);
+    puts("PASS: xHCI host adapter retains applied-error slot ownership through stop");
 }
 
 static void test_running_schedule(void)
@@ -1306,7 +1350,7 @@ int main(void)
 {
     test_running_schedule(); test_failure_retention(); test_guards_and_timeouts(); test_commands_and_events();
     test_control_transfer(); test_device_slots_and_routing(); test_noncontrol_endpoints();
-    test_xhci_host_adapter();
+    test_xhci_host_adapter(); test_xhci_host_adapter_cleanup_retention();
     test_root_port_reset();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
