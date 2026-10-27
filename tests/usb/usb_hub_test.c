@@ -241,7 +241,7 @@ static int on_event(void *context, enum usb_host_hub_event_kind kind, uint8_t po
 static struct usb_host_ops make_ops(struct mock_controller *m)
 {
     return (struct usb_host_ops){m, control, address_device, configure_endpoint,
-        interrupt_transfer, bulk_transfer, NULL, disable_device, clock_ms};
+        interrupt_transfer, bulk_transfer, NULL, disable_device, clock_ms, NULL};
 }
 
 static struct usb_host_route make_route(unsigned depth)

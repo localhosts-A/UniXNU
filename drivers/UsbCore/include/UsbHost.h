@@ -14,7 +14,10 @@ extern "C" {
 #define USB_HOST_HUB_MAX_BITMAP_BYTES 16
 
 enum usb_host_speed { USB_HOST_LOW_SPEED, USB_HOST_FULL_SPEED, USB_HOST_HIGH_SPEED };
-enum usb_host_state { USB_HOST_EMPTY, USB_HOST_ADDRESSED, USB_HOST_CONFIGURED, USB_HOST_FAULTED };
+enum usb_host_state {
+    USB_HOST_EMPTY, USB_HOST_ADDRESSED, USB_HOST_CONFIGURED, USB_HOST_FAULTED,
+    USB_HOST_ENUMERATING
+};
 enum usb_host_hid_kind { USB_HOST_HID_KEYBOARD, USB_HOST_HID_MOUSE };
 
 /* A route is copied into each device so controller backends can encode xHCI
@@ -32,12 +35,15 @@ struct usb_host_route {
 
 struct usb_host_ops {
     void *context;
-    /* On success actual is bounded by capacity. Control may return STALL. */
+    /* On success actual is bounded by capacity. Control may return STALL.
+     * Without prepare_device, an address-zero control must not leave any
+     * slot/DMA ownership behind on success or failure. */
     int (*control)(void *, const struct usb_host_route *, uint8_t address,
                    const struct usb_setup *, void *, size_t capacity,
                    size_t *actual, uint32_t timeout_ms);
     /* xHCI Address Device (or equivalent) owns address assignment and EP0 setup.
-     * If it returns failure it must leave no live slot or DMA ownership behind.
+     * Without prepare_device, failure must leave no live slot or DMA ownership.
+     * With prepare_device, failure retains the prepared slot for disable_device.
      * A successful assignment must return a USB address in 1..127. */
     int (*address_device)(void *, const struct usb_host_route *, enum usb_host_speed,
                          uint8_t ep0_max_packet, uint8_t preferred_address,
@@ -60,6 +66,16 @@ struct usb_host_ops {
     int (*disable_device)(void *, const struct usb_host_route *, uint8_t address);
     /* Monotonic millisecond clock used by the nonblocking hub power/reset state machine. */
     uint32_t (*now_ms)(void *);
+    /* Optional default-address setup, called before the first EP0 request.
+     * Set *cleanup_required before any action that can acquire a slot or DMA,
+     * including actions whose failure may have taken effect. Success requires
+     * it to be true. If true, disable_device(route, 0) must identify the owned
+     * slot independently of the address and prove its cleanup, including when
+     * a failed address command already changed the hardware address and after
+     * an applied-but-error cleanup. A failure with false must have no ownership.
+     * The owner serializes enumeration with all other use of the route. */
+    int (*prepare_device)(void *, const struct usb_host_route *, enum usb_host_speed,
+                          bool *cleanup_required);
 };
 
 struct usb_host_hid_interface {
@@ -105,6 +121,7 @@ struct usb_host_device {
     bool lifecycle_busy;
     bool stop_invalid;
     bool invalid_address_cleanup;
+    bool default_address_cleanup;
 };
 
 enum usb_host_hub_event_kind {
@@ -156,7 +173,9 @@ struct usb_host_hub {
 /* The caller zero-initializes device before first use. Enumeration uses the
  * controller's address_device operation because xHCI
  * assigns USB addresses as part of Address Device; it does not send SET_ADDRESS
- * as a separate control transfer. The caller must reset/power the route first. */
+ * as a separate control transfer. The caller must reset/power the route first.
+ * A backend needing a slot before the first descriptor read must implement
+ * prepare_device. Failed cleanup retains a faulted device for stop retry. */
 int usb_host_enumerate(struct usb_host_device *, const struct usb_host_ops *,
                        const struct usb_host_route *, enum usb_host_speed,
                        uint8_t preferred_address);

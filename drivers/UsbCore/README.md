@@ -36,7 +36,12 @@ metadata. Failed child attach callbacks remain retryable after the hardware rese
 deadline; unplug or stop delivers DETACH so the owner can clean partial child
 state. A controller clock callback is required for hub timing. The owner must
 quiesce children before stopping or disconnecting a hub; overcurrent remains
-latched until the owner stops and restarts the hub.
+latched until the owner stops and restarts the hub. A controller that requires
+an owned default-address slot before the first EP0 request can supply
+`prepare_device`; it must record uncertain slot/DMA ownership before issuing
+an operation. Failed initial descriptor or address setup then uses
+`disable_device` with address zero and retains the host object if stop cannot
+be proven. This is a controller contract, not an xHCI backend implementation.
 
 `UsbXhci.c` is the portable low-level xHCI foundation: it validates capability
 register windows and USB2 Supported Protocol port ranges without writing MMIO,

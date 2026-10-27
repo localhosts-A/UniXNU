@@ -33,6 +33,8 @@ struct mock_controller {
     int raw_error;
     bool keyboard_reserved, mouse_reserved;
     bool invalid_assignment, slot_owned, slot_live, applied_disable_error;
+    bool prepared_backend, address_assigned, fail_address, address_applied_error, prepare_bad_success;
+    unsigned prepare_failure, prepare_calls;
     uint8_t returned_address;
     struct usb_host_device *reenter_device;
     int reenter_stop, reenter_release, reenter_disconnect;
@@ -80,6 +82,11 @@ static int control(void *context, const struct usb_host_route *route, uint8_t ad
         uint8_t index = (uint8_t)setup->value;
         if (index) return USB_STALL;
         if (kind == 1 && address == 0 && setup->length == 8) {
+            if (m->prepared_backend) assert(m->slot_owned && m->slot_live);
+            if (m->prepared_backend && m->reenter_device) {
+                assert(usb_host_stop_device(m->reenter_device) == USB_BUSY);
+                assert(usb_host_disconnect(m->reenter_device, NULL, NULL, NULL) == USB_BUSY);
+            }
             if (m->fail_first_descriptor) return USB_TIMEOUT;
             memcpy(data, device_descriptor, 8); *actual = 8;
             if (m->bad_ep0) ((uint8_t *)data)[7] = 32;
@@ -132,7 +139,18 @@ static int address_device(void *context, const struct usb_host_route *route,
     struct mock_controller *m = context;
     assert(route->root_port == 2 && (speed == USB_HOST_HIGH_SPEED || speed == USB_HOST_FULL_SPEED) &&
            max_packet == 64 && preferred == 5);
-    ++m->address_calls; m->speed = speed; m->slot_owned = m->slot_live = true;
+    ++m->address_calls; m->speed = speed;
+    if (m->prepared_backend) assert(m->slot_owned && m->slot_live);
+    if (m->prepared_backend && m->reenter_device) {
+        assert(usb_host_stop_device(m->reenter_device) == USB_BUSY);
+        assert(usb_host_release_stopped_device(m->reenter_device, NULL, NULL, NULL) == USB_BUSY);
+    }
+    if (m->fail_address) {
+        if (m->address_applied_error) m->address_assigned = true;
+        return USB_TIMEOUT;
+    }
+    m->slot_owned = m->slot_live = true;
+    m->address_assigned = true;
     *assigned = m->invalid_assignment ? m->returned_address : preferred;
     return USB_OK;
 }
@@ -163,7 +181,9 @@ static int reset_endpoint(void *context, const struct usb_host_route *route,
 static int disable_device(void *context, const struct usb_host_route *route, uint8_t address)
 {
     struct mock_controller *m = context;
-    assert(route && m->slot_owned && address == (m->invalid_assignment ? m->returned_address : 5));
+    uint8_t expected = m->prepared_backend && (!m->address_assigned || m->fail_address) ? 0 :
+        (m->invalid_assignment ? m->returned_address : 5);
+    assert(route && m->slot_owned && address == expected);
     ++m->disables;
     if (m->reenter_device) {
         m->reenter_stop = usb_host_stop_device(m->reenter_device);
@@ -250,13 +270,35 @@ static void pointer_event(void *context, uint8_t buttons, int16_t x, int16_t y, 
 static struct usb_host_ops ops(struct mock_controller *m)
 {
     return (struct usb_host_ops){m, control, address_device, configure_endpoint,
-        interrupt_transfer, bulk_transfer, reset_endpoint, disable_device, NULL};
+        interrupt_transfer, bulk_transfer, reset_endpoint, disable_device, NULL, NULL};
 }
 static struct usb_host_route route(void)
 {
     struct usb_host_route value = {0}; value.root_port = 2; value.depth = 1;
     value.hub_address[0] = 7; value.hub_port[0] = 3; value.tt_hub_address = 7;
     value.tt_port = 3; value.tt_think_time_ns = 800; return value;
+}
+
+static int prepare_device(void *context, const struct usb_host_route *path,
+                          enum usb_host_speed speed, bool *cleanup_required)
+{
+    struct mock_controller *m = context;
+    assert(path && path->root_port == 2 && speed == USB_HOST_HIGH_SPEED);
+    assert(cleanup_required && !*cleanup_required && !m->slot_owned);
+    ++m->prepare_calls;
+    if (m->reenter_device) {
+        m->reenter_stop = usb_host_stop_device(m->reenter_device);
+        m->reenter_release = usb_host_release_stopped_device(m->reenter_device, NULL, NULL, NULL);
+        m->reenter_disconnect = usb_host_disconnect(m->reenter_device, NULL, NULL, NULL);
+        struct usb_host_ops nested = ops(m);
+        assert(usb_host_enumerate(m->reenter_device, &nested, path, speed, 5) == USB_BUSY);
+    }
+    if (m->prepare_failure == 1) return USB_TIMEOUT; /* no side effect */
+    *cleanup_required = true; /* before the simulated slot operation */
+    m->slot_owned = m->slot_live = true;
+    if (m->prepare_failure == 2) return USB_TIMEOUT; /* applied but error */
+    if (m->prepare_bad_success) *cleanup_required = false;
+    return USB_OK;
 }
 static void enumerate(struct mock_controller *m, struct usb_host_device *device)
 {
@@ -465,6 +507,67 @@ static void test_enumeration_abort_reentry(void)
     assert(usb_host_release_stopped_device(&device, NULL, NULL, NULL) == USB_OK);
 }
 
+static void test_default_address_lifecycle(void)
+{
+    struct usb_host_route path = route();
+    for (unsigned scenario = 0; scenario < 6; ++scenario) {
+        for (unsigned failure = 0; failure < 3; ++failure) {
+            struct usb_host_device device = {0};
+            struct mock_controller m = {.prepared_backend=true, .reenter_device=&device,
+                .prepare_failure=scenario == 0 ? 2u : 0u,
+                .fail_first_descriptor=scenario == 1,
+                .bad_ep0=scenario == 2, .fail_address=scenario == 3 || scenario == 5,
+                .address_applied_error=scenario == 5, .prepare_bad_success=scenario == 4,
+                .fail_disable=failure != 0, .applied_disable_error=failure == 2};
+            struct usb_host_ops host = ops(&m);
+            host.prepare_device = prepare_device;
+            int expected = (scenario == 2 || scenario == 4) ? USB_PHASE_ERROR : USB_TIMEOUT;
+            int result = usb_host_enumerate(&device, &host, &path, USB_HOST_HIGH_SPEED, 5);
+            assert(result == (failure ? USB_TIMEOUT : expected));
+            assert(m.prepare_calls == 1 && m.disables == 1);
+            assert(m.reenter_stop == USB_BUSY && m.reenter_release == USB_BUSY &&
+                   m.reenter_disconnect == USB_BUSY);
+            if (!failure) {
+                assert(device.state == USB_HOST_EMPTY && !m.slot_owned);
+                continue;
+            }
+            assert(device.state == USB_HOST_FAULTED && device.default_address_cleanup &&
+                   !device.stop_proven && m.slot_owned && !device.lifecycle_busy);
+            assert(m.slot_live == (failure == 1));
+            assert(usb_host_release_stopped_device(&device, NULL, NULL, NULL) == USB_BUSY);
+            m.fail_disable = false;
+            assert(usb_host_stop_device(&device) == USB_OK && device.stop_proven);
+            assert(!m.slot_owned && m.disables == 2);
+            assert(usb_host_release_stopped_device(&device, NULL, NULL, NULL) == USB_OK);
+        }
+    }
+    struct usb_host_device device = {0};
+    struct mock_controller m = {.prepared_backend=true, .prepare_failure=1};
+    struct usb_host_ops host = ops(&m); host.prepare_device = prepare_device;
+    assert(usb_host_enumerate(&device, &host, &path, USB_HOST_HIGH_SPEED, 5) == USB_TIMEOUT);
+    assert(device.state == USB_HOST_EMPTY && !m.slot_owned && !m.disables && !m.controls);
+
+    device = (struct usb_host_device){0};
+    m = (struct mock_controller){.prepared_backend=true, .reenter_device=&device};
+    host = ops(&m); host.prepare_device = prepare_device;
+    assert(usb_host_enumerate(&device, &host, &path, USB_HOST_HIGH_SPEED, 5) == USB_OK);
+    assert(device.state == USB_HOST_CONFIGURED && !device.lifecycle_busy &&
+           !device.default_address_cleanup && m.slot_owned && m.address_assigned);
+    assert(usb_host_disconnect(&device, NULL, NULL, NULL) == USB_OK && !m.slot_owned);
+
+    const uint8_t invalid_addresses[] = {0, 128, 255};
+    for (size_t i = 0; i < sizeof(invalid_addresses); ++i) {
+        m = (struct mock_controller){.prepared_backend=true, .invalid_assignment=true,
+                                     .returned_address=invalid_addresses[i], .fail_disable=true};
+        device = (struct usb_host_device){0}; host = ops(&m); host.prepare_device = prepare_device;
+        assert(usb_host_enumerate(&device, &host, &path, USB_HOST_HIGH_SPEED, 5) == USB_RANGE);
+        assert(device.state == USB_HOST_FAULTED && device.invalid_address_cleanup && m.slot_owned);
+        m.fail_disable = false;
+        assert(usb_host_stop_device(&device) == USB_OK && !m.slot_owned);
+        assert(usb_host_release_stopped_device(&device, NULL, NULL, NULL) == USB_OK);
+    }
+}
+
 static void test_optional_class_and_errors(void)
 {
     struct mock_controller m = {.stall_keyboard_protocol=true};
@@ -628,6 +731,7 @@ int main(void)
     test_stop_invalid_preconditions();
     test_invalid_assignment_cleanup();
     test_enumeration_abort_reentry();
+    test_default_address_lifecycle();
     test_optional_class_and_errors();
     test_copied_boot_reports();
     puts("PASS: USB production host enumeration/HID/BOT class routing, cleanup retention and fault cases");
