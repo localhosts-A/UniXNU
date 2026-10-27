@@ -30,12 +30,19 @@ def sha256(path):
 
 
 def xattr_inventory(path):
-    try:
-        names = os.listxattr(path, follow_symlinks=False)
-        return sorted((name, hashlib.sha256(os.getxattr(path, name, follow_symlinks=False)).hexdigest())
-                      for name in names)
-    except OSError as error:
-        raise SystemExit(f'Cannot inspect extended attributes for {path}: {error}') from error
+    xattr = '/usr/bin/xattr'
+    nofollow = ['-s'] if path.is_symlink() else []
+    listed = subprocess.run([xattr, *nofollow, str(path)], capture_output=True)
+    if listed.returncode:
+        raise SystemExit(f'Cannot list extended attributes for {path}: {listed.stderr.decode(errors="replace")}')
+    names = listed.stdout.decode().splitlines()
+    result = []
+    for name in names:
+        value = subprocess.run([xattr, '-p', *nofollow, name, str(path)], capture_output=True)
+        if value.returncode:
+            raise SystemExit(f'Cannot read extended attribute {name} from {path}: {value.stderr.decode(errors="replace")}')
+        result.append((name, hashlib.sha256(value.stdout).hexdigest()))
+    return sorted(result)
 
 
 def inventory(root):
