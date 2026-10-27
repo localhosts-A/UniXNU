@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHD_SHA256 = '8cec9a3c44a443b08e977ccc5d577850316ad428c575dc01f09b018dbd5b6a25'
 DYLD_SHA256 = 'f8df3c58fae6e409db740df22c98aa699aee110b73523541a63f1bd5e23cf705'
 MIB = 1024 * 1024
-DATA_LOGICAL_BYTES = 32 * MIB
+IMAGE_BYTES = 32 * MIB
 
 
 def sha256(path):
@@ -139,20 +139,24 @@ def main():
     raw_attached = plistlib.loads(subprocess.check_output(
         ['hdiutil', 'attach', '-nomount', '-readonly', '-noverify', '-noautofsck', '-plist', str(write_image)]))
     raw_devices = [entry.get('dev-entry') for entry in raw_attached.get('system-entities', [])
-                   if entry.get('dev-entry', '').startswith('/dev/disk')]
+                   if entry.get('content-hint') == 'Apple_APFS' and entry.get('dev-entry')]
     if len(raw_devices) != 1:
-        raise SystemExit('Require one read-only whole-disk mapping for the Data seed image')
+        raise SystemExit('Require exactly one read-only Apple_APFS partition mapping for the Data seed image')
     raw_device = raw_devices[0]
     try:
         raw_info = plistlib.loads(subprocess.check_output(['diskutil', 'info', '-plist', raw_device]))
         if (raw_info.get('BusProtocol') != 'Disk Image' or raw_info.get('Writable') is not False or
-                raw_info.get('DeviceNode') != raw_device or raw_info.get('TotalSize') != DATA_LOGICAL_BYTES):
-            raise SystemExit('Raw Data seed mapping is not the exact read-only 32 MiB disk image')
+                raw_info.get('DeviceNode') != raw_device):
+            raise SystemExit('Raw Data seed mapping is not an exact read-only disk-image partition')
+        data_bytes = raw_info.get('TotalSize')
+        if (isinstance(data_bytes, bool) or not isinstance(data_bytes, int) or data_bytes <= 0 or
+                data_bytes > IMAGE_BYTES or data_bytes % 4096):
+            raise SystemExit(f'APFS Data partition size is outside the aligned 32 MiB image bound: {data_bytes}')
         raw_device_path = raw_device.replace('/dev/disk', '/dev/rdisk', 1)
         copied = 0
         with open(raw_device_path, 'rb', buffering=0) as source_image, image.open('xb') as destination:
-            while copied < DATA_LOGICAL_BYTES:
-                data = source_image.read(min(8 * MIB, DATA_LOGICAL_BYTES - copied))
+            while copied < data_bytes:
+                data = source_image.read(min(8 * MIB, data_bytes - copied))
                 if not data or destination.write(data) != len(data):
                     raise SystemExit(f'Short read while exporting raw APFS Data image at byte {copied}')
                 copied += len(data)
@@ -161,9 +165,13 @@ def main():
     write_image.unlink()
 
     with image.open('rb') as source_image:
-        source_image.seek(32)
-        if image.stat().st_size != DATA_LOGICAL_BYTES or source_image.read(4) != b'NXSB':
+        superblock = source_image.read(4096)
+        if image.stat().st_size != data_bytes or superblock[32:36] != b'NXSB':
             raise SystemExit('Host formatting did not produce the requested raw APFS container')
+        block_size = int.from_bytes(superblock[36:40], 'little')
+        block_count = int.from_bytes(superblock[40:48], 'little')
+        if block_size != 4096 or not 0 < block_count <= data_bytes // block_size:
+            raise SystemExit('Raw Data seed does not contain a bounded 4 KiB APFS container')
     regular = [entry for entry in source_items.values() if entry['kind'] == 'file']
     report = {
         'target': 'iPad7,1 / iPadOS 17.7.11 / 21H461',
@@ -172,6 +180,9 @@ def main():
         'volume_uuid': volume_uuid,
         'bytes': image.stat().st_size,
         'sha256': sha256(image),
+        'apfs_block_size': block_size,
+        'apfs_block_count': block_count,
+        'virtual_disk_image_bytes': IMAGE_BYTES,
         'source_regular_files': len(regular),
         'source_regular_bytes': sum(entry['bytes'] for entry in regular),
         'source_entries': len(source_items),
