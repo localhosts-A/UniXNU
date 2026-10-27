@@ -128,6 +128,7 @@ class SourceMsdosfsTests(unittest.TestCase):
         self.assertIn('user_addr_t init_envp = USER_ADDR_NULL;', patch)
         self.assertGreater(patch_path.name, 'zzz-boot-progress.patch')
         self.assertIn('#if defined(XNU_SOURCE_MSDOSFS) && XNU_SOURCE_MSDOSFS', patch)
+        self.assertLess(fixture.index('#include "bpb.h"'), fixture.index('#include <msdosfsmount.h>'))
         self.assertIn('kernel_mount_localargs("msdos", mountpoint, device_path', fixture)
         self.assertIn('source_storage_fixture_copy_bsd_path', fixture)
         self.assertIn('PE_parse_boot_argn("source-msdosfs-test"', fixture)

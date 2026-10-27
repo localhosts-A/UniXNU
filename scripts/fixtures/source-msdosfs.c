@@ -10,6 +10,7 @@
 #include <sys/vnode_internal.h>
 #include <sys/vnode_if.h>
 #include <sys/vfs_context.h>
+#include "bpb.h"
 #include <msdosfsmount.h>
 #include <pexpert/pexpert.h>
 
