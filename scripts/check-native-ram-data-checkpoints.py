@@ -15,7 +15,7 @@ pins = {
     'wrong': ('native-owner-ram-data-wrong-uuid-candidate', 'cf0eff16bf5932a76da18c2925e7442c2de8ad9d30b9ac83a84a879d8c425156', '943a26366c1eea01ffe67db8b028dadd657688ed24776069f41be0a4fee2c01d'),
 }
 expected = {k: base['candidate'](*v) for k, v in pins.items()}
-seed = (ROOT / 'build/owner-data-fixture/owner-data-32.cdr').read_bytes()
+seed = (ROOT / 'build/owner-data-fixture/owner-data-32.raw').read_bytes()
 digest = 'd7cd79af299b9dfc1b26ed886000c455f950470c26cffdf796478609bffb6aa9'
 require(len(seed) == 33554432 and hashlib.sha256(seed).hexdigest() == digest, 'Keep unchanged host seed')
 names = ('ram-block-discovery', 'ram-block-category', 'ram-data-mount', 'ram-data-tzinit-symlink', 'ram-data-first-abort', 'ram-data-wrong-uuid')

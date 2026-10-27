@@ -30,9 +30,16 @@ MOBILE = 501
 def merge_pref(var, name, values):
     path = var / 'mobile/Library/Preferences' / (name + '.plist')
     path.parent.mkdir(parents=True, exist_ok=True)
+    owner = (path.stat().st_uid, path.stat().st_gid) if path.exists() else (MOBILE, MOBILE)
     data = plistlib.loads(path.read_bytes()) if path.exists() else {}
     data.update(values)
     path.write_bytes(plistlib.dumps(data, fmt=plistlib.FMT_BINARY))
+    if os.geteuid() == 0:
+        os.chown(path, *owner)
+    else:
+        current = path.stat()
+        if (current.st_uid, current.st_gid) != owner:
+            raise SystemExit('Run as root to preserve the target mobile preference owner/group')
     os.chmod(path, 0o600)
     print('pref', name, sorted(values))
 
@@ -46,6 +53,7 @@ def main():
         sys.exit('Refuse to overwrite ' + str(output))
     blob = base.read_bytes()
     logical, extents = packed_ramdisk.regions(blob)
+    (ROOT / 'build').mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='data-seed-', dir=str(ROOT / 'build')) as td:
         raw = Path(td) / 'seed.raw'
         with raw.open('wb') as f:
@@ -56,7 +64,7 @@ def main():
         mount = Path(td) / 'mount'
         mount.mkdir()
         attached = plistlib.loads(subprocess.check_output(
-            ['hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-nobrowse', '-owners', 'off',
+            ['hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-nobrowse', '-owners', 'on',
              '-mountpoint', str(mount), '-plist', str(raw)]))
         device = attached['system-entities'][0]['dev-entry']
         try:

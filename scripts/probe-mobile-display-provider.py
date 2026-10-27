@@ -18,7 +18,7 @@ cmd=['python3','scripts/probe-darwinboot-xnu.py','--kernel',base+'.macho',
     '--armvirt','--armcpu','--qemu-vmm-present','--qemu-accel','hvf',
     '--owned-memory-size','0x20000000','--nvram-proxy','--crypto-hash-method','sha2-384',
     '--amfi-platform-only','--load-apfs','--skip-initializer-traces','--timeout','60',
-    '--data-ramdisk','build/owner-data-fixture/owner-data-32.cdr','--load-mobile-graphics']
+    '--data-ramdisk','build/owner-data-fixture/owner-data-32.raw','--load-mobile-graphics']
 if a.case!='headless':cmd+=['--qemu-ramfb']
 if a.case=='default-off':cmd+=['--follow-target-main','--inspect-owner-root','--check-commpage']
 else:cmd+=['--mobile-graphics-client-probe','--skip-policy-pointer-reads',

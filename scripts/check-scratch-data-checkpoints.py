@@ -10,7 +10,7 @@ require = base['require']
 expected = base['candidate']('native-owner-scratch-data-candidate',
     '3a4359eb443e706802f7672e4165f2f69cc79fcc498b73381353c72db7db776d',
     'a85a4fb651ca8cde566291e75989331d5d44d0d45bb71ebc1a7f98e397aa12e7')
-seed = (ROOT / 'build/owner-data-fixture/owner-data-32.cdr').read_bytes()
+seed = (ROOT / 'build/owner-data-fixture/owner-data-32.raw').read_bytes()
 digest = 'd7cd79af299b9dfc1b26ed886000c455f950470c26cffdf796478609bffb6aa9'
 require(len(seed) == 33554432 and seed[32:36] == b'NXSB' and hashlib.sha256(seed).hexdigest() == digest, 'Exact host-formatted scratch APFS input remains unchanged')
 positive, absent = [base['report']('owner-hvf-scratch-data' + suffix) for suffix in ('', '-absent')]

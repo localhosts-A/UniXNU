@@ -28,7 +28,7 @@ cmd=['python3','scripts/probe-darwinboot-xnu.py','--kernel',base+'.macho','--pre
     '--trust-cache','build/original-static-system-trust/original-static-system.bundle',
     '--armvirt','--armcpu','--qemu-vmm-present','--qemu-accel','hvf','--owned-memory-size','0x20000000',
     '--nvram-proxy','--crypto-hash-method','sha2-384','--amfi-platform-only','--load-apfs','--load-mobile-graphics',
-    '--skip-initializer-traces','--timeout','60','--data-ramdisk','build/owner-data-fixture/owner-data-32.cdr','--inspect-boot-video']
+    '--skip-initializer-traces','--timeout','60','--data-ramdisk','build/owner-data-fixture/owner-data-32.raw','--inspect-boot-video']
 if a.process:
     cmd[cmd.index('--output')+1]+='-'+a.process
     cmd+=['--entry-process-name',a.process,'--entry-max-skips','128']
