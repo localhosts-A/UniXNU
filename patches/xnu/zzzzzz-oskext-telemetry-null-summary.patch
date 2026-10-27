@@ -1,0 +1,20 @@
+diff --git a/libkern/c++/OSKext.cpp b/libkern/c++/OSKext.cpp
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -15657,8 +15657,16 @@ OSKext::foreachKextInBacktrace(
+ 	if (kPrintKextsLock & flags) {
+ 		if (!sKextSummariesLock) {
+ 			return;
+ 		}
+ 		IOLockLock(sKextSummariesLock);
+ 	}
+ 
++	/* Telemetry can request a backtrace before any kext summaries exist. */
++	if (!gLoadedKextSummaries) {
++		if (kPrintKextsLock & flags) {
++			IOLockUnlock(sKextSummariesLock);
++		}
++		return;
++	}
++
+ 	for (uint32_t i = 0; i < gLoadedKextSummaries->numSummaries; ++i) {

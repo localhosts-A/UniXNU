@@ -6,10 +6,28 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PATCH = ROOT / 'patches/xnu/offline-component-load-probes.patch'
 CDC_PATCH = ROOT / 'patches/xnu/zzzz-usb-cdc-console-log.patch'
+OSKEXT_PATCH = ROOT / 'patches/xnu/zzzzzz-oskext-telemetry-null-summary.patch'
 HUNK = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 
 
 class XnuPatchContracts(unittest.TestCase):
+    def test_oskext_telemetry_skips_missing_summary_and_releases_lock(self):
+        patch = OSKEXT_PATCH.read_text()
+        lines = patch.splitlines()
+        header_index = next(index for index, line in enumerate(lines) if HUNK.match(line))
+        old_count = sum(line.startswith((' ', '-')) and not line.startswith(('---', '+++'))
+                        for line in lines[header_index + 1:])
+        new_count = sum(line.startswith((' ', '+')) and not line.startswith(('---', '+++'))
+                        for line in lines[header_index + 1:])
+        self.assertEqual((old_count, new_count), (8, 16))
+        guard = patch.index('if (!gLoadedKextSummaries)')
+        unlock = patch.index('IOLockUnlock(sKextSummariesLock)', guard)
+        return_early = patch.index('return;', unlock)
+        iteration = patch.index('for (uint32_t i = 0; i < gLoadedKextSummaries->numSummaries;', return_early)
+        self.assertLess(guard, unlock)
+        self.assertLess(unlock, return_early)
+        self.assertLess(return_early, iteration)
+
     def test_offline_component_patch_hunk_counts_match_body(self):
         lines = PATCH.read_text().splitlines()
         headers = [(index, HUNK.match(line)) for index, line in enumerate(lines) if HUNK.match(line)]
