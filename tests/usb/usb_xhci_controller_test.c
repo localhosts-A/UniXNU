@@ -1,6 +1,6 @@
 /* Production xHCI controller lifecycle against a fault-injected register/DMA model. */
 #define _POSIX_C_SOURCE 200112L
-#include "UsbXhci.h"
+#include "UsbXhciHost.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -327,6 +327,21 @@ static int start(struct model *m, struct usb_xhci_controller *c)
     m->controller = c;
     return usb_xhci_controller_start(c, &io, &d, guard, m, 4, 16, 16);
 }
+struct adapter_lock_state { bool held; unsigned acquisitions, releases; };
+static int adapter_test_lock(void *context)
+{
+    struct adapter_lock_state *state = context;
+    if (state->held) return USB_BUSY;
+    state->held = true; ++state->acquisitions; return USB_OK;
+}
+static void adapter_test_unlock(void *context)
+{
+    struct adapter_lock_state *state = context;
+    assert(state->held);
+    state->held = false; ++state->releases;
+}
+static uint32_t adapter_test_clock(void *context)
+{ return *(const uint32_t *)context; }
 static uint64_t get_le64(const uint8_t *p)
 {
     uint64_t value = 0;
@@ -1004,6 +1019,132 @@ static void test_noncontrol_endpoints(void)
     puts("PASS: xHCI USB2 non-control endpoint contexts, transfers, STALL recovery and retained timeout");
 }
 
+static void test_xhci_host_adapter(void)
+{
+    struct model m; init_model(&m, 0); m.auto_commands = true; m.auto_control = true;
+    struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    struct usb_xhci_host_device devices[2];
+    memset(devices, 0, sizeof(devices));
+    struct adapter_lock_state lock_state = {0};
+    uint32_t clock_ms = 1234u;
+    struct usb_xhci_host_adapter adapter;
+    assert(usb_xhci_host_adapter_init(&adapter, c, devices, 2u,
+                                     adapter_test_lock, adapter_test_unlock, &lock_state,
+                                     adapter_test_clock, &clock_ms, 100u) == USB_OK);
+    struct usb_host_ops ops = {0};
+    assert(usb_xhci_host_adapter_get_ops(&adapter, &ops) == USB_OK);
+    assert(ops.prepare_device && ops.address_device && ops.control && ops.configure_hub &&
+           ops.configure_endpoint && ops.interrupt && ops.bulk && ops.reset_endpoint &&
+           ops.disable_device && ops.now_ms && ops.now_ms(ops.context) == clock_ms);
+
+    struct usb_host_route root_route = {.root_port = 1u};
+    bool cleanup = false;
+    m.slot = &devices[0].slot;
+    assert(ops.prepare_device(ops.context, &root_route, USB_HOST_HIGH_SPEED, &cleanup) == USB_OK);
+    assert(cleanup && devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_DEFAULT);
+    uint8_t hub_address = 0;
+    assert(ops.address_device(ops.context, &root_route, USB_HOST_HIGH_SPEED, 64u, 55u,
+                              &hub_address) == USB_OK && hub_address == 1u);
+    assert(ops.configure_hub(ops.context, &root_route, hub_address, USB_HOST_HIGH_SPEED,
+                             16u, 1332u, true) == USB_OK);
+    assert(devices[0].slot.is_hub && devices[0].slot.hub_port_count == 16u);
+
+    enum usb_host_speed root_speed = USB_HOST_LOW_SPEED;
+    assert(usb_xhci_host_adapter_reset_root_port(&adapter, 1u, 100u, &root_speed) == USB_OK &&
+           root_speed == USB_HOST_HIGH_SPEED);
+    struct usb_xhci_event event;
+    assert(usb_xhci_host_adapter_next_event(&adapter, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE && event.data.port_status.port_id == 1u);
+    queue_model_event(&m, USB_XHCI_TRB_PORT_STATUS_EVENT, 2u << 24, USB_XHCI_CC_SUCCESS, 0);
+    assert(usb_xhci_host_adapter_next_event(&adapter, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE && event.data.port_status.port_id == 2u);
+
+    struct usb_host_route child_route = {
+        .root_port = 1u, .depth = 1u, .hub_address = {1u}, .hub_port = {16u},
+        .tt_hub_address = 1u, .tt_port = 16u, .tt_think_time_ns = 1332u, .multi_tt = true
+    };
+    m.slot = &devices[1].slot;
+    cleanup = false;
+    assert(ops.prepare_device(ops.context, &child_route, USB_HOST_FULL_SPEED, &cleanup) == USB_OK);
+    assert(cleanup && devices[1].owned && devices[1].route.depth == 1u &&
+           devices[1].slot.route.depth == 1u && devices[1].slot.route.hub_slot[0] == 1u &&
+           devices[1].slot.route.hub_port[0] == 16u &&
+           devices[1].slot.route.hub_port_count[0] == 16u &&
+           devices[1].slot.route.tt_hub_slot == 1u && devices[1].slot.route.tt_port == 16u &&
+           devices[1].slot.route.multi_tt);
+    m.device_descriptor[7] = 8u;
+    uint8_t child_address = 0;
+    assert(ops.address_device(ops.context, &child_route, USB_HOST_FULL_SPEED, 8u, 56u,
+                              &child_address) == USB_OK && child_address == 2u);
+
+    queue_model_event(&m, USB_XHCI_TRB_PORT_STATUS_EVENT, 3u << 24, USB_XHCI_CC_SUCCESS, 0);
+    struct usb_setup get_descriptor = {0x80, 6, 0x100, 0, 8};
+    uint8_t descriptor[8] = {0}; size_t actual = 99u;
+    m.allow_live_release = true;
+    assert(ops.control(ops.context, &child_route, child_address, &get_descriptor, descriptor,
+                       sizeof(descriptor), &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == sizeof(descriptor) && descriptor[0] == 18u && descriptor[7] == 8u);
+    /* Queued owner events remain drainable after a synchronous operation faults the controller. */
+    c->state = USB_XHCI_CONTROLLER_FAULTED;
+    assert(usb_xhci_host_adapter_next_event(&adapter, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE && event.data.port_status.port_id == 3u);
+    c->state = USB_XHCI_CONTROLLER_RUNNING;
+
+    struct usb_endpoint bulk_out = {0x02, 2, 0, 64, 0, 1};
+    struct usb_endpoint interrupt_in = {0x81, 3, 10, 8, 0, 1};
+    assert(ops.configure_endpoint(ops.context, &child_route, child_address,
+                                  USB_HOST_FULL_SPEED, &bulk_out) == USB_OK);
+    assert(ops.configure_endpoint(ops.context, &child_route, child_address,
+                                  USB_HOST_FULL_SPEED, &interrupt_in) == USB_OK);
+    m.auto_endpoint = true;
+    const uint8_t out_data[] = {0x11, 0x22, 0x33, 0x44};
+    m.expected_out_data = out_data; m.expected_out_size = sizeof(out_data);
+    m.allow_live_release = true;
+    assert(ops.bulk(ops.context, &child_route, child_address, 0x02, (void *)out_data,
+                    sizeof(out_data), &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == sizeof(out_data) && m.endpoint_output_matches);
+    m.expected_out_data = NULL; m.expected_out_size = 0;
+
+    uint8_t input[8] = {0};
+    m.endpoint_completion_code = USB_XHCI_CC_STALL_ERROR;
+    m.endpoint_residual = 2u;
+    m.allow_live_release = true;
+    assert(ops.interrupt(ops.context, &child_route, child_address, 0x81, input, sizeof(input),
+                         &actual, 100u) == USB_STALL);
+    m.allow_live_release = false;
+    assert(actual == 6u && devices[1].slot.endpoints[3u - 2u].halted);
+    assert(ops.reset_endpoint(ops.context, &child_route, child_address, 0x81) == USB_OK);
+    struct usb_setup clear_halt = {0x02, 1, 0, 0x81, 0};
+    m.allow_live_release = true;
+    assert(ops.control(ops.context, &child_route, child_address, &clear_halt, NULL, 0,
+                       &actual, 100u) == USB_OK && actual == 0u);
+    m.allow_live_release = false;
+    m.endpoint_completion_code = USB_XHCI_CC_SUCCESS;
+    m.endpoint_residual = 0u;
+    m.allow_live_release = true;
+    assert(ops.interrupt(ops.context, &child_route, child_address, 0x81, input, sizeof(input),
+                         &actual, 100u) == USB_OK && actual == sizeof(input));
+    m.allow_live_release = false;
+    assert(m.reset_endpoint_commands == 1u && m.set_dequeue_commands == 1u &&
+           m.last_set_dequeue_order < m.last_endpoint_doorbell_order);
+
+    assert(usb_xhci_host_adapter_release_stopped(&adapter) == USB_BUSY);
+    m.allow_live_release = true;
+    assert(ops.disable_device(ops.context, &child_route, 0u) == USB_OK);
+    m.allow_live_release = false;
+    assert(!devices[1].owned && devices[1].slot.state == USB_XHCI_SLOT_EMPTY);
+    assert(usb_xhci_controller_stop(c) == USB_OK);
+    assert(usb_xhci_host_adapter_release_stopped(&adapter) == USB_OK);
+    assert(!devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_EMPTY &&
+           !devices[1].owned && m.allocations == m.releases);
+    assert(!lock_state.held && lock_state.acquisitions == lock_state.releases);
+    free(c);
+    puts("PASS: xHCI usb_host_ops adapter routes, transfers and stopped cleanup");
+}
+
 static void test_running_schedule(void)
 {
     struct model m; init_model(&m, 3);
@@ -1165,6 +1306,7 @@ int main(void)
 {
     test_running_schedule(); test_failure_retention(); test_guards_and_timeouts(); test_commands_and_events();
     test_control_transfer(); test_device_slots_and_routing(); test_noncontrol_endpoints();
+    test_xhci_host_adapter();
     test_root_port_reset();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;

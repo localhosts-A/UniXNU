@@ -8,7 +8,8 @@ ownership, native controller workers, OS adapters and hardware qualification
 remain separate work. No firmware/XNU USB functionality is enabled by adding
 these files.
 
-`UsbCore.dec` / `UsbCoreLib.inf` build all seven production C units with EDK2.
+`UsbCore.dec` / `UsbCoreLib.inf` build the portable USB and MTU3 production C
+units with EDK2.
 `UNIXNU_USB_EDK2` selects explicit EDK2 integer/size/bool types through
 `UsbTypes.h`; ordinary host and XNU compilation keeps standard C headers.
 This creates a real AArch64 archive, without installing a controller driver.
@@ -81,13 +82,14 @@ followed by the device-side halt. The next transfer sets the dequeue pointer
 before ringing the endpoint doorbell. Timed-out or malformed transfers retain DMA
 until controller stop/reset is proven.
 
-These are portable controller functions, not yet a production
-`usb_host_ops` backend. A caller must serialize controller access and route
-events to the synchronous operation that owns them. The platform/OS owner still
-must own root-port power and reset policy, map USB hub addresses/routes to xHCI
-slot IDs, bind every `usb_host_ops` callback, translate IRQs, supply qualified
-DMA/IOMMU mapping, and publish HID/BOT services. Asynchronous transfers and
-canceling an in-flight transfer are not provided here.
+`UsbXhciHost.c` binds the portable controller to every `usb_host_ops` callback.
+Its caller supplies a persistent slot table, controller-wide lock, bounded
+command timeout and (for hub timing) monotonic clock. The adapter maps USB
+addresses and routes, including hub port counts and TT ancestors, to retained
+xHCI slot ownership. It also exposes root-port reset and event polling. The
+platform/OS owner still owns controller power/reset lifecycle, root-port power,
+event dispatch, qualified DMA/IOMMU mapping, and HID/BOT service publication.
+Asynchronous transfers and canceling an in-flight transfer are not provided.
 
 `usb_xhci_root_port_reset()` now resets an already powered USB2 root port with
 all earlier queued events drained by the owner. Completion requires both
