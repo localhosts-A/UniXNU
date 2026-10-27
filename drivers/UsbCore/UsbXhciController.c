@@ -316,14 +316,41 @@ static int root_port_offset(const struct usb_xhci_controller *c, uint8_t port,
 }
 
 static int root_port_write(struct usb_xhci_controller *c, uint32_t offset,
-                           uint32_t current, bool start_reset, bool clear_prc)
+                           uint32_t current, bool start_reset, uint32_t clear_changes)
 {
     /* Preserve only PORTSC RW control fields. PED and change bits are RW1CS,
      * so echoing sampled status would disable/ack unrelated port state. */
+    if (clear_changes & ~PORTSC_CHANGE_MASK) return USB_INVALID;
     uint32_t value = current & PORTSC_RW_CONTROL_MASK;
     if (start_reset) value |= PORTSC_PR;
-    if (clear_prc) value |= PORTSC_PRC;
+    value |= clear_changes;
     return guarded_write(c, offset, value);
+}
+
+static uint32_t root_port_changes_decode(uint32_t portsc)
+{
+    uint32_t changes = 0;
+    if (portsc & PORTSC_CSC) changes |= USB_XHCI_ROOT_PORT_CHANGE_CONNECT;
+    if (portsc & PORTSC_PEC) changes |= USB_XHCI_ROOT_PORT_CHANGE_ENABLE;
+    if (portsc & PORTSC_WRC) changes |= USB_XHCI_ROOT_PORT_CHANGE_WARM_RESET;
+    if (portsc & PORTSC_OCC) changes |= USB_XHCI_ROOT_PORT_CHANGE_OVERCURRENT;
+    if (portsc & PORTSC_PRC) changes |= USB_XHCI_ROOT_PORT_CHANGE_RESET;
+    if (portsc & PORTSC_PLC) changes |= USB_XHCI_ROOT_PORT_CHANGE_LINK_STATE;
+    if (portsc & PORTSC_CEC) changes |= USB_XHCI_ROOT_PORT_CHANGE_CONFIG_ERROR;
+    return changes;
+}
+
+static uint32_t root_port_changes_encode(uint32_t changes)
+{
+    uint32_t portsc = 0;
+    if (changes & USB_XHCI_ROOT_PORT_CHANGE_CONNECT) portsc |= PORTSC_CSC;
+    if (changes & USB_XHCI_ROOT_PORT_CHANGE_ENABLE) portsc |= PORTSC_PEC;
+    if (changes & USB_XHCI_ROOT_PORT_CHANGE_WARM_RESET) portsc |= PORTSC_WRC;
+    if (changes & USB_XHCI_ROOT_PORT_CHANGE_OVERCURRENT) portsc |= PORTSC_OCC;
+    if (changes & USB_XHCI_ROOT_PORT_CHANGE_RESET) portsc |= PORTSC_PRC;
+    if (changes & USB_XHCI_ROOT_PORT_CHANGE_LINK_STATE) portsc |= PORTSC_PLC;
+    if (changes & USB_XHCI_ROOT_PORT_CHANGE_CONFIG_ERROR) portsc |= PORTSC_CEC;
+    return portsc;
 }
 
 static int root_port_drain_old_events(struct usb_xhci_controller *c)
@@ -365,7 +392,7 @@ int usb_xhci_root_port_reset(struct usb_xhci_controller *c, uint8_t port,
     if (value & PORTSC_PR) return USB_BUSY;
 
     if (value & PORTSC_PRC) {
-        result = root_port_write(c, offset, value, false, true);
+        result = root_port_write(c, offset, value, false, PORTSC_PRC);
         if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
         result = guarded_read(c, offset, &value);
         if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
@@ -378,7 +405,7 @@ int usb_xhci_root_port_reset(struct usb_xhci_controller *c, uint8_t port,
     if (!(value & PORTSC_CCS)) return USB_DISCONNECTED;
     if (value & PORTSC_OCA) return USB_IO;
     if (value & PORTSC_PR) return USB_BUSY;
-    result = root_port_write(c, offset, value, true, false);
+    result = root_port_write(c, offset, value, true, 0);
     if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
 
     bool port_event_seen = false;
@@ -433,7 +460,7 @@ int usb_xhci_root_port_reset(struct usb_xhci_controller *c, uint8_t port,
         else if (speed_id == USB_XHCI_SPEED_HIGH) detected = USB_XHCI_SPEED_HIGH;
         else result = USB_UNSUPPORTED;
     }
-    int clear = root_port_write(c, offset, value, false, true);
+    int clear = root_port_write(c, offset, value, false, PORTSC_PRC);
     if (clear) { c->state = USB_XHCI_CONTROLLER_FAULTED; return clear; }
     int verify = guarded_read(c, offset, &value);
     if (verify) { c->state = USB_XHCI_CONTROLLER_FAULTED; return verify; }
@@ -454,6 +481,68 @@ int usb_xhci_root_port_reset(struct usb_xhci_controller *c, uint8_t port,
     }
     if (!result) *speed = detected;
     return result;
+}
+
+int usb_xhci_root_port_get_status(struct usb_xhci_controller *c, uint8_t port,
+                                  struct usb_xhci_root_port_status *status)
+{
+    if (!c || !status || c->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    int result = controller_ready(c);
+    if (result) return result;
+    uint32_t offset;
+    result = root_port_offset(c, port, &offset);
+    if (result) return result;
+    uint32_t value;
+    result = guarded_read(c, offset, &value);
+    if (result) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return result;
+    }
+    struct usb_xhci_root_port_status candidate = {0};
+    candidate.connected = (value & PORTSC_CCS) != 0;
+    candidate.enabled = (value & PORTSC_PED) != 0;
+    candidate.overcurrent = (value & PORTSC_OCA) != 0;
+    candidate.resetting = (value & PORTSC_PR) != 0;
+    candidate.powered = (value & PORTSC_PP) != 0;
+    candidate.speed_id = (uint8_t)((value & PORTSC_SPEED_MASK) >> 10);
+    candidate.changes = root_port_changes_decode(value);
+    *status = candidate;
+    return USB_OK;
+}
+
+int usb_xhci_root_port_ack_changes(struct usb_xhci_controller *c, uint8_t port,
+                                   uint32_t changes)
+{
+    if (!c || !changes || (changes & ~USB_XHCI_ROOT_PORT_CHANGE_MASK) ||
+        c->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    int result = controller_ready(c);
+    if (result) return result;
+    uint32_t offset;
+    result = root_port_offset(c, port, &offset);
+    if (result) return result;
+    uint32_t value;
+    result = guarded_read(c, offset, &value);
+    if (result) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return result;
+    }
+    uint32_t clear = root_port_changes_encode(changes) & value;
+    if (!clear) return USB_OK;
+    result = root_port_write(c, offset, value, false, clear);
+    if (result) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return result;
+    }
+    result = guarded_read(c, offset, &value);
+    if (result) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return result;
+    }
+    if (value & clear) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return USB_IO;
+    }
+    return USB_OK;
 }
 
 int usb_xhci_controller_submit_command(struct usb_xhci_controller *c,

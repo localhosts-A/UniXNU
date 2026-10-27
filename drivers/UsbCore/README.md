@@ -86,7 +86,11 @@ until controller stop/reset is proven.
 Its caller supplies a persistent slot table, controller-wide lock, bounded
 command timeout and (for hub timing) monotonic clock. The adapter maps USB
 addresses and routes, including hub port counts and TT ancestors, to retained
-xHCI slot ownership. It also exposes root-port reset and event polling. The
+xHCI slot ownership. It also exposes root-port reset, guarded status snapshots,
+selective sticky-change acknowledgement and event polling. The status API reports
+connection, enable, overcurrent, reset, power, raw speed ID and normalized change
+flags without clearing them. The acknowledgement API clears only selected
+PORTSC RW1C flags and verifies the write while preserving other state. The
 platform/OS owner still owns controller power/reset lifecycle, root-port power,
 event dispatch, qualified DMA/IOMMU mapping, and HID/BOT service publication.
 Asynchronous transfers and canceling an in-flight transfer are not provided.
@@ -101,6 +105,13 @@ reset may still be active. The platform still owns port power, attachment policy
 and connector safety. The register model covers missing and matching port events,
 event ordering/retention, overcurrent, unrelated change preservation,
 unpowered/disconnected/invalid ports, timeout and applied-but-error reset writes.
+`usb_xhci_root_port_get_status()` and `usb_xhci_root_port_ack_changes()` provide
+the complementary hotplug primitives: status snapshots are guard-protected and
+leave output unchanged on error; acknowledgements accept only normalized change
+flags, preserve unrelated status/control bits and fail-stop on an uncertain
+RW1C write. The serialized host adapter exposes both calls under its controller
+lock so an OS owner can distinguish connection changes from the port event's
+port-number-only notification.
 
 `UsbStorage.c` serializes block requests around a BOT device using caller-owned
 lock and bounce-buffer callbacks. It chunks large `IOStorage` requests to the

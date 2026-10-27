@@ -129,6 +129,28 @@ struct usb_xhci_capabilities {
 /* USB2 speed encodings are the values used by the xHCI Slot Context. */
 enum usb_xhci_speed { USB_XHCI_SPEED_FULL = 1, USB_XHCI_SPEED_LOW = 2,
                       USB_XHCI_SPEED_HIGH = 3 };
+
+/* Normalized sticky change flags returned by the guarded root-port snapshot.
+ * Pass only these flags to usb_xhci_root_port_ack_changes(). */
+#define USB_XHCI_ROOT_PORT_CHANGE_CONNECT       (1u << 0)
+#define USB_XHCI_ROOT_PORT_CHANGE_ENABLE        (1u << 1)
+#define USB_XHCI_ROOT_PORT_CHANGE_WARM_RESET    (1u << 2)
+#define USB_XHCI_ROOT_PORT_CHANGE_OVERCURRENT   (1u << 3)
+#define USB_XHCI_ROOT_PORT_CHANGE_RESET         (1u << 4)
+#define USB_XHCI_ROOT_PORT_CHANGE_LINK_STATE    (1u << 5)
+#define USB_XHCI_ROOT_PORT_CHANGE_CONFIG_ERROR  (1u << 6)
+#define USB_XHCI_ROOT_PORT_CHANGE_MASK          0x7fu
+
+struct usb_xhci_root_port_status {
+    bool connected;
+    bool enabled;
+    bool overcurrent;
+    bool resetting;
+    bool powered;
+    uint8_t speed_id; /* Raw xHCI speed ID; interpret only when connected. */
+    uint32_t changes; /* Sticky normalized change flags; snapshot does not clear them. */
+};
+
 /* hub_port stores the actual downstream port; hub_port_count preserves the
  * parent hub's bNbrPorts for Route String encoding. For low/full-speed paths,
  * the TT fields identify an ancestor high-speed hub and its actual port. */
@@ -268,6 +290,15 @@ int usb_xhci_controller_next_event(struct usb_xhci_controller *, struct usb_xhci
  * qualify the platform's power/connector policy. */
 int usb_xhci_root_port_reset(struct usb_xhci_controller *, uint8_t root_port,
                              uint32_t timeout_ms, enum usb_xhci_speed *speed);
+/* Read USB2 PORTSC state under the controller guard. On failure, output is
+ * unchanged. The returned change bits are a snapshot and remain latched until
+ * explicitly acknowledged. */
+int usb_xhci_root_port_get_status(struct usb_xhci_controller *, uint8_t root_port,
+                                  struct usb_xhci_root_port_status *);
+/* Acknowledge only selected sticky change bits using safe RW1C writes. Other
+ * PORTSC status/control bits are preserved. Use flags from a fresh snapshot. */
+int usb_xhci_root_port_ack_changes(struct usb_xhci_controller *, uint8_t root_port,
+                                   uint32_t changes);
 
 /* One EP0 control TD on a slot/context and active endpoint ring established by
  * the owner, in the same controller DMA address space. The caller serializes

@@ -403,6 +403,27 @@ int usb_xhci_host_adapter_reset_root_port(struct usb_xhci_host_adapter *adapter,
     return result;
 }
 
+int usb_xhci_host_adapter_root_port_get_status(struct usb_xhci_host_adapter *adapter,
+                                              uint8_t root_port,
+                                              struct usb_xhci_root_port_status *status)
+{
+    int result = adapter_lock(adapter);
+    if (result) return result;
+    result = usb_xhci_root_port_get_status(adapter->controller, root_port, status);
+    adapter_unlock(adapter);
+    return result;
+}
+
+int usb_xhci_host_adapter_root_port_ack_changes(struct usb_xhci_host_adapter *adapter,
+                                                uint8_t root_port, uint32_t changes)
+{
+    int result = adapter_lock(adapter);
+    if (result) return result;
+    result = usb_xhci_root_port_ack_changes(adapter->controller, root_port, changes);
+    adapter_unlock(adapter);
+    return result;
+}
+
 int usb_xhci_host_adapter_next_event(struct usb_xhci_host_adapter *adapter,
                                      struct usb_xhci_event *event)
 {

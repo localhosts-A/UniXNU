@@ -44,6 +44,10 @@ int usb_xhci_host_adapter_get_ops(struct usb_xhci_host_adapter *, struct usb_hos
  * next_event and retry; power and connector policy remain platform-owned. */
 int usb_xhci_host_adapter_reset_root_port(struct usb_xhci_host_adapter *, uint8_t root_port,
                                           uint32_t timeout_ms, enum usb_host_speed *speed);
+int usb_xhci_host_adapter_root_port_get_status(struct usb_xhci_host_adapter *, uint8_t root_port,
+                                              struct usb_xhci_root_port_status *);
+int usb_xhci_host_adapter_root_port_ack_changes(struct usb_xhci_host_adapter *, uint8_t root_port,
+                                                uint32_t changes);
 int usb_xhci_host_adapter_next_event(struct usb_xhci_host_adapter *, struct usb_xhci_event *);
 
 /* Acquires the adapter lock. Call only after every USB host/child user has

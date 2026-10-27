@@ -20,8 +20,11 @@
 #define PORTSC_SPEED_SHIFT 10u
 #define PORTSC_CSC (1u << 17)
 #define PORTSC_PEC (1u << 18)
+#define PORTSC_WRC (1u << 19)
 #define PORTSC_OCC (1u << 20)
 #define PORTSC_PRC (1u << 21)
+#define PORTSC_PLC (1u << 22)
+#define PORTSC_CEC (1u << 23)
 #define PORTSC_CHANGE_MASK (0x7fu << 17)
 #define PORTSC_CONTROL_MASK ((0xfu << 5) | PORTSC_PP | (3u << 14) | (7u << 25))
 
@@ -771,6 +774,100 @@ static void test_commands_and_events(void)
         free(c);
     }
     puts("PASS: xHCI command doorbell, shared event delivery and retained faults");
+}
+
+static void test_root_port_status(void)
+{
+    struct model m; init_model(&m, 0);
+    m.regs[PORTSC / 4u] |= PORTSC_PED | PORTSC_OCA |
+        (USB_XHCI_SPEED_HIGH << PORTSC_SPEED_SHIFT) |
+        PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC |
+        PORTSC_PRC | PORTSC_PLC | PORTSC_CEC;
+    struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    struct usb_xhci_host_device devices[1] = {0};
+    struct adapter_lock_state lock_state = {0};
+    struct usb_xhci_host_adapter adapter;
+    assert(usb_xhci_host_adapter_init(&adapter, c, devices, 1u,
+                                     adapter_test_lock, adapter_test_unlock, &lock_state,
+                                     adapter_test_clock, &m.current_ms, 100u) == USB_OK);
+
+    struct usb_xhci_root_port_status status = {0};
+    assert(usb_xhci_host_adapter_root_port_get_status(&adapter, 1u, &status) == USB_OK);
+    assert(status.connected && status.enabled && status.overcurrent && !status.resetting &&
+           status.powered && status.speed_id == USB_XHCI_SPEED_HIGH &&
+           status.changes == USB_XHCI_ROOT_PORT_CHANGE_MASK && !m.port_writes);
+    const uint32_t stable = m.regs[PORTSC / 4u] &
+        (PORTSC_CCS | PORTSC_PED | PORTSC_OCA | PORTSC_PP | (0xfu << PORTSC_SPEED_SHIFT));
+
+    uint32_t first_ack = USB_XHCI_ROOT_PORT_CHANGE_CONNECT |
+                         USB_XHCI_ROOT_PORT_CHANGE_RESET;
+    assert(usb_xhci_host_adapter_root_port_ack_changes(&adapter, 1u, first_ack) == USB_OK);
+    assert(m.port_writes == 1u &&
+           (m.regs[PORTSC / 4u] & stable) == stable &&
+           !(m.regs[PORTSC / 4u] & (PORTSC_CSC | PORTSC_PRC)) &&
+           (m.regs[PORTSC / 4u] & (PORTSC_PEC | PORTSC_WRC | PORTSC_OCC |
+                                   PORTSC_PLC | PORTSC_CEC)) ==
+           (PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | PORTSC_PLC | PORTSC_CEC));
+    struct usb_xhci_root_port_status unchanged = status;
+    assert(usb_xhci_host_adapter_root_port_get_status(&adapter, 1u, &status) == USB_OK);
+    assert(status.connected && status.enabled && status.overcurrent && status.powered &&
+           status.speed_id == USB_XHCI_SPEED_HIGH &&
+           status.changes == (USB_XHCI_ROOT_PORT_CHANGE_MASK & ~first_ack));
+    assert(unchanged.changes == USB_XHCI_ROOT_PORT_CHANGE_MASK);
+    unchanged = status;
+
+    uint32_t writes = m.port_writes;
+    assert(usb_xhci_host_adapter_root_port_ack_changes(&adapter, 1u, 1u << 31) == USB_INVALID);
+    c->caps.usb2_ports[0] &= (uint8_t)~(1u << 1);
+    assert(usb_xhci_host_adapter_root_port_get_status(&adapter, 2u, &unchanged) == USB_UNSUPPORTED);
+    assert(unchanged.changes == (USB_XHCI_ROOT_PORT_CHANGE_MASK & ~first_ack));
+    struct usb_xhci_root_port_status sentinel = {
+        .connected = true, .enabled = true, .overcurrent = true, .resetting = true,
+        .powered = true, .speed_id = 99u, .changes = 0xa5a5a5a5u
+    };
+    assert(usb_xhci_host_adapter_root_port_get_status(&adapter, 0u, &sentinel) == USB_RANGE);
+    assert(sentinel.connected && sentinel.enabled && sentinel.overcurrent && sentinel.resetting &&
+           sentinel.powered && sentinel.speed_id == 99u && sentinel.changes == 0xa5a5a5a5u);
+    assert(m.port_writes == writes && !lock_state.held &&
+           lock_state.acquisitions == lock_state.releases);
+
+    assert(usb_xhci_host_adapter_root_port_ack_changes(
+               &adapter, 1u, USB_XHCI_ROOT_PORT_CHANGE_MASK) == USB_OK);
+    assert(usb_xhci_host_adapter_root_port_ack_changes(&adapter, 1u, first_ack) == USB_OK);
+    assert(usb_xhci_host_adapter_root_port_get_status(&adapter, 1u, &status) == USB_OK &&
+           status.changes == 0u && (m.regs[PORTSC / 4u] & stable) == stable);
+    assert(m.port_writes == writes + 1u);
+    assert(usb_xhci_controller_stop(c) == USB_OK);
+    assert(usb_xhci_host_adapter_release_stopped(&adapter) == USB_OK);
+    assert(m.allocations == m.releases && !lock_state.held);
+    free(c);
+
+    /* Read failure preserves output and fail-stops controller ownership. */
+    init_model(&m, 0); c = new_controller(); assert(start(&m, c) == USB_OK);
+    status = sentinel;
+    m.fail_access = m.accesses + 2u; /* Ready check succeeds; PORTSC read fails. */
+    assert(usb_xhci_root_port_get_status(c, 1u, &status) == USB_IO);
+    assert(c->state == USB_XHCI_CONTROLLER_FAULTED &&
+           status.connected == sentinel.connected && status.enabled == sentinel.enabled &&
+           status.overcurrent == sentinel.overcurrent && status.resetting == sentinel.resetting &&
+           status.powered == sentinel.powered && status.speed_id == sentinel.speed_id &&
+           status.changes == sentinel.changes);
+    m.fail_access = 0;
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* Applied-but-error RW1C publication still requires a controller stop. */
+    init_model(&m, 0); c = new_controller(); assert(start(&m, c) == USB_OK);
+    m.regs[PORTSC / 4u] |= PORTSC_CSC;
+    m.fail_access = m.accesses + 3u; m.applied_error = true;
+    assert(usb_xhci_root_port_ack_changes(c, 1u,
+                                          USB_XHCI_ROOT_PORT_CHANGE_CONNECT) == USB_IO);
+    assert(c->state == USB_XHCI_CONTROLLER_FAULTED && !(m.regs[PORTSC / 4u] & PORTSC_CSC));
+    m.fail_access = 0; m.applied_error = false;
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+    puts("PASS: xHCI guarded root-port snapshot and selected change acknowledgement");
 }
 
 static void test_root_port_reset(void)
@@ -1863,6 +1960,7 @@ int main(void)
     test_xhci_host_adapter(); test_xhci_host_enumeration_bot();
     test_xhci_hub_enumeration_child_bot();
     test_xhci_host_adapter_cleanup_retention();
+    test_root_port_status();
     test_root_port_reset();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
