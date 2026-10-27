@@ -71,6 +71,8 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 
 ```toml
 [userdata]
+partition_name = "userdata"
+lun = 0
 first_lba = 0x0
 last_lba = 0x0
 lba_bytes = 4096
@@ -80,7 +82,9 @@ windows = [
 ]
 ```
 
-`first_lba` and `last_lba` come from the GPT entry named `userdata`. `lba_bytes` is the logical block size. Each window names a disk image component from the IPSW.
+`partition_name` is the fastboot target for the generated raw image; it defaults to `userdata`. Optional `lun` records the UFS LUN for a device-specific XNU reader (0–7); fastboot itself does not select a LUN. `first_lba` and `last_lba` are the measured inclusive GPT range of the container partition, and `lba_bytes` is its logical block size. The builder checks capacity, the `SHNGROOT` header and checksum, window bounds/alignment/overlap, zero padding and every window digest in the completed image, then prints a flash command; it never flashes the device. Each window names a disk image component from the IPSW.
+
+The raw `SHNGROOT` container does not encode the outer partition name or UFS LUN. An XNU root reader must independently locate the container on the correct device and LUN. Changing `partition_name` only changes the host-side image report; it does not configure or qualify that reader.
 
 ### Kernel
 
