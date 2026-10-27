@@ -35,13 +35,24 @@ class OwnerDataFixtureDiskSelectionTests(unittest.TestCase):
                 fixture.select_whole_disk(entities)
 
     def test_selects_exact_apfs_partition_from_diskutil_list(self):
-        listing = {'AllDisksAndPartitions': [
-            {'DeviceIdentifier': 'disk7', 'Partitions': [
-                {'DeviceIdentifier': 'disk7s1', 'Content': 'Apple_APFS'}]},
-            {'DeviceIdentifier': 'disk9', 'Partitions': [
-                {'DeviceIdentifier': 'disk9s1', 'Content': 'Apple_APFS'}]},
-        ]}
-        self.assertEqual(fixture.select_apfs_partition('/dev/disk9', listing), '/dev/disk9s1')
+        listings = (
+            {'AllDisksAndPartitions': [
+                {'DeviceIdentifier': 'disk7', 'Partitions': [
+                    {'DeviceIdentifier': 'disk7s1', 'Content': 'Apple_APFS'}]},
+                {'DeviceIdentifier': 'disk9', 'Partitions': [
+                    {'DeviceIdentifier': 'disk9s1', 'Content': 'Apple_APFS'}]},
+            ]},
+            {'AllDisksAndPartitions': [{'DeviceIdentifier': 'disk9', 'Partitions': [
+                {'DeviceIdentifier': 'disk9s1',
+                 'Content': '7C3457EF-0000-11AA-AA11-00306543ECAC'},
+            ]}]},
+            {'AllDisksAndPartitions': [{'DeviceIdentifier': 'disk9', 'Partitions': [
+                {'DeviceIdentifier': 'disk9s1', 'Content': 'unknown-but-unique'},
+            ]}]},
+        )
+        for listing in listings:
+            with self.subTest(listing=listing):
+                self.assertEqual(fixture.select_apfs_partition('/dev/disk9', listing), '/dev/disk9s1')
 
     def test_rejects_wrong_disk_missing_or_ambiguous_apfs_partition(self):
         cases = (
@@ -51,6 +62,10 @@ class OwnerDataFixtureDiskSelectionTests(unittest.TestCase):
             ({'AllDisksAndPartitions': [{'DeviceIdentifier': 'disk9', 'Partitions': [
                 {'DeviceIdentifier': 'disk9s1', 'Content': 'Apple_APFS'},
                 {'DeviceIdentifier': 'disk9s2', 'Content': 'Apple_APFS'},
+            ]}]}, '/dev/disk9', 'exactly one Apple_APFS'),
+            ({'AllDisksAndPartitions': [{'DeviceIdentifier': 'disk9', 'Partitions': [
+                {'DeviceIdentifier': 'disk9s1', 'Content': 'unknown'},
+                {'DeviceIdentifier': 'disk9s2', 'Content': 'also-unknown'},
             ]}]}, '/dev/disk9', 'exactly one Apple_APFS'),
             ({'AllDisksAndPartitions': [{'DeviceIdentifier': 'disk9', 'Partitions': [
                 {'DeviceIdentifier': '../disk9s1', 'Content': 'Apple_APFS'},

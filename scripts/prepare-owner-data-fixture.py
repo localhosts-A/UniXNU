@@ -61,12 +61,21 @@ def select_apfs_partition(whole_device, listing):
     if len(disks) != 1:
         raise SystemExit('diskutil did not identify the Data seed whole disk')
     partitions = [entry for entry in disks[0].get('Partitions', [])
-                  if entry.get('Content') == 'Apple_APFS' and
-                  isinstance(entry.get('DeviceIdentifier'), str) and
+                  if isinstance(entry.get('DeviceIdentifier'), str) and
                   re.fullmatch(r'disk[0-9]+s[0-9]+', entry['DeviceIdentifier'])]
-    if len(partitions) != 1:
-        raise SystemExit('Require exactly one Apple_APFS partition in the Data seed disk image')
-    return '/dev/' + partitions[0]['DeviceIdentifier']
+    apfs_contents = {'APPLE_APFS', '7C3457EF-0000-11AA-AA11-00306543ECAC'}
+    apfs = [entry for entry in partitions
+            if str(entry.get('Content', '')).upper() in apfs_contents]
+    if len(apfs) == 1:
+        return '/dev/' + apfs[0]['DeviceIdentifier']
+    if not apfs and len(partitions) == 1:
+        # The scratch image is freshly formatted as APFS. diskutil's NXSB check
+        # after raw export is the final filesystem identity gate.
+        return '/dev/' + partitions[0]['DeviceIdentifier']
+    summary = [{'device': entry.get('DeviceIdentifier'), 'content': entry.get('Content'),
+                'partition_type': entry.get('PartitionType')} for entry in disks[0].get('Partitions', [])]
+    raise SystemExit('Require exactly one Apple_APFS partition in the Data seed disk image; '
+                     f'diskutil reported {summary}')
 
 
 def sha256(path):
