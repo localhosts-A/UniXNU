@@ -809,6 +809,36 @@ static int slot_release_memory(struct usb_xhci_device_slot *slot, bool controlle
         result = usb_xhci_control_release_stopped(&slot->control);
         if (result) return result;
     }
+    for (size_t i = 0; i < USB_XHCI_MAX_NONCONTROL_ENDPOINTS; ++i) {
+        struct usb_xhci_device_endpoint *endpoint = &slot->endpoints[i];
+        struct usb_xhci_transfer_ring *ring = &endpoint->ring;
+        if (ring->trbs.cpu && ring->controller_active) {
+            result = usb_xhci_transfer_ring_halted(ring);
+            if (result) {
+                if (!controller_stopped) return result;
+                result = usb_dma_sync(&slot->dma, &ring->trbs, 0, ring->trbs.size,
+                                      USB_DMA_TO_DEVICE, true);
+                if (result) return result;
+                ring->controller_active = false;
+                ring->faulted = false;
+                ring->outstanding = 0;
+            }
+        } else if (ring->trbs.cpu && ring->faulted) {
+            if (!controller_stopped) return USB_IO;
+            result = usb_dma_sync(&slot->dma, &ring->trbs, 0, ring->trbs.size,
+                                  USB_DMA_TO_DEVICE, true);
+            if (result) return result;
+            ring->faulted = false;
+            ring->outstanding = 0;
+        }
+        if (endpoint->transfer_pending && !controller_stopped) return USB_BUSY;
+        if (ring->trbs.cpu) {
+            result = usb_xhci_transfer_ring_destroy(ring);
+            if (result) return result;
+        }
+        usb_dma_free(&slot->dma, &endpoint->transfer_data);
+        zero_bytes(endpoint, sizeof(*endpoint));
+    }
     if (slot->ep0.trbs.cpu) {
         result = usb_xhci_transfer_ring_destroy(&slot->ep0);
         if (result) return result;
@@ -1045,11 +1075,423 @@ int usb_xhci_device_control(struct usb_xhci_device_slot *slot, uint8_t address,
     return USB_TIMEOUT;
 }
 
+static int endpoint_dci(const struct usb_endpoint *descriptor, uint8_t *dci)
+{
+    if (!descriptor || !dci || (descriptor->address & 0x70u) ||
+        !(descriptor->address & 0x0fu)) return USB_INVALID;
+    uint8_t number = descriptor->address & 0x0fu;
+    *dci = (uint8_t)(number * 2u + ((descriptor->address & 0x80u) ? 1u : 0u));
+    return *dci <= 31u ? USB_OK : USB_RANGE;
+}
+
+static uint8_t floor_log2_u32(uint32_t value)
+{
+    uint8_t result = 0;
+    while (value > 1u) { value >>= 1; ++result; }
+    return result;
+}
+
+static struct usb_xhci_device_endpoint *find_slot_endpoint(
+    struct usb_xhci_device_slot *slot, uint8_t address)
+{
+    if (!slot || (address & 0x70u) || !(address & 0x0fu)) return NULL;
+    uint8_t number = address & 0x0fu;
+    uint8_t dci = (uint8_t)(number * 2u + ((address & 0x80u) ? 1u : 0u));
+    if (dci < 2u || dci > 31u) return NULL;
+    struct usb_xhci_device_endpoint *endpoint = &slot->endpoints[dci - 2u];
+    return endpoint->configured && endpoint->descriptor.address == address ? endpoint : NULL;
+}
+
+static int validate_endpoint_descriptor(enum usb_xhci_speed speed,
+                                        const struct usb_endpoint *descriptor,
+                                        uint8_t *dci, uint8_t *interval,
+                                        uint8_t *max_burst, uint16_t *max_esit)
+{
+    if (!descriptor || !dci || !interval || !max_burst || !max_esit ||
+        (descriptor->type != 2u && descriptor->type != 3u) ||
+        !descriptor->max_packet || !descriptor->transactions ||
+        descriptor->transactions > 3u) return USB_INVALID;
+    int result = endpoint_dci(descriptor, dci);
+    if (result) return result;
+    if (descriptor->type == 2u) {
+        if (descriptor->transactions != 1u || speed == USB_XHCI_SPEED_LOW ||
+            (speed == USB_XHCI_SPEED_FULL &&
+             descriptor->max_packet != 8u && descriptor->max_packet != 16u &&
+             descriptor->max_packet != 32u && descriptor->max_packet != 64u) ||
+            (speed == USB_XHCI_SPEED_HIGH && descriptor->max_packet != 512u))
+            return USB_UNSUPPORTED;
+        *interval = speed == USB_XHCI_SPEED_HIGH ? descriptor->interval : 0u;
+        *max_burst = 0u;
+        *max_esit = 0u;
+        return USB_OK;
+    }
+
+    if (!descriptor->interval) return USB_INVALID;
+    if (speed == USB_XHCI_SPEED_LOW) {
+        if (descriptor->max_packet > 8u || descriptor->transactions != 1u ||
+            descriptor->interval < 10u) return USB_UNSUPPORTED;
+        *interval = floor_log2_u32((uint32_t)descriptor->interval * 8u);
+        *max_burst = 0u;
+    } else if (speed == USB_XHCI_SPEED_FULL) {
+        if (descriptor->max_packet > 64u || descriptor->transactions != 1u)
+            return USB_UNSUPPORTED;
+        *interval = floor_log2_u32((uint32_t)descriptor->interval * 8u);
+        *max_burst = 0u;
+    } else if (speed == USB_XHCI_SPEED_HIGH) {
+        if (descriptor->interval > 16u || descriptor->max_packet > 1024u ||
+            (descriptor->transactions == 2u && descriptor->max_packet < 513u) ||
+            (descriptor->transactions == 3u && descriptor->max_packet < 683u) ||
+            ((uint32_t)descriptor->max_packet * descriptor->transactions > 1024u &&
+             descriptor->interval != 1u)) return USB_UNSUPPORTED;
+        *interval = (uint8_t)(descriptor->interval - 1u);
+        *max_burst = (uint8_t)(descriptor->transactions - 1u);
+    } else return USB_INVALID;
+    *max_esit = (uint16_t)(descriptor->max_packet *
+                           (uint16_t)(*max_burst + 1u));
+    return USB_OK;
+}
+
+int usb_xhci_device_configure_endpoint(struct usb_xhci_device_slot *slot,
+                                       const struct usb_endpoint *descriptor)
+{
+    if (!slot || !slot->controller || !descriptor || slot->state != USB_XHCI_SLOT_ADDRESSED ||
+        slot->controller->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    uint8_t dci, interval, max_burst;
+    uint16_t max_esit;
+    int result = validate_endpoint_descriptor(slot->speed, descriptor, &dci,
+                                               &interval, &max_burst, &max_esit);
+    if (result) return result;
+    struct usb_xhci_device_endpoint *endpoint = &slot->endpoints[dci - 2u];
+    if (endpoint->configured || endpoint->ring.trbs.cpu || endpoint->transfer_data.cpu)
+        return USB_BUSY;
+    endpoint->descriptor = *descriptor;
+    endpoint->dci = dci;
+    endpoint->input = (descriptor->address & 0x80u) != 0;
+    result = usb_xhci_transfer_ring_init(&endpoint->ring, &slot->dma, 16u);
+    if (result) { zero_bytes(endpoint, sizeof(*endpoint)); return result; }
+
+    uint8_t stride = slot->controller->caps.context_bytes;
+    uint8_t *input = slot->input_context.cpu;
+    uint8_t *input_slot = input + stride;
+    uint8_t *input_endpoint = input + (size_t)(dci + 1u) * stride;
+    copy_bytes(input_slot, slot->output_context.cpu, stride);
+    uint32_t slot_info = get_le32(input_slot);
+    uint32_t context_entries = (slot_info >> 27) & 0x1fu;
+    if (context_entries < dci) {
+        slot_info = (slot_info & ~(0x1fu << 27)) | ((uint32_t)dci << 27);
+        put_le32(input_slot, slot_info);
+    }
+    zero_bytes(input, stride);
+    put_le32(input + 4u, 1u | (1u << dci)); /* Add Slot and this Endpoint context. */
+    zero_bytes(input_endpoint, stride);
+    uint32_t info0 = (uint32_t)interval << 16;
+    put_le32(input_endpoint, info0);
+    uint32_t endpoint_type = descriptor->type == 2u ?
+        ((descriptor->address & 0x80u) ? 6u : 2u) :
+        ((descriptor->address & 0x80u) ? 7u : 3u);
+    uint32_t info1 = (3u << 1) | (endpoint_type << 3) |
+                     ((uint32_t)max_burst << 8) |
+                     ((uint32_t)descriptor->max_packet << 16);
+    put_le32(input_endpoint + 4u, info1);
+    put_le64(input_endpoint + 8u, endpoint->ring.trbs.address |
+                                   endpoint->ring.producer_cycle);
+    uint16_t average_trb = descriptor->type == 2u ? 3072u : 1024u;
+    put_le32(input_endpoint + 16u, (uint32_t)average_trb |
+                                    ((uint32_t)max_esit << 16));
+    result = slot_sync_input(slot);
+    if (result) goto configure_endpoint_unpublished_failure;
+    result = usb_xhci_transfer_ring_mark_active(&endpoint->ring);
+    if (result) goto configure_endpoint_unpublished_failure;
+
+    struct usb_xhci_trb command;
+    struct usb_xhci_event completion;
+    make_slot_command(&command, USB_XHCI_TRB_CONFIGURE_ENDPOINT,
+                      slot->input_context.address, slot->slot_id, false);
+    result = usb_xhci_controller_command(slot->controller, &command, slot->slot_id,
+                                         5000u, &completion);
+    if (result) goto configure_endpoint_published_failure;
+    result = usb_dma_sync(&slot->dma, &slot->output_context, 0,
+                          slot->output_context.size, USB_DMA_FROM_DEVICE, false);
+    if (result) goto configure_endpoint_published_failure;
+    uint8_t *output_endpoint = (uint8_t *)slot->output_context.cpu +
+                               (size_t)dci * stride;
+    if ((get_le32(output_endpoint) & 7u) != 1u ||
+        ((get_le32(output_endpoint + 4u) >> 3) & 7u) != endpoint_type ||
+        (get_le32(output_endpoint + 4u) >> 16) != descriptor->max_packet) {
+        result = USB_PHASE_ERROR;
+        goto configure_endpoint_published_failure;
+    }
+    endpoint->configured = true;
+    return USB_OK;
+
+configure_endpoint_unpublished_failure:
+    if (endpoint->ring.trbs.cpu && !endpoint->ring.controller_active &&
+        !endpoint->ring.faulted) (void)usb_xhci_transfer_ring_destroy(&endpoint->ring);
+    zero_bytes(endpoint, sizeof(*endpoint));
+    return result;
+
+configure_endpoint_published_failure:
+    endpoint->faulted = true;
+    slot->controller->state = USB_XHCI_CONTROLLER_FAULTED;
+    slot->state = USB_XHCI_SLOT_FAULTED;
+    return result;
+}
+
+static int endpoint_set_dequeue(struct usb_xhci_device_slot *slot,
+                                struct usb_xhci_device_endpoint *endpoint,
+                                uint32_t timeout_ms)
+{
+    if (!endpoint->needs_dequeue) return USB_OK;
+    if (endpoint->ring.outstanding || endpoint->ring.consumer_index >= endpoint->ring.usable_entries ||
+        endpoint->ring.consumer_cycle > 1u) return USB_PHASE_ERROR;
+    uint64_t address = endpoint->ring.trbs.address +
+                       (uint64_t)endpoint->ring.consumer_index * USB_XHCI_TRB_BYTES;
+    address |= endpoint->ring.consumer_cycle;
+    struct usb_xhci_trb command;
+    struct usb_xhci_event completion;
+    make_slot_command(&command, USB_XHCI_TRB_SET_TR_DEQUEUE, address,
+                      slot->slot_id, false);
+    uint32_t control = get_le32(command.bytes + 12u) | ((uint32_t)endpoint->dci << 16);
+    put_le32(command.bytes + 12u, control);
+    int result = usb_xhci_controller_command(slot->controller, &command, slot->slot_id,
+                                             timeout_ms, &completion);
+    if (!result) endpoint->needs_dequeue = false;
+    return result;
+}
+
+int usb_xhci_device_reset_endpoint(struct usb_xhci_device_slot *slot, uint8_t address,
+                                   uint8_t endpoint_address, uint32_t timeout_ms)
+{
+    if (!slot || !slot->controller || !timeout_ms || timeout_ms > 10000u ||
+        slot->state != USB_XHCI_SLOT_ADDRESSED || slot->controller->state != USB_XHCI_CONTROLLER_RUNNING ||
+        address != slot->address) return USB_INVALID;
+    struct usb_xhci_device_endpoint *endpoint = find_slot_endpoint(slot, endpoint_address);
+    if (!endpoint) return USB_INVALID;
+    if (endpoint->needs_dequeue) return USB_OK;
+    if (!endpoint->halted) return endpoint->transfer_pending || endpoint->faulted ? USB_BUSY : USB_OK;
+    if (endpoint->transfer_pending || endpoint->faulted || endpoint->ring.outstanding)
+        return USB_BUSY;
+    struct usb_xhci_trb command;
+    struct usb_xhci_event completion;
+    make_slot_command(&command, USB_XHCI_TRB_RESET_ENDPOINT, 0, slot->slot_id, false);
+    uint32_t control = get_le32(command.bytes + 12u) | ((uint32_t)endpoint->dci << 16);
+    put_le32(command.bytes + 12u, control); /* TSP=0 resets the USB2 data toggle. */
+    int result = usb_xhci_controller_command(slot->controller, &command, slot->slot_id,
+                                             timeout_ms, &completion);
+    if (!result) {
+        endpoint->halted = false;
+        endpoint->needs_dequeue = true;
+    } else if (slot->controller->state != USB_XHCI_CONTROLLER_RUNNING) {
+        endpoint->faulted = true;
+        slot->state = USB_XHCI_SLOT_FAULTED;
+    }
+    return result;
+}
+
+static int device_endpoint_transfer_one(struct usb_xhci_device_slot *slot,
+                                        struct usb_xhci_device_endpoint *endpoint,
+                                        void *buffer, size_t offset, size_t length,
+                                        uint32_t timeout_ms, size_t *actual)
+{
+    struct usb_xhci_controller *controller = slot->controller;
+    if (endpoint->transfer_pending || endpoint->faulted || endpoint->halted ||
+        endpoint->ring.faulted || endpoint->ring.outstanding) return USB_BUSY;
+    int result = endpoint_set_dequeue(slot, endpoint, timeout_ms);
+    if (result) return result;
+    if (length) {
+        result = usb_dma_alloc32(&slot->dma, length, 65536u, &endpoint->transfer_data);
+        if (result) return result;
+        if (!endpoint->input) copy_bytes(endpoint->transfer_data.cpu,
+                                         (const uint8_t *)buffer + offset, length);
+        result = usb_dma_sync(&slot->dma, &endpoint->transfer_data, 0, length,
+                              endpoint->input ? USB_DMA_FROM_DEVICE : USB_DMA_TO_DEVICE, true);
+        if (result) {
+            usb_dma_free(&slot->dma, &endpoint->transfer_data);
+            return result;
+        }
+    }
+
+    endpoint->input = (endpoint->descriptor.address & 0x80u) != 0;
+    struct usb_xhci_trb transfer = {{0}};
+    if (length) put_le64(transfer.bytes, endpoint->transfer_data.address);
+    put_le32(transfer.bytes + 8u, (uint32_t)length);
+    put_le32(transfer.bytes + 12u,
+             (USB_XHCI_TRB_NORMAL << USB_XHCI_TRB_TYPE_SHIFT) | USB_XHCI_TRB_IOC |
+             (endpoint->input ? USB_XHCI_TRB_ISP : 0u));
+    endpoint->transfer_length = (uint32_t)length;
+    endpoint->transfer_pending = true;
+    result = usb_xhci_transfer_ring_enqueue(&endpoint->ring, &transfer, 1u,
+                                           &endpoint->transfer_trb);
+    if (result) {
+        if (endpoint->ring.faulted) {
+            endpoint->faulted = true;
+            controller->state = USB_XHCI_CONTROLLER_FAULTED;
+            slot->state = USB_XHCI_SLOT_FAULTED;
+            return result;
+        }
+        endpoint->transfer_pending = false;
+        endpoint->transfer_trb = 0;
+        endpoint->transfer_length = 0;
+        usb_dma_free(&slot->dma, &endpoint->transfer_data);
+        return result;
+    }
+    uint32_t doorbell = controller->caps.doorbell_offset + (uint32_t)slot->slot_id * 4u;
+    result = guarded_write(controller, doorbell, endpoint->dci);
+    if (!result) { uint32_t posted; result = guarded_read(controller, doorbell, &posted); }
+    if (result) {
+        endpoint->faulted = true;
+        controller->state = USB_XHCI_CONTROLLER_FAULTED;
+        slot->state = USB_XHCI_SLOT_FAULTED;
+        return result;
+    }
+
+    uint32_t elapsed = 0, timeout_us = timeout_ms * 1000u;
+    for (;;) {
+        struct usb_xhci_event event;
+        result = read_event(controller, &event);
+        if (result == USB_AGAIN) {
+            if (elapsed >= timeout_us) break;
+            uint32_t delay = timeout_us - elapsed < POLL_US ? timeout_us - elapsed : POLL_US;
+            controller->mmio.delay_us(controller->mmio.context, delay);
+            elapsed += delay;
+            continue;
+        }
+        if (result) goto endpoint_transfer_failstop;
+        if (event.kind == USB_XHCI_EVENT_TRANSFER &&
+            event.data.transfer.slot_id == slot->slot_id &&
+            event.data.transfer.endpoint_id == endpoint->dci) {
+            if (!event.data.transfer.trb_pointer_valid || event.data.transfer.event_data ||
+                event.data.transfer.pointer_or_data != endpoint->transfer_trb ||
+                event.data.transfer.residual_bytes > endpoint->transfer_length) {
+                result = USB_PHASE_ERROR;
+                goto endpoint_transfer_failstop;
+            }
+            if (event.completion_code == USB_XHCI_CC_STALL_ERROR) {
+                uint32_t completed = 0;
+                result = usb_xhci_transfer_ring_complete_event(&endpoint->ring, &event,
+                                                              &completed);
+                if (result || completed != 1u) {
+                    result = result ? result : USB_PHASE_ERROR;
+                    goto endpoint_transfer_failstop;
+                }
+                size_t transferred = length - event.data.transfer.residual_bytes;
+                if (endpoint->input && transferred) {
+                    result = usb_dma_sync(&slot->dma, &endpoint->transfer_data, 0, length,
+                                          USB_DMA_FROM_DEVICE, false);
+                    if (result) goto endpoint_transfer_failstop;
+                    copy_bytes((uint8_t *)buffer + offset, endpoint->transfer_data.cpu,
+                               transferred);
+                }
+                endpoint->transfer_pending = false;
+                endpoint->transfer_trb = 0;
+                endpoint->transfer_length = 0;
+                endpoint->halted = true;
+                usb_dma_free(&slot->dma, &endpoint->transfer_data);
+                *actual = transferred;
+                return USB_STALL;
+            }
+            if (event.completion_code != USB_XHCI_CC_SUCCESS &&
+                event.completion_code != USB_XHCI_CC_SHORT_PACKET) {
+                result = USB_PHASE_ERROR;
+                goto endpoint_transfer_failstop;
+            }
+            if ((!endpoint->input && event.data.transfer.residual_bytes) ||
+                (event.completion_code == USB_XHCI_CC_SUCCESS &&
+                 event.data.transfer.residual_bytes)) {
+                result = USB_PHASE_ERROR;
+                goto endpoint_transfer_failstop;
+            }
+            uint32_t completed = 0;
+            result = usb_xhci_transfer_ring_complete_event(&endpoint->ring, &event,
+                                                          &completed);
+            if (result || completed != 1u) {
+                result = result ? result : USB_PHASE_ERROR;
+                goto endpoint_transfer_failstop;
+            }
+            size_t transferred = length - event.data.transfer.residual_bytes;
+            if (endpoint->input && transferred) {
+                result = usb_dma_sync(&slot->dma, &endpoint->transfer_data, 0, length,
+                                      USB_DMA_FROM_DEVICE, false);
+                if (result) goto endpoint_transfer_failstop;
+                copy_bytes((uint8_t *)buffer + offset, endpoint->transfer_data.cpu, transferred);
+            }
+            endpoint->transfer_pending = false;
+            endpoint->transfer_trb = 0;
+            endpoint->transfer_length = 0;
+            usb_dma_free(&slot->dma, &endpoint->transfer_data);
+            *actual = transferred;
+            return USB_OK;
+        }
+        result = retain_event(controller, &event);
+        if (result) goto endpoint_transfer_failstop;
+    }
+    result = USB_TIMEOUT;
+
+endpoint_transfer_failstop:
+    endpoint->faulted = true;
+    controller->state = USB_XHCI_CONTROLLER_FAULTED;
+    slot->state = USB_XHCI_SLOT_FAULTED;
+    return result;
+}
+
+static int device_endpoint_transfer(struct usb_xhci_device_slot *slot, uint8_t address,
+                                    uint8_t endpoint_address, void *buffer, size_t length,
+                                    size_t *actual, uint32_t timeout_ms,
+                                    uint8_t required_type, bool one_td)
+{
+    if (!slot || !slot->controller || !actual || !timeout_ms || timeout_ms > 10000u ||
+        (!buffer && length) || length > UINT32_MAX || address != slot->address ||
+        slot->state != USB_XHCI_SLOT_ADDRESSED ||
+        slot->controller->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    struct usb_xhci_device_endpoint *endpoint = find_slot_endpoint(slot, endpoint_address);
+    if (!endpoint || endpoint->descriptor.type != required_type) return USB_UNSUPPORTED;
+    bool input = (endpoint->descriptor.address & 0x80u) != 0;
+    if (one_td && (!input || !length)) return USB_UNSUPPORTED;
+    if (one_td && length > (size_t)endpoint->descriptor.max_packet *
+                               endpoint->descriptor.transactions) return USB_RANGE;
+    size_t total = 0;
+    bool once = false;
+    do {
+        size_t chunk = length - total;
+        if (chunk > 65536u) chunk = 65536u;
+        size_t transferred = 0;
+        int result = device_endpoint_transfer_one(slot, endpoint, buffer, total, chunk,
+                                                  timeout_ms, &transferred);
+        if (result) {
+            *actual = total + transferred;
+            return result;
+        }
+        total += transferred;
+        once = true;
+        if (transferred < chunk || one_td) break;
+    } while (total < length || !once);
+    *actual = total;
+    return USB_OK;
+}
+
+int usb_xhci_device_interrupt(struct usb_xhci_device_slot *slot, uint8_t address,
+                              uint8_t endpoint, void *buffer, size_t capacity,
+                              size_t *actual, uint32_t timeout_ms)
+{
+    return device_endpoint_transfer(slot, address, endpoint, buffer, capacity,
+                                    actual, timeout_ms, 3u, true);
+}
+
+int usb_xhci_device_bulk(struct usb_xhci_device_slot *slot, uint8_t address,
+                         uint8_t endpoint, void *buffer, size_t length,
+                         size_t *actual, uint32_t timeout_ms)
+{
+    return device_endpoint_transfer(slot, address, endpoint, buffer, length,
+                                    actual, timeout_ms, 2u, false);
+}
+
 int usb_xhci_device_disable(struct usb_xhci_device_slot *slot, uint32_t timeout_ms)
 {
     if (!slot || !slot->controller || !slot->slot_id ||
         slot->controller->state != USB_XHCI_CONTROLLER_RUNNING ||
         slot->state == USB_XHCI_SLOT_FAULTED || slot->control.pending) return USB_INVALID;
+    for (size_t i = 0; i < USB_XHCI_MAX_NONCONTROL_ENDPOINTS; ++i)
+        if (slot->endpoints[i].transfer_pending) return USB_BUSY;
     struct usb_xhci_trb command;
     struct usb_xhci_event completion;
     make_slot_command(&command, USB_XHCI_TRB_DISABLE_SLOT, 0, slot->slot_id, false);

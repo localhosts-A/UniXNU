@@ -22,6 +22,9 @@ struct mock_controller {
     size_t residue;
     unsigned phase, address_calls, endpoint_calls, controls, interrupts;
     unsigned bulk_calls, reset_commands, clear_features, endpoint_resets, disables;
+    unsigned operation_order, reset_order, tt_clear_order, clear_feature_order, tt_clear_calls;
+    uint16_t tt_clear_value, tt_clear_index;
+    uint8_t tt_clear_hub_address, tt_clear_route_depth;
     unsigned keyboard_reads, mouse_reads, fail_endpoint_at;
     uint8_t ep_in[4], ep_out[4];
     bool bad_ep0, stall_keyboard_protocol, bad_tag, fail_disable, fail_first_descriptor;
@@ -74,9 +77,18 @@ static int control(void *context, const struct usb_host_route *route, uint8_t ad
                    size_t *actual, uint32_t timeout_ms)
 {
     struct mock_controller *m = context;
-    assert(route && route->root_port == 2 && route->depth == 1 && route->hub_address[0] == 7 && route->hub_port[0] == 3);
     assert(setup && actual && timeout_ms && setup->length <= capacity && (!setup->length || data));
     ++m->controls; *actual = 0;
+    if (setup->type == 0x23 && setup->request == 8 && !setup->length) {
+        assert(route && route->root_port == 2 && route->depth == 0 && address == 7);
+        ++m->tt_clear_calls; m->tt_clear_value = setup->value;
+        m->tt_clear_index = setup->index; m->tt_clear_hub_address = address;
+        m->tt_clear_route_depth = route->depth;
+        m->tt_clear_order = ++m->operation_order;
+        return USB_OK;
+    }
+    assert(route && route->root_port == 2 && route->depth == 1 &&
+           route->hub_address[0] == 7 && route->hub_port[0] == 3);
     if (setup->request == 6 && setup->type == 0x80) {
         uint8_t kind = (uint8_t)(setup->value >> 8);
         uint8_t index = (uint8_t)setup->value;
@@ -127,7 +139,8 @@ static int control(void *context, const struct usb_host_route *route, uint8_t ad
         ++m->reset_commands; m->phase = 0; return USB_OK;
     }
     if (setup->type == 0x02 && setup->request == 1 && address == 5 && !setup->length && !setup->value) {
-        assert(setup->index == 0x83 || setup->index == 0x03); ++m->clear_features; return USB_OK;
+        assert(setup->index == 0x83 || setup->index == 0x03); ++m->clear_features;
+        m->clear_feature_order = ++m->operation_order; return USB_OK;
     }
     assert(0 && "unexpected control request"); return USB_IO;
 }
@@ -176,7 +189,8 @@ static int reset_endpoint(void *context, const struct usb_host_route *route,
                           uint8_t address, uint8_t endpoint)
 {
     struct mock_controller *m = context; assert(route && address == 5);
-    assert(endpoint == 0x83 || endpoint == 0x03); ++m->endpoint_resets; return USB_OK;
+    assert(endpoint == 0x83 || endpoint == 0x03); ++m->endpoint_resets;
+    m->reset_order = ++m->operation_order; return USB_OK;
 }
 static int disable_device(void *context, const struct usb_host_route *route, uint8_t address)
 {
@@ -345,6 +359,30 @@ static void test_enum_hid_bot_and_disconnect(void)
     assert(usb_host_disconnect(&device, key_event, pointer_event, &events) == USB_OK);
     assert(device.state == USB_HOST_EMPTY && !device.bot.present && events.key_count == keys_before + 1);
     assert(!events.down[events.key_count-1] && events.buttons == 0 && events.pointer_count == pointers_before + 1);
+}
+
+static void test_tt_bot_halt_recovery(void)
+{
+    struct mock_controller m = {0}; struct usb_host_device device = {0};
+    enumerate(&m, &device);
+    device.route.tt_hub_address = 7;
+    device.route.tt_port = 3;
+    device.route.multi_tt = true;
+    assert(device.bot_transport.clear_halt(device.bot_transport.context, 0x83) == USB_OK);
+    assert(m.tt_clear_calls == 1u && m.tt_clear_hub_address == 7u &&
+           m.tt_clear_route_depth == 0u && m.tt_clear_value == 0x9053u &&
+           m.tt_clear_index == 3u && m.reset_order < m.tt_clear_order &&
+           m.tt_clear_order < m.clear_feature_order);
+
+    unsigned previous_reset_order = m.reset_order;
+    device.route.multi_tt = false;
+    assert(device.bot_transport.clear_halt(device.bot_transport.context, 0x03) == USB_OK);
+    assert(m.tt_clear_calls == 2u && m.tt_clear_value == 0x1053u &&
+           m.tt_clear_index == 1u && m.reset_order > previous_reset_order &&
+           m.reset_order < m.tt_clear_order && m.tt_clear_order < m.clear_feature_order);
+    device.route.tt_hub_address = 0;
+    device.route.tt_port = 0;
+    assert(usb_host_disconnect(&device, NULL, NULL, NULL) == USB_OK);
 }
 
 static void test_two_phase_stop_and_release(void)
@@ -727,6 +765,7 @@ static void test_copied_boot_reports(void)
 int main(void)
 {
     test_enum_hid_bot_and_disconnect();
+    test_tt_bot_halt_recovery();
     test_two_phase_stop_and_release();
     test_stop_invalid_preconditions();
     test_invalid_assignment_cleanup();
@@ -734,6 +773,6 @@ int main(void)
     test_default_address_lifecycle();
     test_optional_class_and_errors();
     test_copied_boot_reports();
-    puts("PASS: USB production host enumeration/HID/BOT class routing, cleanup retention and fault cases");
+    puts("PASS: USB production host enumeration/HID/BOT class routing, TT recovery and cleanup retention");
     return 0;
 }

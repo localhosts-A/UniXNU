@@ -193,7 +193,8 @@ static void test_hid(void) {
 struct disk {
     uint8_t media[4096], cdb[16]; uint32_t tag, size, residue; uint64_t lba;
     unsigned phase, commands, writes, resets, clears, syncs;
-    bool input, partial_write, bad_tag, reset_fail, csw_stall, disconnected, capacity_bad;
+    bool input, partial_write, data_in_stall, bad_tag, reset_fail, csw_stall, disconnected, capacity_bad;
+    size_t data_in_stall_actual;
     bool read_only, reject_mode_all, reject_mode_page0, short_mode_sense;
     uint8_t status;
 };
@@ -236,6 +237,13 @@ static int bulk(void *ctx, uint8_t ep, void *buffer, size_t size, size_t *actual
             assert(size <= sizeof(d->media) - offset);
             if (d->input) memcpy(p, d->media + offset, size);
             else { ++d->writes; memcpy(d->media + offset, p, d->partial_write ? size / 2 : size); }
+            if (d->input && d->data_in_stall) {
+                assert(d->data_in_stall_actual <= size);
+                d->residue = (uint32_t)(size - d->data_in_stall_actual);
+                d->data_in_stall = false; d->phase = 2;
+                *actual = d->data_in_stall_actual;
+                return USB_STALL;
+            }
         } else assert(0);
         d->phase = 2;
         if (d->partial_write && !d->input) { *actual = size / 2; return USB_TIMEOUT; }
@@ -281,6 +289,11 @@ static void test_bot(void) {
     unsigned reset_base = disk.resets, clear_base = disk.clears;
     disk.csw_stall = true;
     assert(usb_bot_read(&bot, 2, 1, readback, 512) == USB_OK && disk.clears == clear_base + 1);
+    uint8_t read_cdb[10] = {0x28}; size_t completed = 0;
+    clear_base = disk.clears; disk.data_in_stall = true; disk.data_in_stall_actual = 256u;
+    assert(usb_bot_command(&bot, read_cdb, sizeof(read_cdb), true, readback,
+                           sizeof(readback), &completed) == USB_OK);
+    assert(completed == 256u && disk.clears == clear_base + 1u);
     disk.bad_tag = true;
     assert(usb_bot_read(&bot, 2, 1, readback, 512) == USB_PHASE_ERROR &&
            disk.resets == reset_base + 1 && disk.clears == clear_base + 3);

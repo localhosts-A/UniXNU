@@ -276,7 +276,7 @@ int usb_xhci_transfer_ring_init(struct usb_xhci_transfer_ring *ring, const struc
     }
     ring->entries = entries;
     ring->usable_entries = entries - 1u;
-    ring->producer_cycle = 1u;
+    ring->producer_cycle = ring->consumer_cycle = 1u;
     set_link_trb(ring, 0u);
     result = sync_transfer_ring(ring);
     if (result) {
@@ -292,7 +292,8 @@ int usb_xhci_transfer_ring_mark_active(struct usb_xhci_transfer_ring *ring)
     if (!ring || !ring->trbs.cpu || ring->controller_active) return USB_INVALID;
     if (ring->faulted) return USB_IO;
     if (ring->producer_index >= ring->usable_entries || ring->consumer_index >= ring->usable_entries ||
-        ring->outstanding > ring->usable_entries || ring->producer_cycle > 1u) return USB_INVALID;
+        ring->outstanding > ring->usable_entries || ring->producer_cycle > 1u ||
+        ring->consumer_cycle > 1u) return USB_INVALID;
     ring->controller_active = true;
     return USB_OK;
 }
@@ -308,7 +309,8 @@ int usb_xhci_transfer_ring_enqueue(struct usb_xhci_transfer_ring *ring, const st
     if (!ring || !ring->trbs.cpu || !items || !count) return USB_INVALID;
     if (ring->faulted) return USB_IO;
     if (ring->producer_index >= ring->usable_entries || ring->consumer_index >= ring->usable_entries ||
-        ring->outstanding > ring->usable_entries || ring->producer_cycle > 1u) return USB_INVALID;
+        ring->outstanding > ring->usable_entries || ring->producer_cycle > 1u ||
+        ring->consumer_cycle > 1u) return USB_INVALID;
     if (count > (size_t)(ring->usable_entries - ring->outstanding)) return USB_BUSY;
     for (size_t i = 0; i < count; ++i) {
         control = get_le32(items[i].bytes + 12);
@@ -421,6 +423,8 @@ int usb_xhci_transfer_ring_complete_through(struct usb_xhci_transfer_ring *ring,
     uint32_t distance = (index + ring->usable_entries - ring->consumer_index) % ring->usable_entries;
     if (distance >= ring->outstanding) return transfer_ring_fail(ring, USB_INVALID);
     uint32_t done = distance + 1u;
+    if ((uint64_t)ring->consumer_index + done >= ring->usable_entries)
+        ring->consumer_cycle ^= 1u;
     ring->consumer_index = (index + 1u) % ring->usable_entries;
     ring->outstanding -= done;
     *completed_trbs = done;
@@ -451,7 +455,7 @@ int usb_xhci_transfer_ring_halted(struct usb_xhci_transfer_ring *ring)
     ring->producer_index = 0;
     ring->consumer_index = 0;
     ring->outstanding = 0;
-    ring->producer_cycle = 1u;
+    ring->producer_cycle = ring->consumer_cycle = 1u;
     zero_bytes(ring->trbs.cpu, ring->trbs.size);
     set_link_trb(ring, 0u);
     int result = sync_transfer_ring(ring);

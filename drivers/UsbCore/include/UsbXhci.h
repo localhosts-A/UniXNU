@@ -15,13 +15,16 @@ extern "C" {
 #define USB_XHCI_PORT_BITMAP_BYTES 32u
 #define USB_XHCI_MAX_ROUTE_DEPTH 5u
 #define USB_XHCI_PENDING_EVENTS 32u
+#define USB_XHCI_MAX_NONCONTROL_ENDPOINTS 30u
 
 #define USB_XHCI_TRB_TYPE_SHIFT 10u
 #define USB_XHCI_TRB_TYPE_MASK 0x3fu
 #define USB_XHCI_TRB_CYCLE 0x00000001u
 #define USB_XHCI_TRB_TOGGLE_CYCLE 0x00000002u
 #define USB_XHCI_TRB_EVENT_DATA 0x00000004u
+#define USB_XHCI_TRB_ISP 0x00000004u
 #define USB_XHCI_TRB_CHAIN 0x00000010u
+#define USB_XHCI_TRB_IOC 0x00000020u
 
 enum usb_xhci_trb_type {
     USB_XHCI_TRB_NORMAL = 1,
@@ -152,7 +155,7 @@ struct usb_xhci_transfer_ring {
     uint32_t producer_index;
     uint32_t consumer_index;
     uint32_t outstanding;
-    uint8_t producer_cycle;
+    uint8_t producer_cycle, consumer_cycle;
     bool controller_active;
     bool faulted;
 };
@@ -295,6 +298,19 @@ int usb_xhci_control_finish(struct usb_xhci_control_td *, void *buffer, size_t c
 /* Only after controller/endpoint stop proof and ring_halted has succeeded. */
 int usb_xhci_control_release_stopped(struct usb_xhci_control_td *);
 
+/* USB2 bulk/interrupt endpoint state. One synchronous TD may be active per
+ * endpoint. Buffers and rings remain owned until a completion event or a fresh
+ * controller/slot stop proof. */
+struct usb_xhci_device_endpoint {
+    struct usb_endpoint descriptor;
+    struct usb_xhci_transfer_ring ring;
+    struct usb_dma_buffer transfer_data;
+    uint64_t transfer_trb;
+    uint32_t transfer_length;
+    uint8_t dci;
+    bool configured, transfer_pending, halted, needs_dequeue, faulted, input;
+};
+
 enum usb_xhci_device_slot_state {
     USB_XHCI_SLOT_EMPTY, USB_XHCI_SLOT_ENABLED, USB_XHCI_SLOT_DEFAULT,
     USB_XHCI_SLOT_ADDRESSED, USB_XHCI_SLOT_FAULTED
@@ -306,6 +322,7 @@ struct usb_xhci_device_slot {
     struct usb_dma_buffer output_context, input_context;
     struct usb_xhci_transfer_ring ep0;
     struct usb_xhci_control_td control;
+    struct usb_xhci_device_endpoint endpoints[USB_XHCI_MAX_NONCONTROL_ENDPOINTS];
     enum usb_xhci_device_slot_state state;
     enum usb_xhci_speed speed;
     uint8_t slot_id, address, ep0_max_packet;
@@ -330,6 +347,20 @@ int usb_xhci_device_configure_hub(struct usb_xhci_device_slot *, uint8_t port_co
 int usb_xhci_device_control(struct usb_xhci_device_slot *, uint8_t address,
                             const struct usb_setup *, void *, size_t capacity,
                             size_t *actual, uint32_t timeout_ms);
+/* Configure USB2 bulk/interrupt endpoints after SET_CONFIGURATION. Endpoint
+ * addresses and descriptors are validated against the addressed slot speed. */
+int usb_xhci_device_configure_endpoint(struct usb_xhci_device_slot *,
+                                       const struct usb_endpoint *);
+int usb_xhci_device_interrupt(struct usb_xhci_device_slot *, uint8_t address,
+                              uint8_t endpoint, void *, size_t capacity,
+                              size_t *actual, uint32_t timeout_ms);
+int usb_xhci_device_bulk(struct usb_xhci_device_slot *, uint8_t address,
+                         uint8_t endpoint, void *, size_t length,
+                         size_t *actual, uint32_t timeout_ms);
+/* After a STALL, issue Reset Endpoint before the caller clears the device-side
+ * halt. The next transfer programs Set TR Dequeue Pointer before ringing. */
+int usb_xhci_device_reset_endpoint(struct usb_xhci_device_slot *, uint8_t address,
+                                   uint8_t endpoint, uint32_t timeout_ms);
 /* Disable Slot is the stop proof while the controller runs. On controller stop,
  * call release_stopped to reclaim retained slot/context/ring DMA after reset. */
 int usb_xhci_device_disable(struct usb_xhci_device_slot *, uint32_t timeout_ms);

@@ -72,11 +72,22 @@ bounded queue and waits for short-IN status completion. Disable Slot is the
 per-slot stop proof before context/ring memory is released; uncertain commands
 and transfers retain ownership until controller stop/reset succeeds.
 
+The controller now configures USB2 bulk and interrupt endpoint contexts and
+offers synchronous Normal-TRB transfers. Bulk requests are split into 64 KiB
+chunks; interrupt reads use one packet-sized TD. Short IN completions report
+the received byte count. A STALL retires its completed TD and requires the
+owner to Reset Endpoint; for bulk behind a TT it then clears the TT buffer,
+followed by the device-side halt. The next transfer sets the dequeue pointer
+before ringing the endpoint doorbell. Timed-out or malformed transfers retain DMA
+until controller stop/reset is proven.
+
 These are portable controller functions, not yet a production
-`usb_host_ops` backend. The platform owner still must own root-port power and wire reset/event handling,
-map USB hub addresses to xHCI slot IDs, poll and route events, configure
-non-control endpoints/transfers, translate IRQs, supply qualified DMA/IOMMU
-mapping, and publish HID/BOT services. Those runtime owners remain required.
+`usb_host_ops` backend. A caller must serialize controller access and route
+events to the synchronous operation that owns them. The platform/OS owner still
+must own root-port power and reset policy, map USB hub addresses/routes to xHCI
+slot IDs, bind every `usb_host_ops` callback, translate IRQs, supply qualified
+DMA/IOMMU mapping, and publish HID/BOT services. Asynchronous transfers and
+canceling an in-flight transfer are not provided here.
 
 `usb_xhci_root_port_reset()` now resets an already powered USB2 root port with
 all earlier queued events drained by the owner. Completion requires both

@@ -55,7 +55,8 @@ struct usb_host_ops {
                      uint32_t timeout_ms);
     int (*bulk)(void *, const struct usb_host_route *, uint8_t address,
                 uint8_t endpoint, void *, size_t, size_t *, uint32_t timeout_ms);
-    /* Reset the controller-side endpoint state after CLEAR_FEATURE succeeds. */
+    /* Reset the controller-side endpoint before device-side CLEAR_FEATURE.
+     * The next transfer resumes the endpoint only after both steps succeed. */
     int (*reset_endpoint)(void *, const struct usb_host_route *, uint8_t address,
                           uint8_t endpoint);
     /* Must halt/cancel every endpoint and release slot/DMA only after a fresh

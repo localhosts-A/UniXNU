@@ -259,19 +259,54 @@ static int host_bot_bulk(void *context, uint8_t endpoint, void *data, size_t siz
     return result;
 }
 
+static int host_bot_clear_tt_buffer(struct usb_host_device *device, uint8_t endpoint)
+{
+    if (!device->route.tt_hub_address) return USB_OK;
+    if (!device->route.tt_port || !device->route.depth || !device->ops.control)
+        return USB_PHASE_ERROR;
+    struct usb_host_route tt_route = {0};
+    tt_route.root_port = device->route.root_port;
+    uint8_t target_depth = device->route.depth;
+    for (uint8_t i = 0; i < device->route.depth; ++i) {
+        if (device->route.hub_address[i] == device->route.tt_hub_address) {
+            target_depth = i;
+            break;
+        }
+        tt_route.hub_address[i] = device->route.hub_address[i];
+        tt_route.hub_port[i] = device->route.hub_port[i];
+    }
+    if (target_depth == device->route.depth) return USB_PHASE_ERROR;
+    tt_route.depth = target_depth;
+    uint16_t tt_port = device->route.multi_tt ? device->route.tt_port : 1u;
+    uint32_t value_bits = (uint32_t)(endpoint & 0x0fu) |
+                          ((uint32_t)device->address << 4) | (2u << 11) |
+                          ((endpoint & 0x80u) ? (1u << 15) : 0u);
+    uint16_t value = (uint16_t)value_bits;
+    struct usb_setup setup = {0x23u, 8u, value, tt_port, 0u};
+    size_t actual = 0;
+    int result = device->ops.control(device->ops.context, &tt_route,
+                                    device->route.tt_hub_address, &setup,
+                                    NULL, 0, &actual, 1000u);
+    if (!result && actual) return USB_PHASE_ERROR;
+    return result;
+}
+
 static int host_bot_clear_halt(void *context, uint8_t endpoint)
 {
     struct usb_host_device *device = context;
     if (!device || device->state != USB_HOST_CONFIGURED || !endpoint ||
         (endpoint & 0x70) || !(endpoint & 15)) return USB_INVALID;
-    size_t actual = 0;
-    int result = host_control(device, device->address, 0x02, 1, 0, endpoint,
-                              NULL, 0, 0, &actual);
-    if (!result && actual) return USB_PHASE_ERROR;
-    if (result) return result;
     if (!device->ops.reset_endpoint) return USB_UNSUPPORTED;
-    return device->ops.reset_endpoint(device->ops.context, &device->route,
-                                      device->address, endpoint);
+    int result = device->ops.reset_endpoint(device->ops.context, &device->route,
+                                             device->address, endpoint);
+    if (result) return result;
+    result = host_bot_clear_tt_buffer(device, endpoint);
+    if (result) return result;
+    size_t actual = 0;
+    result = host_control(device, device->address, 0x02, 1, 0, endpoint,
+                          NULL, 0, 0, &actual);
+    if (!result && actual) return USB_PHASE_ERROR;
+    return result;
 }
 
 static int abort_enumeration(struct usb_host_device *device, int failure)

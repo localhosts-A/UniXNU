@@ -36,13 +36,22 @@ struct model {
     struct usb_xhci_controller *controller;
     struct usb_xhci_device_slot *slot;
     uint32_t event_index;
+    uint32_t operation_order, last_endpoint_doorbell_order, last_set_dequeue_order;
+    unsigned configure_endpoint_commands, reset_endpoint_commands, set_dequeue_commands;
+    unsigned endpoint_doorbells;
+    uint32_t last_command_control, last_command_dword0, last_command_dword1;
+    uint8_t last_command_type;
     uint8_t event_cycle, next_slot, next_usb_address;
     uint8_t port_reset_speed;
+    uint8_t endpoint_completion_code, endpoint_pattern_start;
+    uint32_t endpoint_residual;
+    const uint8_t *expected_out_data;
+    size_t expected_out_size;
     uint8_t device_descriptor[8];
     bool applied_error, guard_denied, guard_blocked, stuck_halt, stuck_reset, pending_on_reset;
     bool port_reset_overcurrent, port_reset_no_event, port_reset_unrelated_event;
     bool allow_live_release;
-    bool auto_commands, auto_control;
+    bool auto_commands, auto_control, auto_endpoint, endpoint_output_matches;
 };
 
 static void put_le32(uint8_t *p, uint32_t value);
@@ -59,6 +68,8 @@ static void init_model(struct model *m, unsigned scratchpads)
     m->device_descriptor[0] = 18u; m->device_descriptor[1] = 1u;
     m->device_descriptor[2] = 0u; m->device_descriptor[3] = 2u;
     m->device_descriptor[7] = 8u;
+    m->endpoint_completion_code = USB_XHCI_CC_SUCCESS;
+    m->endpoint_pattern_start = 0xa0u;
     m->regs[0] = 0x01000040u;
     m->regs[1] = 8u | (1u << 8) | (4u << 24);
     m->regs[2] = ((scratchpads & 31u) << 27) | ((scratchpads >> 5) << 21);
@@ -140,6 +151,17 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
             uint32_t control = get_le32(command + 12u);
             uint32_t type = (control >> USB_XHCI_TRB_TYPE_SHIFT) & USB_XHCI_TRB_TYPE_MASK;
             uint8_t slot_id = (uint8_t)(control >> 24);
+            ++m->operation_order;
+            m->last_command_type = (uint8_t)type;
+            m->last_command_control = control;
+            m->last_command_dword0 = get_le32(command);
+            m->last_command_dword1 = get_le32(command + 4u);
+            if (type == USB_XHCI_TRB_CONFIGURE_ENDPOINT) ++m->configure_endpoint_commands;
+            if (type == USB_XHCI_TRB_RESET_ENDPOINT) ++m->reset_endpoint_commands;
+            if (type == USB_XHCI_TRB_SET_TR_DEQUEUE) {
+                ++m->set_dequeue_commands;
+                m->last_set_dequeue_order = m->operation_order;
+            }
             if (type == USB_XHCI_TRB_ENABLE_SLOT) slot_id = m->next_slot++;
             if (type == USB_XHCI_TRB_ADDRESS_DEVICE && m->slot &&
                 m->slot->slot_id == slot_id && m->slot->output_context.cpu) {
@@ -150,11 +172,23 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
             }
             if (type == USB_XHCI_TRB_CONFIGURE_ENDPOINT && m->slot &&
                 m->slot->slot_id == slot_id && m->slot->output_context.cpu) {
-                uint8_t *in_slot = (uint8_t *)m->slot->input_context.cpu +
-                                   m->controller->caps.context_bytes;
-                uint32_t state = get_le32((uint8_t *)m->slot->output_context.cpu + 12u);
-                memcpy(m->slot->output_context.cpu, in_slot, m->controller->caps.context_bytes);
-                put_le32((uint8_t *)m->slot->output_context.cpu + 12u, state);
+                uint8_t stride = m->controller->caps.context_bytes;
+                uint8_t *input = m->slot->input_context.cpu;
+                uint8_t *output = m->slot->output_context.cpu;
+                uint32_t add_flags = get_le32(input + 4u);
+                if (add_flags & 1u) {
+                    uint32_t state = get_le32(output + 12u);
+                    memcpy(output, input + stride, stride);
+                    put_le32(output + 12u, state);
+                }
+                for (uint8_t dci = 1u; dci <= 31u; ++dci) {
+                    if (!(add_flags & (1u << dci))) continue;
+                    size_t context_offset = (size_t)(dci + 1u) * stride;
+                    memcpy(output + (size_t)dci * stride, input + context_offset, stride);
+                    size_t output_offset = (size_t)dci * stride;
+                    uint32_t ep0 = get_le32(output + output_offset);
+                    put_le32(output + output_offset, (ep0 & ~7u) | 1u);
+                }
             }
             event_at(m->controller, m->event_index, m->event_cycle,
                      USB_XHCI_TRB_COMMAND_EVENT, address, USB_XHCI_CC_SUCCESS,
@@ -173,6 +207,34 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
                      USB_XHCI_TRB_TRANSFER_EVENT, m->slot->control.status_trb,
                      USB_XHCI_CC_SUCCESS,
                      ((uint32_t)m->slot->slot_id << 24) | (1u << 16));
+            if (++m->event_index == m->controller->events.entries) {
+                m->event_index = 0; m->event_cycle ^= 1u;
+            }
+        } else if (offset >= 0x604u && m->auto_endpoint && m->slot &&
+                   offset == 0x600u + (uint32_t)m->slot->slot_id * 4u &&
+                   value >= 2u && value <= 31u) {
+            uint8_t dci = (uint8_t)value;
+            struct usb_xhci_device_endpoint *endpoint = &m->slot->endpoints[dci - 2u];
+            assert(endpoint->transfer_pending && endpoint->dci == dci);
+            ++m->endpoint_doorbells;
+            m->last_endpoint_doorbell_order = ++m->operation_order;
+            if (endpoint->input && endpoint->transfer_data.cpu) {
+                uint8_t *data = endpoint->transfer_data.cpu;
+                for (uint32_t i = 0; i < endpoint->transfer_length; ++i)
+                    data[i] = (uint8_t)(m->endpoint_pattern_start + i);
+            } else if (m->expected_out_data) {
+                m->endpoint_output_matches = endpoint->transfer_length == m->expected_out_size &&
+                    !memcmp(endpoint->transfer_data.cpu, m->expected_out_data,
+                            m->expected_out_size);
+            }
+            event_at(m->controller, m->event_index, m->event_cycle,
+                     USB_XHCI_TRB_TRANSFER_EVENT, endpoint->transfer_trb,
+                     m->endpoint_completion_code,
+                     ((uint32_t)m->slot->slot_id << 24) | ((uint32_t)dci << 16));
+            put_le32((uint8_t *)m->controller->events.trbs.cpu +
+                     (size_t)m->event_index * USB_XHCI_TRB_BYTES + 8u,
+                     ((uint32_t)m->endpoint_completion_code << 24) |
+                     (m->endpoint_residual & 0x00ffffffu));
             if (++m->event_index == m->controller->events.entries) {
                 m->event_index = 0; m->event_cycle ^= 1u;
             }
@@ -775,6 +837,173 @@ static void test_device_slots_and_routing(void)
     }
     puts("PASS: xHCI Enable Slot, BSR/address, routed hub TT context and retained cleanup model");
 }
+
+static void test_noncontrol_endpoints(void)
+{
+    struct model m; init_model(&m, 0); m.auto_commands = true; m.auto_control = true;
+    struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    struct usb_xhci_device_slot slot = {0}; m.slot = &slot;
+    struct usb_xhci_route route = {.root_port = 1};
+    bool cleanup = false;
+    assert(usb_xhci_device_prepare(&slot, c, &route, USB_XHCI_SPEED_HIGH,
+                                   &cleanup) == USB_OK && cleanup);
+    uint8_t address = 0;
+    assert(usb_xhci_device_address(&slot, 64u, &address) == USB_OK && address == 1u);
+
+    struct usb_endpoint bulk_out = {0x02, 2, 8, 512, 0, 1};
+    struct usb_endpoint bulk_in = {0x82, 2, 8, 512, 0, 1};
+    struct usb_endpoint interrupt_in = {0x81, 3, 4, 8, 0, 1};
+    struct usb_endpoint high_bandwidth = {0x83, 3, 1, 1024, 0, 3};
+    struct usb_endpoint invalid = {0x84, 3, 0, 8, 0, 1};
+    assert(usb_xhci_device_configure_endpoint(&slot, &invalid) == USB_INVALID);
+    assert(usb_xhci_device_configure_endpoint(&slot, &bulk_out) == USB_OK);
+    assert(usb_xhci_device_configure_endpoint(&slot, &bulk_in) == USB_OK);
+    assert(usb_xhci_device_configure_endpoint(&slot, &interrupt_in) == USB_OK);
+    assert(usb_xhci_device_configure_endpoint(&slot, &high_bandwidth) == USB_OK);
+    assert(m.configure_endpoint_commands == 4u);
+    uint8_t *contexts = slot.output_context.cpu;
+    assert(((get_le32(contexts) >> 27) & 0x1fu) == 7u);
+    assert(((get_le32(contexts + 4u * 64u) >> 16) & 0xffu) == 8u);
+    uint32_t bulk_out_info = get_le32(contexts + 4u * 64u + 4u);
+    assert((bulk_out_info & 0x3fu) == ((3u << 1) | (2u << 3)));
+    assert((bulk_out_info >> 16) == 512u);
+    uint32_t interrupt_info = get_le32(contexts + 3u * 64u);
+    assert(((interrupt_info >> 16) & 0xffu) == 3u);
+    uint32_t high_bandwidth_info = get_le32(contexts + 7u * 64u + 4u);
+    assert(((high_bandwidth_info >> 8) & 0xffu) == 2u);
+    assert(((high_bandwidth_info >> 16) & 0xffffu) == 1024u);
+    assert((get_le32(contexts + 7u * 64u + 16u) >> 16) == 3072u);
+
+    m.auto_endpoint = true;
+    const uint8_t out_data[] = {0x11, 0x22, 0x33, 0x44};
+    m.expected_out_data = out_data; m.expected_out_size = sizeof(out_data);
+    uint8_t actual_buffer[16]; size_t actual = 99;
+    m.allow_live_release = true; /* The completed TD releases its private bounce buffer. */
+    assert(usb_xhci_device_bulk(&slot, address, 0x02, (void *)out_data,
+                                sizeof(out_data), &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == sizeof(out_data) && m.endpoint_output_matches);
+    m.expected_out_data = NULL; m.expected_out_size = 0;
+
+    m.endpoint_completion_code = USB_XHCI_CC_SHORT_PACKET;
+    m.endpoint_residual = 2u; m.endpoint_pattern_start = 0x30u;
+    memset(actual_buffer, 0xee, sizeof(actual_buffer)); actual = 99;
+    m.allow_live_release = true;
+    assert(usb_xhci_device_bulk(&slot, address, 0x82, actual_buffer, 8u,
+                                &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == 6u && actual_buffer[0] == 0x30u && actual_buffer[5] == 0x35u &&
+           actual_buffer[6] == 0xeeu);
+
+    queue_model_event(&m, USB_XHCI_TRB_PORT_STATUS_EVENT, 1u << 24,
+                      USB_XHCI_CC_SUCCESS, 0);
+    m.endpoint_residual = 3u; m.endpoint_pattern_start = 0xa0u;
+    memset(actual_buffer, 0xee, sizeof(actual_buffer)); actual = 99;
+    m.allow_live_release = true;
+    assert(usb_xhci_device_interrupt(&slot, address, 0x81, actual_buffer, 8u,
+                                     &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == 5u && actual_buffer[0] == 0xa0u && actual_buffer[4] == 0xa4u &&
+           actual_buffer[5] == 0xeeu);
+    struct usb_xhci_event preserved;
+    assert(usb_xhci_controller_next_event(c, &preserved) == USB_OK &&
+           preserved.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE);
+
+    m.endpoint_completion_code = USB_XHCI_CC_STALL_ERROR;
+    m.endpoint_residual = 2u;
+    m.allow_live_release = true;
+    assert(usb_xhci_device_interrupt(&slot, address, 0x81, actual_buffer, 8u,
+                                     &actual, 100u) == USB_STALL);
+    m.allow_live_release = false;
+    struct usb_xhci_device_endpoint *endpoint = &slot.endpoints[3u - 2u];
+    assert(actual == 6u && actual_buffer[0] == 0xa0u && actual_buffer[5] == 0xa5u &&
+           endpoint->halted && !endpoint->transfer_pending &&
+           endpoint->ring.outstanding == 0 && c->state == USB_XHCI_CONTROLLER_RUNNING);
+    assert(usb_xhci_device_reset_endpoint(&slot, address, 0x81, 100u) == USB_OK);
+    assert(m.reset_endpoint_commands == 1u && m.last_command_type == USB_XHCI_TRB_RESET_ENDPOINT);
+    assert(((m.last_command_control >> 16) & 0x1fu) == endpoint->dci &&
+           !(m.last_command_control & (1u << 9)) && !endpoint->halted && endpoint->needs_dequeue);
+
+    struct usb_setup clear_halt = {0x02, 1, 0, 0x81, 0};
+    assert(usb_xhci_device_control(&slot, address, &clear_halt, NULL, 0,
+                                   &actual, 100u) == USB_OK && actual == 0);
+    uint64_t expected_dequeue = (endpoint->ring.trbs.address +
+                                 (uint64_t)endpoint->ring.consumer_index * USB_XHCI_TRB_BYTES) |
+                                endpoint->ring.consumer_cycle;
+    m.endpoint_completion_code = USB_XHCI_CC_SUCCESS;
+    m.endpoint_residual = 0;
+    m.allow_live_release = true;
+    assert(usb_xhci_device_interrupt(&slot, address, 0x81, actual_buffer, 8u,
+                                     &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(m.set_dequeue_commands == 1u && !endpoint->needs_dequeue &&
+           m.last_set_dequeue_order < m.last_endpoint_doorbell_order);
+    assert(m.last_command_type == USB_XHCI_TRB_SET_TR_DEQUEUE &&
+           m.last_command_dword0 == (uint32_t)expected_dequeue);
+
+    /* Complete the 15-TRB ring lap and reset a stalled endpoint at DCS=0. */
+    for (unsigned i = 0; i < 12u; ++i) {
+        actual = 99;
+        m.allow_live_release = true;
+        assert(usb_xhci_device_interrupt(&slot, address, 0x81, actual_buffer, 8u,
+                                         &actual, 100u) == USB_OK);
+        m.allow_live_release = false;
+        assert(actual == 8u);
+    }
+    assert(endpoint->ring.consumer_index == 0u && endpoint->ring.consumer_cycle == 0u &&
+           endpoint->ring.producer_index == 0u && endpoint->ring.producer_cycle == 0u);
+    m.endpoint_completion_code = USB_XHCI_CC_STALL_ERROR;
+    m.endpoint_residual = 2u;
+    m.allow_live_release = true;
+    assert(usb_xhci_device_interrupt(&slot, address, 0x81, actual_buffer, 8u,
+                                     &actual, 100u) == USB_STALL);
+    m.allow_live_release = false;
+    assert(actual == 6u && endpoint->halted);
+    assert(usb_xhci_device_reset_endpoint(&slot, address, 0x81, 100u) == USB_OK);
+    assert(usb_xhci_device_control(&slot, address, &clear_halt, NULL, 0,
+                                   &actual, 100u) == USB_OK && actual == 0);
+    expected_dequeue = (endpoint->ring.trbs.address +
+                        (uint64_t)endpoint->ring.consumer_index * USB_XHCI_TRB_BYTES) |
+                       endpoint->ring.consumer_cycle;
+    m.endpoint_completion_code = USB_XHCI_CC_SUCCESS;
+    m.endpoint_residual = 0u;
+    m.allow_live_release = true;
+    assert(usb_xhci_device_interrupt(&slot, address, 0x81, actual_buffer, 8u,
+                                     &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(m.set_dequeue_commands == 2u && !endpoint->needs_dequeue &&
+           m.last_command_type == USB_XHCI_TRB_SET_TR_DEQUEUE &&
+           m.last_command_dword0 == (uint32_t)expected_dequeue &&
+           !(m.last_command_dword0 & 1u));
+
+    m.allow_live_release = true;
+    assert(usb_xhci_device_disable(&slot, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* A timed-out Normal TRB retains its bounce buffer until controller stop. */
+    init_model(&m, 0); m.auto_commands = true;
+    c = new_controller(); assert(start(&m, c) == USB_OK);
+    struct usb_xhci_device_slot timed = {0}; m.slot = &timed;
+    assert(usb_xhci_device_prepare(&timed, c, &route, USB_XHCI_SPEED_HIGH,
+                                   &cleanup) == USB_OK);
+    assert(usb_xhci_device_address(&timed, 64u, &address) == USB_OK);
+    assert(usb_xhci_device_configure_endpoint(&timed, &interrupt_in) == USB_OK);
+    uint8_t timed_buffer[8] = {0};
+    assert(usb_xhci_device_interrupt(&timed, address, 0x81, timed_buffer,
+                                     sizeof(timed_buffer), &actual, 1u) == USB_TIMEOUT);
+    assert(c->state == USB_XHCI_CONTROLLER_FAULTED &&
+           timed.endpoints[3u - 2u].transfer_pending &&
+           timed.endpoints[3u - 2u].transfer_data.cpu && !m.releases);
+    assert(usb_xhci_controller_stop(c) == USB_OK);
+    assert(usb_xhci_device_release_stopped(&timed) == USB_OK &&
+           m.allocations == m.releases);
+    free(c);
+    puts("PASS: xHCI USB2 non-control endpoint contexts, transfers, STALL recovery and retained timeout");
+}
+
 static void test_running_schedule(void)
 {
     struct model m; init_model(&m, 3);
@@ -935,7 +1164,8 @@ static void test_guards_and_timeouts(void)
 int main(void)
 {
     test_running_schedule(); test_failure_retention(); test_guards_and_timeouts(); test_commands_and_events();
-    test_control_transfer(); test_device_slots_and_routing(); test_root_port_reset();
+    test_control_transfer(); test_device_slots_and_routing(); test_noncontrol_endpoints();
+    test_root_port_reset();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
 }
