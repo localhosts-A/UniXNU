@@ -36,6 +36,9 @@
   ## Optional protocol for tools listed in UniXNU's Tools menu.
   gUniXNUMenuPluginProtocolGuid = { 0x1a9b2c4d, 0x5e6f, 0x4789, { 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x9a } }
 
+  ## Optional platform storage handoff before the final Darwin boot transition.
+  gUniXNUStorageQuiesceProtocolGuid = { 0x7b5cf50b, 0xae2b, 0x4ed6, { 0x8b, 0x8c, 0x9a, 0x8a, 0xc9, 0xd6, 0x11, 0x6f } }
+
 [PcdsFixedAtBuild]
   ## DEBUG() level used for UniXNU's own log lines. Platforms whose debug
   #  output shares the screen with the menu can lower it to DEBUG_VERBOSE.
