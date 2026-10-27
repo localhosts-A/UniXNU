@@ -11,7 +11,7 @@ extern "C" {
 #define USB_XHCI_MAX_TRANSFER_RING_ENTRIES 4096u
 #define USB_XHCI_MIN_TRANSFER_RING_ENTRIES 4u
 #define USB_XHCI_MIN_EVENT_RING_ENTRIES 16u
-#define USB_XHCI_MAX_EVENT_RING_ENTRIES 65535u
+#define USB_XHCI_MAX_EVENT_RING_ENTRIES 4096u
 #define USB_XHCI_PORT_BITMAP_BYTES 32u
 
 #define USB_XHCI_TRB_TYPE_SHIFT 10u
@@ -137,9 +137,11 @@ struct usb_xhci_transfer_ring {
 };
 
 /* One-segment ring with an explicit Link TRB. Descriptor memory must be DMA32,
- * 64-byte aligned and hardware coherent. Caller serializes submit/completion
+ * hardware coherent and entirely within one 64 KiB region. Caller serializes submit/completion
  * processing, consumes events in event-ring order, and rings the appropriate
- * xHCI doorbell only after submit returns. */
+ * xHCI doorbell only after submit returns. A multi-TRB submission is handed
+ * to the controller by publishing its first TRB last, even if the controller
+ * is still polling after an earlier doorbell. */
 int usb_xhci_transfer_ring_init(struct usb_xhci_transfer_ring *, const struct usb_dma_ops *, uint32_t entries);
 int usb_xhci_transfer_ring_mark_active(struct usb_xhci_transfer_ring *);
 int usb_xhci_transfer_ring_enqueue(struct usb_xhci_transfer_ring *, const struct usb_xhci_trb *,
@@ -165,7 +167,8 @@ struct usb_xhci_event_ring {
 };
 
 /* The event ring is a single ERST segment. Its event/ERST memory is DMA32,
- * 64-byte aligned and hardware coherent. The owner writes ERSTBA/ERSTSZ and
+ * 64-byte aligned and hardware coherent; the event segment is padded to a
+ * 64-byte extent and does not cross a 64 KiB boundary. The owner writes ERSTBA/ERSTSZ and
  * ERDP through its own MMIO backend and then marks the ring active. */
 int usb_xhci_event_ring_init(struct usb_xhci_event_ring *, const struct usb_dma_ops *, uint32_t entries);
 int usb_xhci_event_ring_mark_active(struct usb_xhci_event_ring *);

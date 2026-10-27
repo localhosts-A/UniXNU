@@ -46,9 +46,11 @@ be proven. This is a controller contract, not an xHCI backend implementation.
 `UsbXhci.c` is the portable low-level xHCI foundation: it validates capability
 register windows and USB2 Supported Protocol port ranges without writing MMIO,
 and owns coherent DMA32 command/transfer-ring and event-ring memory. It publishes
-TRBs with cycle ordering, tracks completion pointers, validates event cycles and
-retains memory after synchronization or completion faults until the caller
-provides a fresh stop proof. It does not start the controller, issue doorbells,
+TRBs with the first entry published last, tracks completion pointers, validates
+event cycles and retains memory after synchronization or completion faults until
+the caller provides a fresh stop proof. Each single ring segment fits within a
+64 KiB boundary, and event segments reserve full 64-byte lines with at most 4096
+TRBs as required by xHCI 1.2 sections 4.9 and 6.5. It does not start the controller, issue doorbells,
 translate IRQs, provide a DMA/IOMMU mapping, populate `usb_host_ops`, or publish
 HID/BOT services. Those runtime owners remain required.
 

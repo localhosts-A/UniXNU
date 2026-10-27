@@ -54,6 +54,17 @@ static bool ranges_overlap(uint32_t first, uint32_t first_size, uint32_t second,
     return (uint64_t)first < second_end && (uint64_t)second < first_end;
 }
 
+/* xHCI 1.2 sections 4.9 and 6.5: a ring segment must fit within a
+ * 64 KiB region; event segments also reserve complete 64-byte cache lines.
+ * The next power-of-two alignment is at most 64 KiB and divides that region,
+ * so an allocation of this size cannot straddle its boundary. */
+static size_t ring_segment_alignment(size_t bytes)
+{
+    size_t alignment = 64u;
+    while (alignment < bytes) alignment *= 2u;
+    return alignment;
+}
+
 static int read_reg(const struct usb_mmio *mmio, uint32_t offset, uint32_t *value)
 {
     if (!range_inside(mmio->size, offset, 4u)) return USB_RANGE;
@@ -255,7 +266,8 @@ int usb_xhci_transfer_ring_init(struct usb_xhci_transfer_ring *ring, const struc
     if (entries < USB_XHCI_MIN_TRANSFER_RING_ENTRIES || entries > USB_XHCI_MAX_TRANSFER_RING_ENTRIES)
         return USB_RANGE;
     ring->dma = *dma;
-    int result = usb_dma_alloc32(&ring->dma, (size_t)entries * USB_XHCI_TRB_BYTES, 64u, &ring->trbs);
+    size_t bytes = (size_t)entries * USB_XHCI_TRB_BYTES;
+    int result = usb_dma_alloc32(&ring->dma, bytes, ring_segment_alignment(bytes), &ring->trbs);
     if (result) { zero_bytes(ring, sizeof(*ring)); return result; }
     if (!ring->trbs.coherent) {
         usb_dma_free(&ring->dma, &ring->trbs);
@@ -359,16 +371,30 @@ int usb_xhci_transfer_ring_enqueue(struct usb_xhci_transfer_ring *ring, const st
     index = ring->producer_index;
     cycle = ring->producer_cycle;
     uint64_t first_dma = ring->trbs.address + (uint64_t)index * USB_XHCI_TRB_BYTES;
+    /* A running xHC may already be polling this ring from an earlier
+     * doorbell. Publish every later TRB first, including across the Link TRB,
+     * while the first TRB remains cycle-invalid. The intervening DMA sync is
+     * the release barrier before handing over that first TRB. */
     for (size_t i = 0; i < count; ++i) {
         uint8_t *slot = (uint8_t *)ring->trbs.cpu + (size_t)index * USB_XHCI_TRB_BYTES;
-        control = get_le32(slot + 12);
-        control = (control & ~USB_XHCI_TRB_CYCLE) | (cycle ? USB_XHCI_TRB_CYCLE : 0u);
-        put_le32(slot + 12, control);
+        if (i != 0) {
+            control = get_le32(slot + 12);
+            control = (control & ~USB_XHCI_TRB_CYCLE) | (cycle ? USB_XHCI_TRB_CYCLE : 0u);
+            put_le32(slot + 12, control);
+        }
         if (++index == ring->usable_entries) {
             index = 0;
             cycle ^= 1u;
         }
     }
+    result = sync_transfer_ring(ring);
+    if (result) return transfer_ring_fail(ring, result);
+    uint8_t *first = (uint8_t *)ring->trbs.cpu +
+                     (size_t)ring->producer_index * USB_XHCI_TRB_BYTES;
+    control = get_le32(first + 12);
+    control = (control & ~USB_XHCI_TRB_CYCLE) |
+              (ring->producer_cycle ? USB_XHCI_TRB_CYCLE : 0u);
+    put_le32(first + 12, control);
     result = sync_transfer_ring(ring);
     if (result) return transfer_ring_fail(ring, result);
     ring->producer_index = index;
@@ -467,7 +493,8 @@ int usb_xhci_event_ring_init(struct usb_xhci_event_ring *ring, const struct usb_
         zero_bytes(ring, sizeof(*ring));
         return USB_UNSUPPORTED;
     }
-    result = usb_dma_alloc32(&ring->dma, (size_t)entries * USB_XHCI_TRB_BYTES, 64u, &ring->trbs);
+    size_t bytes = ((size_t)entries * USB_XHCI_TRB_BYTES + 63u) & ~(size_t)63u;
+    result = usb_dma_alloc32(&ring->dma, bytes, ring_segment_alignment(bytes), &ring->trbs);
     if (result) {
         usb_dma_free(&ring->dma, &ring->erst);
         zero_bytes(ring, sizeof(*ring));

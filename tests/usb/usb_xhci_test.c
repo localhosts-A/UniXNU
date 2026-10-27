@@ -16,9 +16,12 @@ struct sync_record {
 struct dma_model {
     uint64_t next_address;
     unsigned allocations, releases, syncs;
-    unsigned fail_sync;
+    unsigned fail_sync, fail_allocate, misalign_at, noncoherent_at;
     bool noncoherent;
     struct sync_record sync_records[128];
+    bool capture_ring;
+    unsigned captures;
+    uint32_t captured_controls[4][8];
 };
 
 static uint32_t get_le32(const uint8_t *p)
@@ -102,10 +105,13 @@ static int allocate_dma(void *context, size_t size, size_t alignment, uint64_t l
     struct dma_model *m = context;
     assert(out && limit == UINT32_MAX && alignment >= 64u);
     ++m->allocations;
+    if (m->fail_allocate == m->allocations) return USB_NO_MEMORY;
     if (posix_memalign(&out->cpu, alignment, size)) return USB_NO_MEMORY;
-    out->address = m->next_address;
+    uint64_t mask = (uint64_t)alignment - 1u;
+    m->next_address = (m->next_address + mask) & ~mask;
+    out->address = m->next_address + (m->misalign_at == m->allocations ? 64u : 0u);
     out->size = size;
-    out->coherent = !m->noncoherent;
+    out->coherent = !m->noncoherent && m->noncoherent_at != m->allocations;
     m->next_address += ((uint64_t)size + 63u) & ~UINT64_C(63);
     return USB_OK;
 }
@@ -120,6 +126,13 @@ static int sync_dma(void *context, struct usb_dma_buffer *buffer, size_t offset,
     assert(m->syncs < sizeof(m->sync_records) / sizeof(m->sync_records[0]));
     m->sync_records[m->syncs] = (struct sync_record){buffer, offset, size, direction, for_device};
     ++m->syncs;
+    if (m->capture_ring) {
+        assert(m->captures < 4 && buffer->size == 8u * USB_XHCI_TRB_BYTES);
+        for (size_t i = 0; i < 8; ++i)
+            m->captured_controls[m->captures][i] =
+                get_le32((const uint8_t *)buffer->cpu + i * USB_XHCI_TRB_BYTES + 12u);
+        ++m->captures;
+    }
     return m->fail_sync == m->syncs ? USB_IO : USB_OK;
 }
 static struct usb_dma_ops dma_ops(struct dma_model *m)
@@ -193,16 +206,67 @@ static void test_transfer_ring_cycle_wrap_and_completion(void)
     assert(usb_xhci_transfer_ring_enqueue(&ring, first, 1, NULL) == USB_OK);
     assert(!(get_le32(transfer_slot(&ring, 2) + 12) & USB_XHCI_TRB_CYCLE));
     assert(get_le32(transfer_slot(&ring, 3) + 12) & USB_XHCI_TRB_CYCLE); /* Invalid producer tail. */
-    assert(m.syncs == 10u);
+    assert(m.syncs == 13u);
     for (unsigned i = 0; i < m.syncs; ++i)
         assert_sync_record(&m, i, &ring.trbs, 0, ring.trbs.size, USB_DMA_TO_DEVICE, true);
     assert(usb_xhci_transfer_ring_destroy(&ring) == USB_BUSY);
     assert(m.releases == 0);
     assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);
     assert(!ring.controller_active && ring.outstanding == 0 && ring.producer_cycle == 1);
-    assert(m.syncs == 11u);
-    assert_sync_record(&m, 10, &ring.trbs, 0, ring.trbs.size, USB_DMA_TO_DEVICE, true);
+    assert(m.syncs == 14u);
+    assert_sync_record(&m, 13, &ring.trbs, 0, ring.trbs.size, USB_DMA_TO_DEVICE, true);
     assert(usb_xhci_transfer_ring_destroy(&ring) == USB_OK && m.releases == 1);
+}
+
+static void test_multi_trb_publication_order(void)
+{
+    struct dma_model m; initialize_dma(&m); struct usb_dma_ops dma = dma_ops(&m);
+    struct usb_xhci_transfer_ring ring;
+    assert(usb_xhci_transfer_ring_init(&ring, &dma, 8) == USB_OK);
+    assert(usb_xhci_transfer_ring_mark_active(&ring) == USB_OK);
+
+    /* Advance the producer near the link while retaining one earlier TRB. */
+    struct usb_xhci_trb prefix[5];
+    for (size_t i = 0; i < 5; ++i) prefix[i] = make_trb(USB_XHCI_TRB_NORMAL, (uint32_t)i);
+    assert(usb_xhci_transfer_ring_enqueue(&ring, prefix, 5, NULL) == USB_OK);
+    uint32_t completed = 0;
+    assert(usb_xhci_transfer_ring_complete_through(&ring,
+        ring.trbs.address + 3u * USB_XHCI_TRB_BYTES, &completed) == USB_OK && completed == 4);
+    struct usb_xhci_trb td[3] = {make_trb(USB_XHCI_TRB_SETUP_STAGE, 10),
+        make_trb(USB_XHCI_TRB_DATA_STAGE, 11), make_trb(USB_XHCI_TRB_STATUS_STAGE, 12)};
+    m.capture_ring = true;
+    assert(usb_xhci_transfer_ring_enqueue(&ring, td, 3, NULL) == USB_OK);
+    m.capture_ring = false;
+    assert(m.captures == 4);
+    /* First TRB at slot 5 remains invalid through the release barrier.
+     * Slot 6 and the wrapped slot 0 become valid before slot 5; the link
+     * carries the cycle of the old lap. */
+    for (unsigned phase = 0; phase < 3; ++phase)
+        assert(!(m.captured_controls[phase][5] & USB_XHCI_TRB_CYCLE));
+    assert(m.captured_controls[2][6] & USB_XHCI_TRB_CYCLE);
+    assert(!(m.captured_controls[2][0] & USB_XHCI_TRB_CYCLE));
+    assert(m.captured_controls[2][7] & USB_XHCI_TRB_CYCLE);
+    assert(m.captured_controls[3][5] & USB_XHCI_TRB_CYCLE);
+    assert(ring.producer_index == 1 && ring.producer_cycle == 0 && ring.outstanding == 4);
+    assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);
+    assert(usb_xhci_transfer_ring_destroy(&ring) == USB_OK);
+
+    /* A failure before first publication cannot expose a partial TD; a
+     * failure after it may have exposed the complete TD and retains DMA. */
+    for (unsigned phase = 3; phase <= 4; ++phase) {
+        initialize_dma(&m); dma = dma_ops(&m);
+        assert(usb_xhci_transfer_ring_init(&ring, &dma, 8) == USB_OK);
+        assert(usb_xhci_transfer_ring_mark_active(&ring) == USB_OK);
+        m.capture_ring = true; m.fail_sync = m.syncs + phase;
+        assert(usb_xhci_transfer_ring_enqueue(&ring, td, 3, NULL) == USB_IO);
+        m.capture_ring = false;
+        assert(m.captures == phase && ring.faulted && ring.controller_active);
+        assert(((m.captured_controls[phase - 1][0] & USB_XHCI_TRB_CYCLE) != 0) == (phase == 4));
+        assert(usb_xhci_transfer_ring_destroy(&ring) == USB_BUSY && !m.releases);
+        assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);
+        assert(usb_xhci_transfer_ring_destroy(&ring) == USB_OK);
+    }
+    puts("PASS: xHCI multi-TRB first publication follows the release barrier");
 }
 
 static void test_transfer_ring_fault_retention(void)
@@ -438,13 +502,60 @@ static void test_event_ring_cycle_and_stop(void)
     puts("PASS: xHCI event ring cycle and stop proof");
 }
 
+static void test_ring_segment_boundaries(void)
+{
+    struct dma_model m; initialize_dma(&m); struct usb_dma_ops dma = dma_ops(&m);
+    struct usb_xhci_transfer_ring transfer;
+    struct usb_xhci_event_ring event;
+    m.next_address = 0x8100ffc0u;
+    assert(usb_xhci_transfer_ring_init(&transfer, &dma, 4096) == USB_OK);
+    assert(transfer.trbs.size == 65536u && !(transfer.trbs.address & 0xffffu));
+    assert(usb_xhci_transfer_ring_destroy(&transfer) == USB_OK);
+    m.next_address = 0x82000100u;
+    assert(usb_xhci_event_ring_init(&event, &dma, 17) == USB_OK);
+    assert(event.entries == 17 && event.trbs.size == 320u);
+    assert((event.trbs.address & 0xffffu) == 0x200u);
+    assert((event.trbs.address & 0xffffu) + event.trbs.size <= 65536u);
+    assert(get_le32((const uint8_t *)event.erst.cpu + 8) == 17);
+    assert(usb_xhci_event_ring_destroy(&event) == USB_OK);
+    m.next_address = 0x83000040u;
+    assert(usb_xhci_event_ring_init(&event, &dma, 4096) == USB_OK);
+    assert(event.trbs.size == 65536u && !(event.trbs.address & 0xffffu));
+    assert(usb_xhci_event_ring_destroy(&event) == USB_OK);
+    unsigned allocations = m.allocations;
+    assert(usb_xhci_event_ring_init(&event, &dma, 4097) == USB_RANGE);
+    assert(usb_xhci_event_ring_init(&event, &dma, 65535) == USB_RANGE);
+    assert(m.allocations == allocations);
+
+    for (unsigned which = 1; which <= 2; ++which) {
+        initialize_dma(&m); dma = dma_ops(&m); m.fail_allocate = which;
+        assert(usb_xhci_event_ring_init(&event, &dma, 17) == USB_NO_MEMORY);
+        assert(m.allocations == which && m.releases == which - 1u);
+        assert(!event.erst.cpu && !event.trbs.cpu);
+        initialize_dma(&m); dma = dma_ops(&m); m.noncoherent_at = which;
+        assert(usb_xhci_event_ring_init(&event, &dma, 17) == USB_UNSUPPORTED);
+        assert(m.allocations == which && m.releases == which);
+        assert(!event.erst.cpu && !event.trbs.cpu);
+        initialize_dma(&m); dma = dma_ops(&m); m.fail_sync = which;
+        assert(usb_xhci_event_ring_init(&event, &dma, 17) == USB_IO);
+        assert(m.allocations == 2 && m.releases == 2);
+        assert(!event.erst.cpu && !event.trbs.cpu);
+    }
+    initialize_dma(&m); dma = dma_ops(&m); m.misalign_at = 2;
+    assert(usb_xhci_event_ring_init(&event, &dma, 17) == USB_RANGE);
+    assert(m.allocations == 2 && m.releases == 2 && !event.erst.cpu && !event.trbs.cpu);
+    puts("PASS: xHCI ring segments honor 64 KiB boundaries and event-size limits");
+}
+
 int main(void)
 {
     test_capability_discovery();
     test_transfer_ring_cycle_wrap_and_completion();
     test_transfer_ring_fault_retention();
+    test_multi_trb_publication_order();
     test_transfer_completion_event_guard();
     test_event_decode();
     test_event_ring_cycle_and_stop();
+    test_ring_segment_boundaries();
     return 0;
 }

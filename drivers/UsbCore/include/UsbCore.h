@@ -41,6 +41,9 @@ struct usb_dma_ops {
     bool qualified;
     int (*allocate)(void *, size_t size, size_t alignment, uint64_t limit, struct usb_dma_buffer *);
     void (*release)(void *, struct usb_dma_buffer *);
+    /* for_device publishes and orders earlier CPU writes before later
+     * publication/doorbells; for_cpu acquires device writes before CPU reads,
+     * including for coherent buffers. */
     int (*sync)(void *, struct usb_dma_buffer *, size_t offset, size_t length,
                 enum usb_dma_direction, bool for_device);
 };
