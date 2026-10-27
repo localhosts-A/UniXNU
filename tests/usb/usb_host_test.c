@@ -270,7 +270,7 @@ static void pointer_event(void *context, uint8_t buttons, int16_t x, int16_t y, 
 static struct usb_host_ops ops(struct mock_controller *m)
 {
     return (struct usb_host_ops){m, control, address_device, configure_endpoint,
-        interrupt_transfer, bulk_transfer, reset_endpoint, disable_device, NULL, NULL};
+        interrupt_transfer, bulk_transfer, reset_endpoint, disable_device, NULL, NULL, NULL};
 }
 static struct usb_host_route route(void)
 {

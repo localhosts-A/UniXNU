@@ -76,6 +76,10 @@ struct usb_host_ops {
      * The owner serializes enumeration with all other use of the route. */
     int (*prepare_device)(void *, const struct usb_host_route *, enum usb_host_speed,
                           bool *cleanup_required);
+    /* Publish xHCI hub/TT Slot Context metadata before downstream port traffic. */
+    int (*configure_hub)(void *, const struct usb_host_route *, uint8_t address,
+                         enum usb_host_speed, uint8_t port_count,
+                         uint16_t tt_think_time_ns, bool multi_tt);
 };
 
 struct usb_host_hid_interface {

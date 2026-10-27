@@ -867,6 +867,13 @@ int usb_host_hub_start(struct usb_host_device *device, struct usb_host_hub *hub)
     hub->multi_tt = device->speed == USB_HOST_HIGH_SPEED && hub->protocol == 2;
     if (device->speed == USB_HOST_HIGH_SPEED)
         hub->tt_think_time_ns = (uint16_t)((((characteristics >> 5) & 3u) + 1u) * 666u);
+    if (device->ops.configure_hub) {
+        result = device->ops.configure_hub(device->ops.context, &device->route,
+                                           device->address, device->speed,
+                                           hub->port_count, hub->tt_think_time_ns,
+                                           hub->multi_tt);
+        if (result) { hub->faulted = true; return result; }
+    }
     uint16_t wait_ms = hub->power_good_ms;
     if (power_mode != USB_HUB_POWER_NO_SWITCHING && !wait_ms) wait_ms = 2;
 

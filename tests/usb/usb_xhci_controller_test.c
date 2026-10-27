@@ -19,14 +19,28 @@ struct model {
     unsigned resets, starts, guard_calls, fail_guard, noncoherent_at, misalign_at, cnr_waits;
     unsigned reset_delay, cnr_delay, halt_delay, reset_remaining, cnr_remaining, halt_remaining;
     uint32_t crcr_reserved, erstba_reserved;
+    struct usb_xhci_controller *controller;
+    struct usb_xhci_device_slot *slot;
+    uint32_t event_index;
+    uint8_t event_cycle, next_slot, next_usb_address;
+    uint8_t device_descriptor[8];
     bool applied_error, guard_denied, guard_blocked, stuck_halt, stuck_reset, pending_on_reset;
     bool allow_live_release;
+    bool auto_commands, auto_control;
 };
+
+static void put_le32(uint8_t *p, uint32_t value);
+static void event_at(struct usb_xhci_controller *c, uint32_t index, uint8_t cycle,
+                     uint32_t type, uint64_t parameter, uint8_t code, uint32_t fields);
 
 static void init_model(struct model *m, unsigned scratchpads)
 {
     memset(m, 0, sizeof(*m));
     m->next_dma = 0x81000000u;
+    m->event_cycle = 1u; m->next_slot = 1u; m->next_usb_address = 1u;
+    m->device_descriptor[0] = 18u; m->device_descriptor[1] = 1u;
+    m->device_descriptor[2] = 0u; m->device_descriptor[3] = 2u;
+    m->device_descriptor[7] = 8u;
     m->regs[0] = 0x01000040u;
     m->regs[1] = 8u | (1u << 8) | (4u << 24);
     m->regs[2] = ((scratchpads & 31u) << 27) | ((scratchpads >> 5) << 21);
@@ -44,6 +58,8 @@ static int guard(void *context)
     m->guard_blocked = m->guard_denied || m->guard_calls == m->fail_guard;
     return m->guard_blocked ? USB_BUSY : USB_OK;
 }
+static uint32_t get_le32(const uint8_t *p)
+{ return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static int read32(void *context, uint32_t offset, uint32_t *value)
 {
     struct model *m = context; assert(!m->guard_blocked && offset < sizeof(m->regs) && !(offset & 3u));
@@ -80,7 +96,56 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
     } else if (offset == RT + 0x20u) {
         uint32_t pending = (m->regs[offset / 4u] & 1u) & ~(value & 1u);
         m->regs[offset / 4u] = (value & ~1u) | pending;
-    } else m->regs[offset / 4u] = value;
+    } else {
+        m->regs[offset / 4u] = value;
+        if (offset == 0x600u && m->auto_commands && m->controller &&
+            m->controller->command_pending) {
+            uint64_t address = m->controller->pending_command;
+            uint32_t index = (uint32_t)((address - m->controller->commands.trbs.address) /
+                                        USB_XHCI_TRB_BYTES);
+            uint8_t *command = (uint8_t *)m->controller->commands.trbs.cpu +
+                               (size_t)index * USB_XHCI_TRB_BYTES;
+            uint32_t control = get_le32(command + 12u);
+            uint32_t type = (control >> USB_XHCI_TRB_TYPE_SHIFT) & USB_XHCI_TRB_TYPE_MASK;
+            uint8_t slot_id = (uint8_t)(control >> 24);
+            if (type == USB_XHCI_TRB_ENABLE_SLOT) slot_id = m->next_slot++;
+            if (type == USB_XHCI_TRB_ADDRESS_DEVICE && m->slot &&
+                m->slot->slot_id == slot_id && m->slot->output_context.cpu) {
+                uint8_t *out = m->slot->output_context.cpu;
+                uint32_t state = control & (1u << 9) ? 1u : 2u;
+                uint8_t assigned = state == 1u ? 0u : m->next_usb_address++;
+                put_le32(out + 12u, (uint32_t)assigned | (state << 27));
+            }
+            if (type == USB_XHCI_TRB_CONFIGURE_ENDPOINT && m->slot &&
+                m->slot->slot_id == slot_id && m->slot->output_context.cpu) {
+                uint8_t *in_slot = (uint8_t *)m->slot->input_context.cpu +
+                                   m->controller->caps.context_bytes;
+                uint32_t state = get_le32((uint8_t *)m->slot->output_context.cpu + 12u);
+                memcpy(m->slot->output_context.cpu, in_slot, m->controller->caps.context_bytes);
+                put_le32((uint8_t *)m->slot->output_context.cpu + 12u, state);
+            }
+            event_at(m->controller, m->event_index, m->event_cycle,
+                     USB_XHCI_TRB_COMMAND_EVENT, address, USB_XHCI_CC_SUCCESS,
+                     (uint32_t)slot_id << 24);
+            if (++m->event_index == m->controller->events.entries) {
+                m->event_index = 0; m->event_cycle ^= 1u;
+            }
+        } else if (offset >= 0x604u && m->auto_control && m->slot &&
+                   m->slot->control.pending && offset == 0x600u + (uint32_t)m->slot->slot_id * 4u) {
+            if (m->slot->control.input && m->slot->control.data.cpu) {
+                size_t length = m->slot->control.requested < sizeof(m->device_descriptor) ?
+                                m->slot->control.requested : sizeof(m->device_descriptor);
+                memcpy(m->slot->control.data.cpu, m->device_descriptor, length);
+            }
+            event_at(m->controller, m->event_index, m->event_cycle,
+                     USB_XHCI_TRB_TRANSFER_EVENT, m->slot->control.status_trb,
+                     USB_XHCI_CC_SUCCESS,
+                     ((uint32_t)m->slot->slot_id << 24) | (1u << 16));
+            if (++m->event_index == m->controller->events.entries) {
+                m->event_index = 0; m->event_cycle ^= 1u;
+            }
+        }
+    }
 }
 static int write32(void *context, uint32_t offset, uint32_t value)
 {
@@ -142,6 +207,7 @@ static struct usb_xhci_controller *new_controller(void)
 static int start(struct model *m, struct usb_xhci_controller *c)
 {
     struct usb_mmio io = mmio(m); struct usb_dma_ops d = dma(m);
+    m->controller = c;
     return usb_xhci_controller_start(c, &io, &d, guard, m, 4, 16, 16);
 }
 static uint64_t get_le64(const uint8_t *p)
@@ -363,6 +429,195 @@ static void test_control_transfer(void)
     free(c);
     puts("PASS: xHCI EP0 control short/status and retained fault model");
 }
+
+static void test_device_slots_and_routing(void)
+{
+    struct model m; init_model(&m, 0); m.auto_commands = true; m.auto_control = true;
+    m.device_descriptor[7] = 64u;
+    struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    struct usb_xhci_device_slot root = {0}, child = {0};
+    m.slot = &root;
+    struct usb_xhci_route route = {.root_port = 1};
+    bool cleanup = false;
+    assert(usb_xhci_device_prepare(&root, c, &route, USB_XHCI_SPEED_HIGH, &cleanup) == USB_OK);
+    assert(cleanup && root.slot_id == 1 && root.state == USB_XHCI_SLOT_DEFAULT);
+    assert(root.output_context.size == 2048u && root.input_context.size == 2112u);
+    assert(get_le64((const uint8_t *)c->dcbaa.cpu + 8u) == root.output_context.address);
+    uint8_t *input = root.input_context.cpu;
+    uint32_t slot_dword0 = get_le32(input + 64u);
+    uint32_t ep0_dword1 = get_le32(input + 128u + 4u);
+    assert((slot_dword0 & (0xfu << 20)) == (USB_XHCI_SPEED_HIGH << 20));
+    assert(slot_dword0 & (1u << 27));
+    assert(get_le32(input + 68u) == (1u << 16));
+    assert(ep0_dword1 == ((3u << 1) | (4u << 3) | (64u << 16)));
+
+    uint8_t assigned = 0;
+    assert(usb_xhci_device_address(&root, 64u, &assigned) == USB_OK);
+    assert(assigned == 1 && root.address == assigned && root.state == USB_XHCI_SLOT_ADDRESSED);
+    /* The command waiter must retain a port event that precedes command completion. */
+    event_at(c, m.event_index, m.event_cycle, USB_XHCI_TRB_PORT_STATUS_EVENT,
+             1u << 24, USB_XHCI_CC_SUCCESS, 0);
+    if (++m.event_index == c->events.entries) { m.event_index = 0; m.event_cycle ^= 1u; }
+    assert(usb_xhci_device_configure_hub(&root, 4u, 1332u, true) == USB_OK);
+    assert(root.is_hub && root.hub_port_count == 4);
+    assert(get_le32((uint8_t *)root.output_context.cpu) & (1u << 26));
+    assert(get_le32((uint8_t *)root.output_context.cpu) & (1u << 25));
+    assert(((get_le32((uint8_t *)root.output_context.cpu + 8u) >> 16) & 3u) == 1u);
+    struct usb_xhci_event preserved;
+    assert(usb_xhci_controller_next_event(c, &preserved) == USB_OK &&
+           preserved.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE);
+
+    m.slot = &child;
+    struct usb_xhci_route child_route = {.root_port = 1, .depth = 1,
+        .hub_slot = {1}, .hub_port = {3}, .hub_port_count = {4},
+        .tt_hub_slot = 1, .tt_port = 3,
+        .multi_tt = true};
+    struct usb_xhci_device_slot rejected_route = {0};
+    struct usb_xhci_route invalid_route = child_route;
+    unsigned allocation_attempts = m.allocation_attempts;
+    m.slot = &rejected_route; cleanup = false;
+    invalid_route.tt_hub_slot = 2; /* In-range, but not an ancestor in this path. */
+    assert(usb_xhci_device_prepare(&rejected_route, c, &invalid_route,
+                                   USB_XHCI_SPEED_LOW, &cleanup) == USB_RANGE);
+    assert(!cleanup && rejected_route.state == USB_XHCI_SLOT_EMPTY &&
+           m.allocation_attempts == allocation_attempts && m.next_slot == 2u);
+    invalid_route = child_route; invalid_route.tt_port = 4;
+    assert(usb_xhci_device_prepare(&rejected_route, c, &invalid_route,
+                                   USB_XHCI_SPEED_LOW, &cleanup) == USB_RANGE);
+    assert(!cleanup && rejected_route.state == USB_XHCI_SLOT_EMPTY &&
+           m.allocation_attempts == allocation_attempts && m.next_slot == 2u);
+    m.slot = &child;
+    cleanup = false;
+    assert(usb_xhci_device_prepare(&child, c, &child_route, USB_XHCI_SPEED_LOW,
+                                   &cleanup) == USB_OK);
+    assert(cleanup && child.slot_id == 2 && child.state == USB_XHCI_SLOT_DEFAULT);
+    input = child.input_context.cpu;
+    slot_dword0 = get_le32(input + 64u);
+    assert((slot_dword0 & 0xfffffu) == 3u);
+    assert((slot_dword0 & (0xfu << 20)) == (USB_XHCI_SPEED_LOW << 20));
+    assert(slot_dword0 & (1u << 25));
+    assert(get_le32(input + 72u) == (1u | (3u << 8)));
+    assert(get_le32(input + 68u) == (1u << 16));
+    m.device_descriptor[7] = 8u;
+    struct usb_setup setup = {0x80, 6, 0x100, 0, 8};
+    uint8_t descriptor[8] = {0}; size_t actual = 99;
+    m.allow_live_release = true; /* Status completion retires the data TD. */
+    assert(usb_xhci_device_control(&child, 0, &setup, descriptor, sizeof(descriptor),
+                                   &actual, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == sizeof(descriptor) && descriptor[0] == 18u && descriptor[7] == 8u);
+    assert(usb_xhci_device_address(&child, descriptor[7], &assigned) == USB_OK && assigned == 2u);
+    m.allow_live_release = true; /* Disable Slot is the per-slot stop proof. */
+    assert(usb_xhci_device_disable(&child, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(child.state == USB_XHCI_SLOT_EMPTY && !get_le64((const uint8_t *)c->dcbaa.cpu + 16u));
+    m.slot = &root;
+    m.allow_live_release = true;
+    assert(usb_xhci_device_disable(&root, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(root.state == USB_XHCI_SLOT_EMPTY && !get_le64((const uint8_t *)c->dcbaa.cpu + 8u));
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* Slot/input/EP0 offsets must also honor 32-byte context controllers. */
+    {
+        init_model(&m, 0); m.regs[4] &= ~(1u << 2); m.auto_commands = true;
+        c = new_controller(); assert(start(&m, c) == USB_OK);
+        struct usb_xhci_device_slot small_context = {0}; m.slot = &small_context;
+        cleanup = false;
+        assert(usb_xhci_device_prepare(&small_context, c, &route, USB_XHCI_SPEED_HIGH,
+                                       &cleanup) == USB_OK);
+        assert(cleanup && c->caps.context_bytes == 32u);
+        assert(small_context.output_context.size == 1024u &&
+               small_context.input_context.size == 1056u);
+        uint8_t *small_input = small_context.input_context.cpu;
+        assert((get_le32(small_input + 32u) & (0xfu << 20)) ==
+               (USB_XHCI_SPEED_HIGH << 20));
+        assert(get_le32(small_input + 36u) == (1u << 16));
+        assert(get_le32(small_input + 68u) == ((3u << 1) | (4u << 3) | (64u << 16)));
+        assert(usb_xhci_device_address(&small_context, 64u, &assigned) == USB_OK &&
+               assigned == 1u);
+        m.allow_live_release = true;
+        assert(usb_xhci_device_disable(&small_context, 100u) == USB_OK);
+        m.allow_live_release = false;
+        assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+        free(c);
+    }
+
+    /* A nested full-speed hub keeps its translator on the upstream HS hub;
+     * hubs with more than 14 ports encode the Route String nibble as 15. */
+    {
+        init_model(&m, 0); m.next_slot = 3u; m.auto_commands = true;
+        c = new_controller(); assert(start(&m, c) == USB_OK);
+        struct usb_xhci_device_slot nested_child = {0}; m.slot = &nested_child;
+        struct usb_xhci_route nested_route = {.root_port = 1, .depth = 2,
+            .hub_slot = {1, 2}, .hub_port = {3, 5}, .hub_port_count = {16, 8},
+            .tt_hub_slot = 1,
+            .tt_port = 3, .multi_tt = true};
+        cleanup = false;
+        assert(usb_xhci_device_prepare(&nested_child, c, &nested_route,
+                                       USB_XHCI_SPEED_LOW, &cleanup) == USB_OK);
+        assert(cleanup && nested_child.slot_id == 3u);
+        input = nested_child.input_context.cpu;
+        slot_dword0 = get_le32(input + 64u);
+        assert((slot_dword0 & 0xfffffu) == 0x5fu);
+        assert(slot_dword0 & (1u << 25));
+        assert(get_le32(input + 72u) == (1u | (3u << 8)));
+        m.allow_live_release = true;
+        assert(usb_xhci_device_disable(&nested_child, 100u) == USB_OK);
+        m.allow_live_release = false;
+        assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+        free(c);
+    }
+
+    /* TT context keeps the actual high port number while Route String uses 15. */
+    {
+        init_model(&m, 0); m.next_slot = 2u; m.auto_commands = true;
+        c = new_controller(); assert(start(&m, c) == USB_OK);
+        struct usb_xhci_device_slot wide_hub_child = {0}; m.slot = &wide_hub_child;
+        struct usb_xhci_route wide_port_route = {.root_port = 1, .depth = 1,
+            .hub_slot = {1}, .hub_port = {16}, .hub_port_count = {16},
+            .tt_hub_slot = 1, .tt_port = 16};
+        cleanup = false;
+        unsigned before_route_allocations = m.allocation_attempts;
+        wide_port_route.hub_port[0] = 17u; wide_port_route.tt_port = 17u;
+        assert(usb_xhci_device_prepare(&wide_hub_child, c, &wide_port_route,
+                                       USB_XHCI_SPEED_LOW, &cleanup) == USB_RANGE);
+        assert(!cleanup && wide_hub_child.state == USB_XHCI_SLOT_EMPTY &&
+               m.allocation_attempts == before_route_allocations && m.next_slot == 2u);
+        wide_port_route.hub_port[0] = 16u; wide_port_route.tt_port = 16u;
+        assert(usb_xhci_device_prepare(&wide_hub_child, c, &wide_port_route,
+                                       USB_XHCI_SPEED_LOW, &cleanup) == USB_OK);
+        input = wide_hub_child.input_context.cpu;
+        slot_dword0 = get_le32(input + 64u);
+        assert((slot_dword0 & 0xfffffu) == 15u);
+        assert(get_le32(input + 72u) == (1u | (16u << 8)));
+        m.allow_live_release = true;
+        assert(usb_xhci_device_disable(&wide_hub_child, 100u) == USB_OK);
+        m.allow_live_release = false;
+        assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+        free(c);
+    }
+
+    /* Each pre-publication allocation failure retains the enabled-slot cleanup. */
+    for (unsigned fail_offset = 1u; fail_offset <= 3u; ++fail_offset) {
+        init_model(&m, 0); m.auto_commands = true; c = new_controller();
+        assert(start(&m, c) == USB_OK);
+        struct usb_xhci_device_slot failed = {0}; m.slot = &failed;
+        m.fail_allocate = m.allocation_attempts + fail_offset;
+        cleanup = false;
+        assert(usb_xhci_device_prepare(&failed, c, &route, USB_XHCI_SPEED_FULL,
+                                       &cleanup) == USB_NO_MEMORY);
+        assert(cleanup && failed.state == USB_XHCI_SLOT_ENABLED && failed.slot_id == 1u);
+        m.fail_allocate = 0; m.allow_live_release = true;
+        assert(usb_xhci_device_disable(&failed, 100u) == USB_OK);
+        m.allow_live_release = false;
+        assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+        free(c);
+    }
+    puts("PASS: xHCI Enable Slot, BSR/address, routed hub TT context and retained cleanup model");
+}
 static void test_running_schedule(void)
 {
     struct model m; init_model(&m, 3);
@@ -523,7 +778,7 @@ static void test_guards_and_timeouts(void)
 int main(void)
 {
     test_running_schedule(); test_failure_retention(); test_guards_and_timeouts(); test_commands_and_events();
-    test_control_transfer();
+    test_control_transfer(); test_device_slots_and_routing();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
 }

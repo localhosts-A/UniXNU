@@ -60,14 +60,23 @@ larger-page selection is not implemented. It can submit one command, ring DB0
 and deliver every primary-ring event in order; a matched command completion
 retires the command, while errors preserve ownership until stop. The owner must
 enforce timeouts, handle all events and retain any command-referenced memory.
-Its EP0 control TD path builds setup/data/status TRBs on an already configured
-slot and endpoint ring, uses a private DMA32 buffer that cannot cross 64 KiB,
-and waits for status after short IN data. Any uncertain transfer requires a
-fresh stop before release. The owner must create contexts, route events and
-enforce a bounded timeout; this is not yet a `usb_host_ops.control` backend.
-It does not construct device contexts or other USB transfers, translate IRQs,
-provide a DMA/IOMMU mapping, populate
-`usb_host_ops`, or publish HID/BOT services. Those runtime owners remain required.
+It can enable a slot, allocate either 32-byte or 64-byte device/input contexts,
+prepare EP0, issue Address Device with BSR for the default state, and then
+assign the real USB address after the first descriptor read. High-speed hub
+metadata, including multi-TT and think time, is applied through Configure
+Endpoint. Each route hop carries its parent slot, actual port and hub port
+count; TT metadata must match an ancestor slot/port pair. Hubs with more than
+14 ports use Route String port value 15 while TT context retains the actual
+port number. A synchronous EP0 control wrapper routes unrelated events into a
+bounded queue and waits for short-IN status completion. Disable Slot is the
+per-slot stop proof before context/ring memory is released; uncertain commands
+and transfers retain ownership until controller stop/reset succeeds.
+
+These are portable controller functions, not yet a production
+`usb_host_ops` backend. The platform owner still must reset/power root ports,
+map USB hub addresses to xHCI slot IDs, poll and route events, configure
+non-control endpoints/transfers, translate IRQs, supply qualified DMA/IOMMU
+mapping, and publish HID/BOT services. Those runtime owners remain required.
 
 `UsbStorage.c` serializes block requests around a BOT device using caller-owned
 lock and bounce-buffer callbacks. It chunks large `IOStorage` requests to the

@@ -13,6 +13,8 @@ extern "C" {
 #define USB_XHCI_MIN_EVENT_RING_ENTRIES 16u
 #define USB_XHCI_MAX_EVENT_RING_ENTRIES 4096u
 #define USB_XHCI_PORT_BITMAP_BYTES 32u
+#define USB_XHCI_MAX_ROUTE_DEPTH 5u
+#define USB_XHCI_PENDING_EVENTS 32u
 
 #define USB_XHCI_TRB_TYPE_SHIFT 10u
 #define USB_XHCI_TRB_TYPE_MASK 0x3fu
@@ -121,6 +123,23 @@ struct usb_xhci_capabilities {
     uint8_t usb2_ports[USB_XHCI_PORT_BITMAP_BYTES];
 };
 
+/* USB2 speed encodings are the values used by the xHCI Slot Context. */
+enum usb_xhci_speed { USB_XHCI_SPEED_FULL = 1, USB_XHCI_SPEED_LOW = 2,
+                      USB_XHCI_SPEED_HIGH = 3 };
+/* hub_port stores the actual downstream port; hub_port_count preserves the
+ * parent hub's bNbrPorts for Route String encoding. For low/full-speed paths,
+ * the TT fields identify an ancestor high-speed hub and its actual port. */
+struct usb_xhci_route {
+    uint8_t root_port;
+    uint8_t depth;
+    uint8_t hub_slot[USB_XHCI_MAX_ROUTE_DEPTH];
+    uint8_t hub_port[USB_XHCI_MAX_ROUTE_DEPTH];
+    uint8_t hub_port_count[USB_XHCI_MAX_ROUTE_DEPTH];
+    uint8_t tt_hub_slot;
+    uint8_t tt_port;
+    bool multi_tt;
+};
+
 /* Read-only capability discovery. The result is committed only after every
  * register window and USB2 Supported Protocol range has been validated. */
 int usb_xhci_read_capabilities(const struct usb_mmio *, struct usb_xhci_capabilities *);
@@ -208,6 +227,9 @@ struct usb_xhci_controller {
     enum usb_xhci_controller_state state;
     uint64_t pending_command;
     uint64_t acknowledged_event;
+    struct usb_xhci_event pending_events[USB_XHCI_PENDING_EVENTS];
+    uint8_t slot_limit;
+    uint8_t pending_event_head, pending_event_count;
     bool command_pending;
     bool reset_proven;
 };
@@ -222,6 +244,11 @@ int usb_xhci_controller_start(struct usb_xhci_controller *, const struct usb_mmi
  * on timeout it must stop the controller, never reuse the pending command. */
 int usb_xhci_controller_submit_command(struct usb_xhci_controller *,
                                        const struct usb_xhci_trb *);
+/* Submit one command and wait with a bounded timeout. Unrelated events are
+ * retained for next_event. A timeout faults the controller and retains DMA. */
+int usb_xhci_controller_command(struct usb_xhci_controller *, const struct usb_xhci_trb *,
+                                uint8_t expected_slot, uint32_t timeout_ms,
+                                struct usb_xhci_event *completion);
 /* Returns each event in ring order, including unrelated/unknown events. A
  * matching command completion retires the pending command; its completion code
  * is returned unmodified in the event. AGAIN means no event. An invalid or
@@ -259,6 +286,46 @@ int usb_xhci_control_event(struct usb_xhci_control_td *, const struct usb_xhci_e
 int usb_xhci_control_finish(struct usb_xhci_control_td *, void *buffer, size_t capacity, size_t *actual);
 /* Only after controller/endpoint stop proof and ring_halted has succeeded. */
 int usb_xhci_control_release_stopped(struct usb_xhci_control_td *);
+
+enum usb_xhci_device_slot_state {
+    USB_XHCI_SLOT_EMPTY, USB_XHCI_SLOT_ENABLED, USB_XHCI_SLOT_DEFAULT,
+    USB_XHCI_SLOT_ADDRESSED, USB_XHCI_SLOT_FAULTED
+};
+struct usb_xhci_device_slot {
+    struct usb_xhci_controller *controller;
+    struct usb_dma_ops dma;
+    struct usb_xhci_route route;
+    struct usb_dma_buffer output_context, input_context;
+    struct usb_xhci_transfer_ring ep0;
+    struct usb_xhci_control_td control;
+    enum usb_xhci_device_slot_state state;
+    enum usb_xhci_speed speed;
+    uint8_t slot_id, address, ep0_max_packet;
+    uint8_t hub_port_count;
+    bool is_hub;
+    bool cleanup_required;
+};
+/* Prepare a route that has already been reset and powered. cleanup_required is
+ * set before Enable Slot because the command may take effect despite an error.
+ * Success performs Enable Slot and Address Device with BSR=1. */
+int usb_xhci_device_prepare(struct usb_xhci_device_slot *, struct usb_xhci_controller *,
+                            const struct usb_xhci_route *, enum usb_xhci_speed,
+                            bool *cleanup_required);
+/* After reading the first eight device descriptor bytes at address zero, update
+ * EP0 MPS and run Address Device with BSR=0. */
+int usb_xhci_device_address(struct usb_xhci_device_slot *, uint8_t ep0_max_packet,
+                            uint8_t *assigned_address);
+/* Publish parsed USB2 hub metadata with Configure Endpoint before child slots
+ * are addressed. TT think time is in nanoseconds from the hub descriptor. */
+int usb_xhci_device_configure_hub(struct usb_xhci_device_slot *, uint8_t port_count,
+                                  uint16_t tt_think_time_ns, bool multi_tt);
+int usb_xhci_device_control(struct usb_xhci_device_slot *, uint8_t address,
+                            const struct usb_setup *, void *, size_t capacity,
+                            size_t *actual, uint32_t timeout_ms);
+/* Disable Slot is the stop proof while the controller runs. On controller stop,
+ * call release_stopped to reclaim retained slot/context/ring DMA after reset. */
+int usb_xhci_device_disable(struct usb_xhci_device_slot *, uint32_t timeout_ms);
+int usb_xhci_device_release_stopped(struct usb_xhci_device_slot *);
 /* Stop submissions and children first. Stop requires fresh halt and reset
  * proof before releasing any controller-visible memory; errors are retryable. */
 int usb_xhci_controller_stop(struct usb_xhci_controller *);

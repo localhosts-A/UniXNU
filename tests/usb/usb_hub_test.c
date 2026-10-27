@@ -27,6 +27,10 @@ struct mock_controller {
     uint16_t port_change[USB_HOST_HUB_MAX_PORTS];
     uint16_t hub_status, hub_change;
     unsigned route_depth, controls, configured, interrupts;
+    unsigned hub_configures;
+    uint8_t configured_hub_ports;
+    uint16_t configured_tt_think_time_ns;
+    bool configured_multi_tt;
     unsigned power_on, power_off, resets, clears, disables;
     unsigned fail_power_on_at, fail_power_off_at;
     unsigned events[3], attach_attempts, fail_attach_count;
@@ -217,6 +221,24 @@ static int disable_device(void *context, const struct usb_host_route *route, uin
 static uint32_t clock_ms(void *context)
 { return ((struct mock_controller *)context)->current_ms; }
 
+static int configure_hub(void *context, const struct usb_host_route *route, uint8_t address,
+                         enum usb_host_speed speed, uint8_t ports,
+                         uint16_t think_time_ns, bool multi_tt)
+{
+    struct mock_controller *m = context;
+    assert(route && route->depth == m->route_depth && address == 7);
+    assert(speed == m->device_speed && ports == m->port_count);
+    uint16_t expected_think_time = speed == USB_HOST_HIGH_SPEED ?
+        (uint16_t)((((m->descriptor[3] >> 5) & 3u) + 1u) * 666u) : 0u;
+    assert(think_time_ns == expected_think_time);
+    assert(multi_tt == (speed == USB_HOST_HIGH_SPEED && m->device_protocol == 2));
+    ++m->hub_configures;
+    m->configured_hub_ports = ports;
+    m->configured_tt_think_time_ns = think_time_ns;
+    m->configured_multi_tt = multi_tt;
+    return USB_OK;
+}
+
 static int on_event(void *context, enum usb_host_hub_event_kind kind, uint8_t port,
                     const struct usb_host_route *route, enum usb_host_speed speed)
 {
@@ -241,7 +263,7 @@ static int on_event(void *context, enum usb_host_hub_event_kind kind, uint8_t po
 static struct usb_host_ops make_ops(struct mock_controller *m)
 {
     return (struct usb_host_ops){m, control, address_device, configure_endpoint,
-        interrupt_transfer, bulk_transfer, NULL, disable_device, clock_ms, NULL};
+        interrupt_transfer, bulk_transfer, NULL, disable_device, clock_ms, NULL, configure_hub};
 }
 
 static struct usb_host_route make_route(unsigned depth)
@@ -283,7 +305,15 @@ static int start_hub_at(struct mock_controller *m, struct usb_host_device *devic
                         struct usb_host_hub *hub, uint32_t now_ms)
 {
     m->current_ms = now_ms;
-    return usb_host_hub_start(device, hub);
+    unsigned before = m->hub_configures;
+    int result = usb_host_hub_start(device, hub);
+    if (!result) {
+        assert(m->hub_configures == before + 1u);
+        assert(m->configured_hub_ports == m->port_count);
+        assert(m->configured_multi_tt == (m->device_speed == USB_HOST_HIGH_SPEED &&
+                                           m->device_protocol == 2));
+    }
+    return result;
 }
 
 static int poll_hub_at(struct mock_controller *m, struct usb_host_device *device,
