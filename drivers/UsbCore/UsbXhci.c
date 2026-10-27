@@ -302,6 +302,7 @@ int usb_xhci_transfer_ring_enqueue(struct usb_xhci_transfer_ring *ring, const st
 {
     uint32_t index, control, link_control, new_index, new_outstanding;
     uint8_t cycle, link_cycle = 0;
+    uint32_t link_chain = 0;
     bool link_changed = false;
     int result;
     if (!ring || !ring->trbs.cpu || !items || !count) return USB_INVALID;
@@ -341,6 +342,7 @@ int usb_xhci_transfer_ring_enqueue(struct usb_xhci_transfer_ring *ring, const st
         put_le32(slot + 12, control);
         if (++index == ring->usable_entries) {
             link_cycle = cycle;
+            link_chain = get_le32(items[i].bytes + 12u) & USB_XHCI_TRB_CHAIN;
             link_changed = true;
             index = 0;
             cycle ^= 1u;
@@ -349,7 +351,7 @@ int usb_xhci_transfer_ring_enqueue(struct usb_xhci_transfer_ring *ring, const st
     if (link_changed) {
         link_control = get_le32((uint8_t *)ring->trbs.cpu +
                                 (size_t)ring->usable_entries * USB_XHCI_TRB_BYTES + 12u);
-        link_control = (link_control & ~USB_XHCI_TRB_CYCLE) |
+        link_control = (link_control & ~(USB_XHCI_TRB_CYCLE | USB_XHCI_TRB_CHAIN)) | link_chain |
                        (link_cycle ? USB_XHCI_TRB_CYCLE : 0u);
         put_le32((uint8_t *)ring->trbs.cpu + (size_t)ring->usable_entries * USB_XHCI_TRB_BYTES + 12u,
                  link_control);

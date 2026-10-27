@@ -20,6 +20,7 @@ struct model {
     unsigned reset_delay, cnr_delay, halt_delay, reset_remaining, cnr_remaining, halt_remaining;
     uint32_t crcr_reserved, erstba_reserved;
     bool applied_error, guard_denied, guard_blocked, stuck_halt, stuck_reset, pending_on_reset;
+    bool allow_live_release;
 };
 
 static void init_model(struct model *m, unsigned scratchpads)
@@ -114,6 +115,7 @@ static int allocate(void *context, size_t size, size_t alignment, uint64_t limit
 static void release(void *context, struct usb_dma_buffer *buffer)
 {
     struct model *m = context;
+    if (m->allow_live_release) { ++m->releases; free(buffer->cpu); return; }
     assert(!(m->regs[OP / 4u] & (CMD_RUN | CMD_RESET)));
     assert(m->regs[(OP + 4u) / 4u] & STS_HALTED);
     assert(!(m->regs[(OP + 0x18u) / 4u] & ~0x3fu) && !m->regs[(OP + 0x30u) / 4u]);
@@ -238,6 +240,128 @@ static void test_commands_and_events(void)
         free(c);
     }
     puts("PASS: xHCI command doorbell, shared event delivery and retained faults");
+}
+
+static void test_control_transfer(void)
+{
+    struct model m; init_model(&m, 0); struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    struct usb_xhci_transfer_ring ring;
+    assert(usb_xhci_transfer_ring_init(&ring, &c->dma, 8) == USB_OK);
+    assert(usb_xhci_transfer_ring_mark_active(&ring) == USB_OK);
+    struct usb_xhci_control_td td = {0};
+    struct usb_setup setup = {0x80, 6, 0x100, 0, 18};
+    assert(usb_xhci_control_submit(&td, c, &ring, 2, &setup, NULL, 18) == USB_OK);
+    assert(td.pending && td.requested == 18 && !(td.data.address & 0xffffu));
+    assert(m.regs[(0x600u + 2u * 4u) / 4u] == 1u);
+    const uint8_t *trbs = ring.trbs.cpu;
+    assert(get_le64(trbs) == UINT64_C(0x0012000001000680));
+    assert(get_le64(trbs + 16u) == td.data.address);
+    assert((trbs[28] & 0x04u) != 0); /* Data ISP for short IN. */
+    for (size_t i = 0; i < 18; ++i) ((uint8_t *)td.data.cpu)[i] = (uint8_t)(i + 1u);
+    event_at(c, 0, 1, USB_XHCI_TRB_TRANSFER_EVENT, td.data_trb, USB_XHCI_CC_SHORT_PACKET,
+             (2u << 24) | (1u << 16));
+    put_le32((uint8_t *)c->events.trbs.cpu + 8u, (USB_XHCI_CC_SHORT_PACKET << 24) | 10u);
+    struct usb_xhci_event event;
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK);
+    assert(usb_xhci_control_event(&td, &event) == USB_AGAIN && td.pending && td.short_seen);
+    assert(ring.outstanding == 3 && td.actual == 8 && !m.releases);
+    event_at(c, 1, 1, USB_XHCI_TRB_TRANSFER_EVENT, td.status_trb, USB_XHCI_CC_SUCCESS,
+             (2u << 24) | (1u << 16));
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK);
+    assert(usb_xhci_control_event(&td, &event) == USB_OK && td.complete && !ring.outstanding);
+    uint8_t output[18]; memset(output, 0xa5, sizeof(output)); size_t actual = 99;
+    assert(usb_xhci_control_finish(&td, output, 7, &actual) == USB_RANGE && actual == 99);
+    m.allow_live_release = true;
+    assert(usb_xhci_control_finish(&td, output, sizeof(output), &actual) == USB_OK && actual == 8);
+    m.allow_live_release = false;
+    for (size_t i = 0; i < 8; ++i) assert(output[i] == i + 1u);
+    assert(output[8] == 0xa5);
+
+    /* A no-data OUT request has an IN status stage and no DMA data buffer. */
+    setup = (struct usb_setup){0, 9, 1, 0, 0};
+    assert(usb_xhci_control_submit(&td, c, &ring, 2, &setup, NULL, 0) == USB_OK);
+    uint32_t status_control = (uint32_t)trbs[4u * 16u + 12u] |
+        ((uint32_t)trbs[4u * 16u + 13u] << 8) | ((uint32_t)trbs[4u * 16u + 14u] << 16);
+    assert(status_control & (1u << 16));
+    event_at(c, 2, 1, USB_XHCI_TRB_TRANSFER_EVENT, td.status_trb, USB_XHCI_CC_SUCCESS,
+             (2u << 24) | (1u << 16));
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK);
+    assert(usb_xhci_control_event(&td, &event) == USB_OK);
+    assert(usb_xhci_control_finish(&td, NULL, 0, &actual) == USB_OK && actual == 0);
+
+    /* OUT data and its IN status cross the Link TRB, with copied DMA data. */
+    const uint8_t outgoing[] = {1, 2, 3, 4};
+    setup = (struct usb_setup){0x21, 0x20, 0, 1, sizeof(outgoing)};
+    assert(usb_xhci_control_submit(&td, c, &ring, 2, &setup, outgoing, sizeof(outgoing)) == USB_OK);
+    assert(!memcmp(td.data.cpu, outgoing, sizeof(outgoing)) && td.status_trb == ring.trbs.address);
+    assert(!(trbs[6u * 16u + 14u] & 1u) && (trbs[14u] & 1u));
+    struct usb_xhci_event other_event = {0};
+    other_event.kind = USB_XHCI_EVENT_PORT_STATUS_CHANGE;
+    assert(usb_xhci_control_event(&td, &other_event) == USB_AGAIN && td.pending);
+    event_at(c, 3, 1, USB_XHCI_TRB_TRANSFER_EVENT, td.status_trb, USB_XHCI_CC_SUCCESS,
+             (2u << 24) | (1u << 16));
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK);
+    assert(usb_xhci_control_event(&td, &event) == USB_OK);
+    m.allow_live_release = true;
+    assert(usb_xhci_control_finish(&td, NULL, 0, &actual) == USB_OK && actual == sizeof(outgoing));
+    m.allow_live_release = false;
+    assert(usb_xhci_controller_stop(c) == USB_OK);
+    assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);
+    assert(usb_xhci_transfer_ring_destroy(&ring) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* Doorbell errors and invalid/stalled events retain data until fresh stop. */
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        init_model(&m, 0); c = new_controller(); assert(start(&m, c) == USB_OK);
+        assert(usb_xhci_transfer_ring_init(&ring, &c->dma, 8) == USB_OK);
+        assert(usb_xhci_transfer_ring_mark_active(&ring) == USB_OK);
+        memset(&td, 0, sizeof(td)); setup = (struct usb_setup){0x80, 6, 0x100, 0, 18};
+        if (failure == 0) { m.fail_access = m.accesses + 2u; m.applied_error = true; }
+        int result = usb_xhci_control_submit(&td, c, &ring, 1, &setup, NULL, 18);
+        if (!failure) assert(result == USB_IO);
+        else if (failure < 3) {
+            assert(result == USB_OK);
+            event_at(c, 0, 1, USB_XHCI_TRB_TRANSFER_EVENT,
+                     failure == 1 ? td.status_trb + 16u : td.data_trb,
+                     failure == 1 ? USB_XHCI_CC_SUCCESS : USB_XHCI_CC_STALL_ERROR,
+                     (1u << 24) | (1u << 16));
+            assert(usb_xhci_controller_next_event(c, &event) == USB_OK);
+            assert(usb_xhci_control_event(&td, &event) == (failure == 1 ? USB_PHASE_ERROR : USB_STALL));
+        } else {
+            assert(result == USB_OK && usb_xhci_controller_next_event(c, &event) == USB_AGAIN);
+            m.stuck_halt = true;
+            assert(usb_xhci_controller_stop(c) == USB_TIMEOUT && !m.releases && td.pending);
+            m.stuck_halt = false;
+        }
+        assert(td.pending && (failure == 3 || td.faulted) &&
+               c->state == USB_XHCI_CONTROLLER_FAULTED && !m.releases);
+        assert(usb_xhci_control_release_stopped(&td) == USB_INVALID);
+        m.fail_access = 0;
+        assert(usb_xhci_controller_stop(c) == USB_OK);
+        assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);
+        assert(usb_xhci_control_release_stopped(&td) == USB_OK);
+        assert(usb_xhci_transfer_ring_destroy(&ring) == USB_OK && m.allocations == m.releases);
+        free(c);
+    }
+    /* The data and endpoint ring may have different DMA allocator contexts. */
+    struct model other; init_model(&m, 0); init_model(&other, 0);
+    other.next_dma = 0x85000000u;
+    c = new_controller(); assert(start(&m, c) == USB_OK);
+    struct usb_dma_ops ring_dma = dma(&other);
+    assert(usb_xhci_transfer_ring_init(&ring, &ring_dma, 8) == USB_OK);
+    assert(usb_xhci_transfer_ring_mark_active(&ring) == USB_OK);
+    memset(&td, 0, sizeof(td)); setup = (struct usb_setup){0x80, 6, 0x100, 0, 18};
+    m.fail_access = m.accesses + 2u; m.applied_error = true;
+    assert(usb_xhci_control_submit(&td, c, &ring, 1, &setup, NULL, 18) == USB_IO);
+    m.fail_access = 0;
+    assert(usb_xhci_controller_stop(c) == USB_OK);
+    assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);
+    assert(usb_xhci_control_release_stopped(&td) == USB_OK);
+    assert(usb_xhci_transfer_ring_destroy(&ring) == USB_OK);
+    assert(m.allocations == m.releases && other.allocations == other.releases);
+    free(c);
+    puts("PASS: xHCI EP0 control short/status and retained fault model");
 }
 static void test_running_schedule(void)
 {
@@ -399,6 +523,7 @@ static void test_guards_and_timeouts(void)
 int main(void)
 {
     test_running_schedule(); test_failure_retention(); test_guards_and_timeouts(); test_commands_and_events();
+    test_control_transfer();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
 }

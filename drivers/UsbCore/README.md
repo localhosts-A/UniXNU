@@ -60,7 +60,12 @@ larger-page selection is not implemented. It can submit one command, ring DB0
 and deliver every primary-ring event in order; a matched command completion
 retires the command, while errors preserve ownership until stop. The owner must
 enforce timeouts, handle all events and retain any command-referenced memory.
-It does not construct device contexts or USB transfers, translate IRQs,
+Its EP0 control TD path builds setup/data/status TRBs on an already configured
+slot and endpoint ring, uses a private DMA32 buffer that cannot cross 64 KiB,
+and waits for status after short IN data. Any uncertain transfer requires a
+fresh stop before release. The owner must create contexts, route events and
+enforce a bounded timeout; this is not yet a `usb_host_ops.control` backend.
+It does not construct device contexts or other USB transfers, translate IRQs,
 provide a DMA/IOMMU mapping, populate
 `usb_host_ops`, or publish HID/BOT services. Those runtime owners remain required.
 

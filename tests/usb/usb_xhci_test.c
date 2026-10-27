@@ -234,6 +234,7 @@ static void test_multi_trb_publication_order(void)
         ring.trbs.address + 3u * USB_XHCI_TRB_BYTES, &completed) == USB_OK && completed == 4);
     struct usb_xhci_trb td[3] = {make_trb(USB_XHCI_TRB_SETUP_STAGE, 10),
         make_trb(USB_XHCI_TRB_DATA_STAGE, 11), make_trb(USB_XHCI_TRB_STATUS_STAGE, 12)};
+    put_le32(td[1].bytes + 12, get_le32(td[1].bytes + 12) | USB_XHCI_TRB_CHAIN);
     m.capture_ring = true;
     assert(usb_xhci_transfer_ring_enqueue(&ring, td, 3, NULL) == USB_OK);
     m.capture_ring = false;
@@ -246,6 +247,7 @@ static void test_multi_trb_publication_order(void)
     assert(m.captured_controls[2][6] & USB_XHCI_TRB_CYCLE);
     assert(!(m.captured_controls[2][0] & USB_XHCI_TRB_CYCLE));
     assert(m.captured_controls[2][7] & USB_XHCI_TRB_CYCLE);
+    assert(m.captured_controls[2][7] & USB_XHCI_TRB_CHAIN);
     assert(m.captured_controls[3][5] & USB_XHCI_TRB_CYCLE);
     assert(ring.producer_index == 1 && ring.producer_cycle == 0 && ring.outstanding == 4);
     assert(usb_xhci_transfer_ring_halted(&ring) == USB_OK);

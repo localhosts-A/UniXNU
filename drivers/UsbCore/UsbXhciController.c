@@ -32,6 +32,18 @@ static void put_le64(uint8_t *p, uint64_t value)
     for (unsigned i = 0; i < 8; ++i) p[i] = (uint8_t)(value >> (8u * i));
 }
 
+static void put_le32(uint8_t *p, uint32_t value)
+{
+    for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(value >> (8u * i));
+}
+
+static void copy_bytes(void *dst, const void *src, size_t length)
+{
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    while (length--) *d++ = *s++;
+}
+
 struct guarded_probe {
     const struct usb_mmio *mmio;
     int (*guard)(void *);
@@ -330,6 +342,124 @@ int usb_xhci_controller_next_event(struct usb_xhci_controller *c, struct usb_xhc
         c->state = USB_XHCI_CONTROLLER_FAULTED;
     }
     *out = event;
+    return USB_OK;
+}
+
+static uint64_t control_trb_address(const struct usb_xhci_transfer_ring *ring, uint32_t index)
+{
+    return ring->trbs.address + (uint64_t)(index % ring->usable_entries) * USB_XHCI_TRB_BYTES;
+}
+
+int usb_xhci_control_submit(struct usb_xhci_control_td *td, struct usb_xhci_controller *c,
+                            struct usb_xhci_transfer_ring *ring, uint8_t slot,
+                            const struct usb_setup *setup, const void *out_data, size_t capacity)
+{
+    if (!td || !c || !ring || !setup || !slot) return USB_INVALID;
+    if (td->pending || td->complete || td->faulted || td->data.cpu) return USB_BUSY;
+    if (c->state != USB_XHCI_CONTROLLER_RUNNING || !ring->controller_active ||
+        ring->faulted || !ring->trbs.cpu || ring->outstanding || ring->usable_entries < 3u ||
+        ring->producer_index >= ring->usable_entries) return USB_INVALID;
+    if ((size_t)slot * 8u >= c->dcbaa.size) return USB_RANGE;
+    bool input = (setup->type & 0x80u) != 0;
+    size_t length = setup->length;
+    if (length && ((!input && !out_data) || capacity < length)) return USB_RANGE;
+    int result = controller_ready(c);
+    if (result) return result;
+
+    zero_bytes(td, sizeof(*td));
+    td->controller = c; td->ring = ring; td->dma = c->dma; td->slot = slot;
+    td->requested = length; td->input = input; td->trb_count = length ? 3u : 2u;
+    if (length) {
+        result = usb_dma_alloc32(&c->dma, length, 65536u, &td->data);
+        if (result) { zero_bytes(td, sizeof(*td)); return result; }
+        if (!input) copy_bytes(td->data.cpu, out_data, length);
+        result = usb_dma_sync(&c->dma, &td->data, 0, length,
+                              input ? USB_DMA_FROM_DEVICE : USB_DMA_TO_DEVICE, true);
+        if (result) { usb_dma_free(&c->dma, &td->data); zero_bytes(td, sizeof(*td)); return result; }
+    }
+    struct usb_xhci_trb trbs[3] = {{{0}}, {{0}}, {{0}}};
+    put_le32(trbs[0].bytes, (uint32_t)setup->type | ((uint32_t)setup->request << 8) |
+                           ((uint32_t)setup->value << 16));
+    put_le32(trbs[0].bytes + 4, (uint32_t)setup->index | ((uint32_t)setup->length << 16));
+    put_le32(trbs[0].bytes + 8, 8u);
+    put_le32(trbs[0].bytes + 12, (USB_XHCI_TRB_SETUP_STAGE << USB_XHCI_TRB_TYPE_SHIFT) |
+             (1u << 6) | (length ? (input ? 3u : 2u) << 16 : 0u));
+    uint32_t start = ring->producer_index;
+    unsigned status_index = length ? 2u : 1u;
+    if (length) {
+        put_le64(trbs[1].bytes, td->data.address);
+        put_le32(trbs[1].bytes + 8, (uint32_t)length);
+        put_le32(trbs[1].bytes + 12, (USB_XHCI_TRB_DATA_STAGE << USB_XHCI_TRB_TYPE_SHIFT) |
+                 (input ? ((1u << 16) | (1u << 2)) : 0u));
+        td->data_trb = control_trb_address(ring, start + 1u);
+    }
+    put_le32(trbs[status_index].bytes + 12,
+             (USB_XHCI_TRB_STATUS_STAGE << USB_XHCI_TRB_TYPE_SHIFT) | (1u << 5) |
+             ((!length || !input) ? (1u << 16) : 0u));
+    td->status_trb = control_trb_address(ring, start + status_index);
+    td->pending = true; /* Ring publication can have taken effect on failure. */
+    result = usb_xhci_transfer_ring_enqueue(ring, trbs, td->trb_count, NULL);
+    if (result) {
+        if (ring->faulted) { td->faulted = true; c->state = USB_XHCI_CONTROLLER_FAULTED; }
+        else { usb_dma_free(&c->dma, &td->data); zero_bytes(td, sizeof(*td)); }
+        return result;
+    }
+    uint32_t doorbell = c->caps.doorbell_offset + (uint32_t)slot * 4u;
+    result = guarded_write(c, doorbell, 1u); /* DCI 1 is EP0. */
+    if (!result) { uint32_t posted; result = guarded_read(c, doorbell, &posted); }
+    if (result) { td->faulted = true; c->state = USB_XHCI_CONTROLLER_FAULTED; }
+    return result;
+}
+
+int usb_xhci_control_event(struct usb_xhci_control_td *td, const struct usb_xhci_event *event)
+{
+    if (!td || !event || !td->pending || td->faulted || !td->controller || !td->ring ||
+        td->controller->state != USB_XHCI_CONTROLLER_RUNNING)
+        return USB_INVALID;
+    if (event->kind != USB_XHCI_EVENT_TRANSFER || event->data.transfer.slot_id != td->slot ||
+        event->data.transfer.endpoint_id != 1u) return USB_AGAIN;
+    if (event->data.transfer.trb_pointer_valid && !event->data.transfer.event_data &&
+        event->data.transfer.pointer_or_data == td->data_trb && td->input && td->requested &&
+        !td->short_seen && event->completion_code == USB_XHCI_CC_SHORT_PACKET &&
+        event->data.transfer.residual_bytes <= td->requested) {
+        td->actual = td->requested - event->data.transfer.residual_bytes;
+        td->short_seen = true;
+        return USB_AGAIN;
+    }
+    if (!event->data.transfer.trb_pointer_valid || event->data.transfer.event_data ||
+        event->data.transfer.pointer_or_data != td->status_trb ||
+        event->completion_code != USB_XHCI_CC_SUCCESS) {
+        td->faulted = true; td->controller->state = USB_XHCI_CONTROLLER_FAULTED;
+        return event->completion_code == USB_XHCI_CC_STALL_ERROR ? USB_STALL : USB_PHASE_ERROR;
+    }
+    uint32_t completed = 0;
+    int result = usb_xhci_transfer_ring_complete_through(td->ring, td->status_trb, &completed);
+    if (!result && completed != td->trb_count) result = USB_PHASE_ERROR;
+    if (!result && td->input && td->requested)
+        result = usb_dma_sync(&td->controller->dma, &td->data, 0, td->requested, USB_DMA_FROM_DEVICE, false);
+    if (result) { td->faulted = true; td->controller->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+    if (!td->short_seen) td->actual = td->requested;
+    td->pending = false; td->complete = true;
+    return USB_OK;
+}
+
+int usb_xhci_control_finish(struct usb_xhci_control_td *td, void *buffer, size_t capacity, size_t *actual)
+{
+    if (!td || !actual || !td->complete || td->faulted || !td->controller) return USB_INVALID;
+    if (td->input && td->actual && (!buffer || capacity < td->actual)) return USB_RANGE;
+    if (td->input && td->actual) copy_bytes(buffer, td->data.cpu, td->actual);
+    *actual = td->actual;
+    usb_dma_free(&td->dma, &td->data);
+    zero_bytes(td, sizeof(*td));
+    return USB_OK;
+}
+
+int usb_xhci_control_release_stopped(struct usb_xhci_control_td *td)
+{
+    if (!td || !td->ring || !td->controller || td->ring->controller_active || td->ring->faulted)
+        return USB_INVALID;
+    usb_dma_free(&td->dma, &td->data);
+    zero_bytes(td, sizeof(*td));
     return USB_OK;
 }
 

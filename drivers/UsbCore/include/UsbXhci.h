@@ -19,6 +19,7 @@ extern "C" {
 #define USB_XHCI_TRB_CYCLE 0x00000001u
 #define USB_XHCI_TRB_TOGGLE_CYCLE 0x00000002u
 #define USB_XHCI_TRB_EVENT_DATA 0x00000004u
+#define USB_XHCI_TRB_CHAIN 0x00000010u
 
 enum usb_xhci_trb_type {
     USB_XHCI_TRB_NORMAL = 1,
@@ -50,6 +51,7 @@ struct usb_xhci_trb { uint8_t bytes[USB_XHCI_TRB_BYTES]; };
 enum usb_xhci_completion_code {
     USB_XHCI_CC_INVALID = 0,
     USB_XHCI_CC_SUCCESS = 1,
+    USB_XHCI_CC_STALL_ERROR = 6,
     USB_XHCI_CC_SHORT_PACKET = 13,
     USB_XHCI_CC_RING_UNDERRUN = 14,
     USB_XHCI_CC_RING_OVERRUN = 15,
@@ -228,6 +230,35 @@ int usb_xhci_controller_submit_command(struct usb_xhci_controller *,
  * event advances ERDP at most to the last handled entry; an empty-ring poll
  * advances to the empty slot. */
 int usb_xhci_controller_next_event(struct usb_xhci_controller *, struct usb_xhci_event *);
+
+/* One EP0 control TD on a slot/context and active endpoint ring established by
+ * the owner, in the same controller DMA address space. The caller serializes
+ * all ring use and routes every event to its
+ * owner. It must retain this object and its slot until finish or fresh stop.
+ * Zero-initialize the TD before first use. No more than one TD may be
+ * outstanding on this ring. The private DMA32 data
+ * buffer never crosses a 64 KiB boundary. Short IN data waits for status. */
+struct usb_xhci_control_td {
+    struct usb_xhci_controller *controller;
+    struct usb_xhci_transfer_ring *ring;
+    struct usb_dma_ops dma;
+    struct usb_dma_buffer data;
+    uint64_t data_trb, status_trb;
+    size_t requested, actual;
+    uint8_t slot, trb_count;
+    bool input, pending, complete, short_seen, faulted;
+};
+int usb_xhci_control_submit(struct usb_xhci_control_td *, struct usb_xhci_controller *,
+                            struct usb_xhci_transfer_ring *, uint8_t slot,
+                            const struct usb_setup *, const void *out_data, size_t capacity);
+/* AGAIN also means an unrelated event or a short data stage; it does not
+ * retire the TD. A matching error faults the controller and retains DMA. */
+int usb_xhci_control_event(struct usb_xhci_control_td *, const struct usb_xhci_event *);
+/* Copies IN data only after the status completion; output is unchanged on
+ * failure. For OUT/no-data transfers, buffer may be NULL. */
+int usb_xhci_control_finish(struct usb_xhci_control_td *, void *buffer, size_t capacity, size_t *actual);
+/* Only after controller/endpoint stop proof and ring_halted has succeeded. */
+int usb_xhci_control_release_stopped(struct usb_xhci_control_td *);
 /* Stop submissions and children first. Stop requires fresh halt and reset
  * proof before releasing any controller-visible memory; errors are retryable. */
 int usb_xhci_controller_stop(struct usb_xhci_controller *);
