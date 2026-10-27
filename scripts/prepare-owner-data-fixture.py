@@ -52,7 +52,7 @@ def select_whole_disk(system_entities):
                      f'attach reported [{summary}]')
 
 
-def select_apfs_partition(whole_device, listing):
+def select_raw_device(whole_device, listing):
     disk_name = Path(whole_device).name
     if not re.fullmatch(r'disk[0-9]+', disk_name):
         raise SystemExit('Invalid Data seed whole-disk device name')
@@ -60,9 +60,16 @@ def select_apfs_partition(whole_device, listing):
              if entry.get('DeviceIdentifier') == disk_name]
     if len(disks) != 1:
         raise SystemExit('diskutil did not identify the Data seed whole disk')
-    partitions = [entry for entry in disks[0].get('Partitions', [])
+    reported_partitions = disks[0].get('Partitions', [])
+    partitions = [entry for entry in reported_partitions
                   if isinstance(entry.get('DeviceIdentifier'), str) and
                   re.fullmatch(r'disk[0-9]+s[0-9]+', entry['DeviceIdentifier'])]
+    if not reported_partitions:
+        # hdiutil -layout NONE can place the APFS container directly on the
+        # whole disk. diskutil info and the raw NXSB check validate that path.
+        return '/dev/' + disk_name
+    if len(partitions) != len(reported_partitions):
+        raise SystemExit(f'diskutil returned malformed partition entries: {reported_partitions}')
     apfs_contents = {'APPLE_APFS', '7C3457EF-0000-11AA-AA11-00306543ECAC'}
     apfs = [entry for entry in partitions
             if str(entry.get('Content', '')).upper() in apfs_contents]
@@ -199,7 +206,7 @@ def main():
     try:
         listing = plistlib.loads(subprocess.check_output(
             ['diskutil', 'list', '-plist', Path(whole_device).name]))
-        raw_device = select_apfs_partition(whole_device, listing)
+        raw_device = select_raw_device(whole_device, listing)
         raw_info = plistlib.loads(subprocess.check_output(['diskutil', 'info', '-plist', raw_device]))
         if (raw_info.get('BusProtocol') != 'Disk Image' or raw_info.get('Writable') is not False or
                 raw_info.get('DeviceNode') != raw_device):
@@ -235,7 +242,8 @@ def main():
         'os_root_dyld_sha256': DYLD_SHA256,
         'volume_uuid': volume_uuid,
         'whole_disk_device': Path(whole_device).name,
-        'apfs_partition_device': Path(raw_device).name,
+        'raw_device': Path(raw_device).name,
+        'raw_device_kind': 'whole-disk' if raw_device == whole_device else 'partition',
         'bytes': image.stat().st_size,
         'sha256': sha256(image),
         'apfs_block_size': block_size,
