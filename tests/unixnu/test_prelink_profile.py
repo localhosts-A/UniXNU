@@ -2,6 +2,7 @@ from pathlib import Path
 import copy
 import hashlib
 import importlib.util
+import struct
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -17,6 +18,7 @@ from unixnu import kernel
 PRELINK = ROOT / "kits/NativePrelink"
 sys.path.insert(0, str(PRELINK))
 from emit_prelink import to_xml
+import native_prelink
 from native_prelink import backed_offset, macho, unserialize_xml
 from test_emit_prelink import images as prelink_images
 from test_native_prelink import header, segment
@@ -24,11 +26,48 @@ SPEC = importlib.util.spec_from_file_location(
     "source_interface_prelink", ROOT / "scripts/emit-source-interface-prelink.py")
 SOURCE_PRELINK = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SOURCE_PRELINK)
+STORAGE_SYMBOL = '__ZN7IOMedia13attachToChildEP15IORegistryEntryPK15IORegistryPlane'
+
+
+def add_native_export(data, symbol, address):
+    """Append a symbol to a synthetic kernel while keeping its Mach-O valid."""
+    image = bytearray(data)
+    native = macho(image)
+    symtab_command = next(offset for command, offset, _ in native['commands'] if command == 2)
+    symoff, count, stroff, strsize = struct.unpack_from('<4I', image, symtab_command + 8)
+    old_strings = image[stroff:stroff + strsize]
+    records = [struct.unpack_from('<IBBHQ', image, symoff + index * 16)
+               for index in range(count)]
+    string_table = bytearray(b'\0')
+    rebuilt_records = []
+    for strx, kind, section, description, value in records:
+        end = old_strings.find(b'\0', strx)
+        name = old_strings[strx:end]
+        new_strx = len(string_table)
+        string_table.extend(name + b'\0')
+        rebuilt_records.append((new_strx, kind, section, description, value))
+    name = symbol.encode()
+    new_strx = len(string_table)
+    string_table.extend(name + b'\0')
+    rebuilt_records.append((new_strx, 0x0f, 1, 0, address))
+    new_symoff = 0x1100
+    new_stroff = new_symoff + len(rebuilt_records) * 16
+    if new_stroff + len(string_table) > len(image):
+        raise AssertionError('synthetic native symbol table exceeds its image')
+    for index, record in enumerate(rebuilt_records):
+        struct.pack_into('<IBBHQ', image, new_symoff + index * 16, *record)
+    image[new_stroff:new_stroff + len(string_table)] = string_table
+    struct.pack_into('<4I', image, symtab_command + 8,
+                     new_symoff, len(rebuilt_records), new_stroff, len(string_table))
+    text = next(segment for segment in native['segments'] if segment['name'] == '__TEXT')
+    struct.pack_into('<I', image, text['command_offset'] + 60, 5)  # VM_PROT_READ | VM_PROT_EXECUTE
+    return bytes(image)
 
 
 class PrelinkProfileTests(unittest.TestCase):
     def test_source_interface_rewrite_preserves_donor_identity_without_executable(self):
         native, original = prelink_images()
+        native = add_native_export(native, STORAGE_SYMBOL, 0x100a00)
         original = bytearray(original)
         parent = macho(original)
         info = next(item for item in parent['segments'] if item['name'] == '__PRELINK_INFO')
@@ -49,8 +88,11 @@ class PrelinkProfileTests(unittest.TestCase):
             'OSBundleLibraries': {},
             'IOKitPersonalities': {'StorageFixture': {'IOClass': 'SourceStorageFixture'}},
         })
-        storage_header = header(11, [segment('__TEXT', 0x2800, 0x100, 0, 0x100)])
+        storage_text = bytearray(segment('__TEXT_EXEC', 0x2800, 0x100, 0, 0x100))
+        struct.pack_into('<I', storage_text, 60, 5)
+        storage_header = header(11, [bytes(storage_text)])
         original[0x1800:0x1800 + len(storage_header)] = storage_header
+        struct.pack_into('<Q', original, 0x3000, 0x2800)
         encoded = ET.tostring(to_xml(metadata), encoding='utf-8') + b'\0'
         self.assertLessEqual(len(encoded), info['filesize'])
         original[info_at:info_at + info['filesize']] = encoded + bytes(info['filesize'] - len(encoded))
@@ -58,7 +100,10 @@ class PrelinkProfileTests(unittest.TestCase):
         digest = hashlib.sha256(original).hexdigest()
         image, report = SOURCE_PRELINK.build_candidate(
             native, original, ["test.component"], 0x4000,
-            source_interfaces=["test.storage"])
+            source_interfaces=["test.storage"],
+            source_interface_bindings=[{
+                'bundle': 'test.storage', 'donor_va': '0x2800', 'symbol': STORAGE_SYMBOL,
+            }], kernelcache_sha256=digest)
         self.assertEqual(hashlib.sha256(original).hexdigest(), digest)
         self.assertEqual(report["original_sha256"], digest)
         self.assertEqual(report["source_interfaces"], ["test.storage"])
@@ -68,6 +113,23 @@ class PrelinkProfileTests(unittest.TestCase):
         record = report["source_interface_transform"]["entries"]["test.storage"]
         self.assertEqual(record["dependencies"], [])
         self.assertEqual(record["personalities"], ["StorageFixture"])
+        self.assertEqual(report['source_interface_bindings'], [{
+            'bundle': 'test.storage', 'donor_va': 0x2800, 'symbol': STORAGE_SYMBOL,
+            'native_va': 0x100a00, 'reference_count': 1,
+        }])
+        binding, = (item for item in report['bindings'] if item['target'] == 0x2800)
+        self.assertEqual((binding['new_target'], binding['kind']), (0x100a00, 'source_interface'))
+
+        unused = bytearray(original)
+        struct.pack_into('<Q', unused, 0x3000, 0x9000)
+        unused_digest = hashlib.sha256(unused).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'was not used by the pinned pointer table'):
+            SOURCE_PRELINK.build_candidate(
+                native, bytes(unused), ["test.component"], 0x4000,
+                source_interfaces=["test.storage"],
+                source_interface_bindings=[{
+                    'bundle': 'test.storage', 'donor_va': '0x2800', 'symbol': STORAGE_SYMBOL,
+                }], kernelcache_sha256=unused_digest)
 
         # The kernelcache plist may share objects through ID/IDREF. Resolve both
         # the top-level component array and a bundle identifier while editing.
@@ -112,7 +174,10 @@ class PrelinkProfileTests(unittest.TestCase):
             idref_encoded + bytes(info['filesize'] - len(idref_encoded))
         _, idref_report = SOURCE_PRELINK.build_candidate(
             native, bytes(idref_data), ["test.component"], 0x4000,
-            source_interfaces=["test.storage"])
+            source_interfaces=["test.storage"],
+            source_interface_bindings=[{
+                'bundle': 'test.storage', 'donor_va': '0x2800', 'symbol': STORAGE_SYMBOL,
+            }], kernelcache_sha256=hashlib.sha256(bytes(idref_data)).hexdigest())
         self.assertIn("test.storage", idref_report["codeless_components"])
 
         wrong_type = bytearray(original)
@@ -120,6 +185,60 @@ class PrelinkProfileTests(unittest.TestCase):
         wrong_type[0x1800:0x1800 + len(wrong_header)] = wrong_header
         with self.assertRaisesRegex(ValueError, 'MH_KEXT_BUNDLE'):
             SOURCE_PRELINK.rewrite_source_interfaces(bytes(wrong_type), ["test.storage"])
+
+    def test_source_interface_binding_requires_unique_native_symbol_and_exact_donor_segment(self):
+        native, _ = prelink_images()
+        native = add_native_export(native, STORAGE_SYMBOL, 0x100a00)
+        manifest = {'test.storage': {'segments': [
+            {'name': '__TEXT_EXEC', 'va': 0x2800, 'size': 0x100, 'initprot': 5},
+        ]}}
+        binding = {'bundle': 'test.storage', 'donor_va': '0x2800', 'symbol': STORAGE_SYMBOL}
+        digest = 'a' * 64
+        normalized, addresses = SOURCE_PRELINK.normalize_source_interface_bindings(
+            native, manifest, [binding], digest, digest)
+        self.assertEqual(normalized[0x2800]['symbol'], STORAGE_SYMBOL)
+        self.assertEqual(addresses, {0x2800: 0x100a00})
+
+        with self.assertRaisesRegex(ValueError, 'exact pinned kernelcache'):
+            SOURCE_PRELINK.normalize_source_interface_bindings(native, manifest, [binding], 'b' * 64, digest)
+        with self.assertRaisesRegex(ValueError, 'not in one declared executable segment'):
+            SOURCE_PRELINK.normalize_source_interface_bindings(
+                native, manifest, [{**binding, 'donor_va': '0x2900'}], digest, digest)
+        non_executable = {'test.storage': {'segments': [
+            {'name': '__TEXT_EXEC', 'va': 0x2800, 'size': 0x100, 'initprot': 1},
+        ]}}
+        with self.assertRaisesRegex(ValueError, 'not in one declared executable segment'):
+            SOURCE_PRELINK.normalize_source_interface_bindings(native, non_executable, [binding], digest, digest)
+        overlapping = {**manifest, 'other.storage': {'segments': [
+            {'name': '__TEXT_EXEC', 'va': 0x2800, 'size': 0x20, 'initprot': 5},
+        ]}}
+        with self.assertRaisesRegex(ValueError, 'not in one declared executable segment'):
+            SOURCE_PRELINK.normalize_source_interface_bindings(native, overlapping, [binding], digest, digest)
+        with self.assertRaisesRegex(ValueError, '0 address candidates'):
+            SOURCE_PRELINK.normalize_source_interface_bindings(
+                native, manifest, [{**binding, 'symbol': '_missing_source_symbol'}], digest, digest)
+        ambiguous = add_native_export(native, STORAGE_SYMBOL, 0x100a04)
+        with self.assertRaisesRegex(ValueError, '2 address candidates'):
+            SOURCE_PRELINK.normalize_source_interface_bindings(ambiguous, manifest, [binding], digest, digest)
+        non_exec_native = bytearray(native)
+        text = next(segment for segment in macho(non_exec_native)['segments'] if segment['name'] == '__TEXT')
+        struct.pack_into('<I', non_exec_native, text['command_offset'] + 60, 3)
+        with self.assertRaisesRegex(ValueError, 'not in one aligned executable kernel segment'):
+            SOURCE_PRELINK.normalize_source_interface_bindings(
+                bytes(non_exec_native), manifest, [binding], digest, digest)
+
+        token = SOURCE_PRELINK._SOURCE_INTERFACE_CONTEXT.set({
+            'binding_specs': {0x2800: {'bundle': 'test.storage', 'donor_va': 0x2800,
+                                       'symbol': STORAGE_SYMBOL}},
+            'native_addresses': {0x2800: 0x100a00},
+            'resolved_counts': {},
+        })
+        try:
+            with self.assertRaisesRegex(ValueError, 'unexpectedly has kernelcache exports'):
+                SOURCE_PRELINK.resolve_kernel_binding(
+                    0x2800, {0x2800: ['_unexpected_donor_export']}, {STORAGE_SYMBOL: {0x100a00}})
+        finally:
+            SOURCE_PRELINK._SOURCE_INTERFACE_CONTEXT.reset(token)
 
     def test_source_interfaces_are_passed_to_native_prelink(self):
         with TemporaryDirectory() as temp:
@@ -134,6 +253,11 @@ class PrelinkProfileTests(unittest.TestCase):
                 "slide": "-0x1000000",
                 "roots": ["com.apple.filesystems.apfs"],
                 "source_interfaces": ["com.apple.iokit.IOStorageFamily"],
+                "source_interface_bindings": [{
+                    "bundle": "com.apple.iokit.IOStorageFamily",
+                    "donor_va": "0xfffffff0059762a8",
+                    "symbol": STORAGE_SYMBOL,
+                }],
                 "kernelcache_sha256": "0" * 64,
             }
             ctx = SimpleNamespace(
@@ -151,6 +275,10 @@ class PrelinkProfileTests(unittest.TestCase):
             self.assertIn("com.apple.filesystems.apfs", command)
             self.assertIn("--source-interface", command)
             self.assertIn("com.apple.iokit.IOStorageFamily", command)
+            self.assertIn("--source-interface-binding", command)
+            self.assertIn("com.apple.iokit.IOStorageFamily=0xfffffff0059762a8=" + STORAGE_SYMBOL, command)
+            self.assertIn("--kernelcache-sha256", command)
+            self.assertIn("0" * 64, command)
 
     def test_source_interface_requires_a_pinned_kernelcache(self):
         with TemporaryDirectory() as temp:

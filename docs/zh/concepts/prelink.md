@@ -10,6 +10,7 @@
 | 原始 kernelcache | IPSW `KernelCache`，或 `--kernelcache FILE` |
 | 组件列表 | `[kernel.prelink] roots` |
 | 原生内核提供的组件身份 | `[kernel.prelink] source_interfaces` |
+| 缺少 donor 名称时的显式符号映射 | `[kernel.prelink] source_interface_bindings` |
 | slide | `[kernel.prelink] slide` |
 | 早期安全初始化器 | `[kernel.prelink] early_security_init` |
 
@@ -25,7 +26,10 @@ kernelcache 是 `KernelCache` IM4P 的 LZFSE 负载。选出 arm64 切片，并�
    若原生内核已包含某个组件实现，板级文件可声明 `source_interfaces`。
    选定的预链接工具必须保留 bundle 版本、依赖和 IOKit personality，
    作为无代码元数据处理，并移除重复可执行代码与 kmod 记录。默认
-   NativePrelink emitter 本身不会自动执行这项板级转换。
+   NativePrelink emitter 本身不会自动执行这项板级转换。如果 donor 地址在
+   kernelcache 中没有符号名，板级配置可用 `source_interface_bindings` 固定
+   bundle、donor VA 和原生导出名；这类映射必须匹配精确固定的 kernelcache，
+   且 donor 地址和原生导出都必须唯一落在可执行段中。
 4. 把选中的组件段复制到原生内核的空合并段。
 5. 重绑定引用选中组件的指针。
 6. 对所有选中地址应用 slide。
@@ -51,6 +55,7 @@ kernelcache 是 `KernelCache` IM4P 的 LZFSE 负载。选出 arm64 切片，并�
 ## 指针重绑定
 
 原生内核从原始组件导入符号。预链接把每个导入解析为组件导出，并在导入位置写入 slide 后的地址。板级 source-interface 工具必须把指向已省略可执行代码的导入唯一绑定到原生内核导出；找不到或存在歧义时立即拒绝。
+显式 donor-to-native 映射只适用于固定的 donor 地址。报告会记录符号名、donor/native 地址，以及使用该映射的重定位数量。
 
 计划记录每个绑定：
 
@@ -91,6 +96,7 @@ kernelcache_sha256 = "..."
 | --- | --- |
 | `components` | 包含的原始 bundle identifier |
 | `source_interfaces` | 由原生内核实现的原始组件身份 |
+| `source_interface_bindings` | 显式 donor 地址到唯一原生导出的映射 |
 | `codeless_components` | 保留 bundle 元数据和 personalities、但不含重复可执行代码的组件 |
 | `kernel_interfaces` | 导出内核接口的组件 |
 | `bindings` | 导入位置和 slide 后的目标 |

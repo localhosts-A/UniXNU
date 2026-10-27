@@ -1,23 +1,53 @@
 #!/usr/bin/env python3
 """Prelink original components while treating native-kernel implementations as codeless bundles."""
 import argparse
+import contextvars
 import hashlib
 import json
 from pathlib import Path
 import sys
 from collections import Counter
+import re
 import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'kits/NativePrelink'))
 from emit_prelink import emit as emit_candidate
-from native_prelink import backed_offset, macho, unserialize_xml
+import native_prelink
+from native_prelink import backed_offset, exports, macho, unserialize_xml
 
 
 EXECUTABLE_KEYS = ('CFBundleExecutable', '_PrelinkExecutableLoadAddr',
                    '_PrelinkExecutableSourceAddr', '_PrelinkExecutableSize',
                    '_PrelinkKmodInfo', '_PrelinkExecutableRelativePath')
+_SOURCE_INTERFACE_CONTEXT = contextvars.ContextVar('source_interface_bindings', default=None)
+_CURRENT_UNIQUE_KERNEL_BINDING = native_prelink.unique_kernel_binding
+_BASE_UNIQUE_KERNEL_BINDING = getattr(
+    _CURRENT_UNIQUE_KERNEL_BINDING, '_source_interface_base', _CURRENT_UNIQUE_KERNEL_BINDING)
+
+
+def resolve_kernel_binding(address, original_exports, native_by_name):
+    """Resolve only explicitly configured donor addresses in this execution context."""
+    context = _SOURCE_INTERFACE_CONTEXT.get()
+    if context is None or address not in context['binding_specs']:
+        return _BASE_UNIQUE_KERNEL_BINDING(address, original_exports, native_by_name)
+    binding = context['binding_specs'][address]
+    original_names = original_exports.get(address, [])
+    if original_names:
+        raise ValueError(f'Explicit source-interface donor address {address:#x} unexpectedly has kernelcache exports: {original_names}')
+    choices = set(native_by_name.get(binding['symbol'], set()))
+    expected = context['native_addresses'][address]
+    if len(choices) != 1 or next(iter(choices)) != expected:
+        raise ValueError(f"Native source symbol {binding['symbol']} no longer resolves uniquely")
+    context['resolved_counts'][address] += 1
+    return expected
+
+
+# The dispatch function is installed once and delegates to NativePrelink unchanged
+# outside a ContextVar scope, so concurrent candidate builds cannot steal mappings.
+resolve_kernel_binding._source_interface_base = _BASE_UNIQUE_KERNEL_BINDING
+native_prelink.unique_kernel_binding = resolve_kernel_binding
 
 
 def resolve_element(element, references, seen=None):
@@ -113,7 +143,8 @@ def rewrite_source_interfaces(original_data, source_interfaces):
         module = macho(original_data, module_at)
         if module['kind'] != 11:
             raise ValueError(f'Source-interface donor is not an MH_KEXT_BUNDLE: {identifier}')
-        donor_segments = [{'name': segment['name'], 'va': segment['va'], 'size': segment['size']}
+        donor_segments = [{'name': segment['name'], 'va': segment['va'], 'size': segment['size'],
+                           'initprot': segment['initprot']}
                           for segment in module['segments']
                           if segment['size'] and segment['name'] != '__LINKEDIT']
         if not donor_segments:
@@ -142,12 +173,88 @@ def rewrite_source_interfaces(original_data, source_interfaces):
     return bytes(rewritten), manifest
 
 
+def normalize_source_interface_bindings(native_data, source_manifest, bindings,
+                                        kernelcache_sha256, original_digest):
+    """Validate narrowly pinned donor addresses and their unique native code exports."""
+    if not bindings:
+        return {}, {}
+    if not isinstance(kernelcache_sha256, str) or \
+            not re.fullmatch(r'[0-9a-f]{64}', kernelcache_sha256) or \
+            original_digest != kernelcache_sha256:
+        raise ValueError('Explicit source-interface bindings require the exact pinned kernelcache SHA-256')
+
+    normalized = {}
+    for binding in bindings:
+        if not isinstance(binding, dict) or set(binding) != {'bundle', 'donor_va', 'symbol'}:
+            raise ValueError('Source-interface binding requires exactly bundle, donor_va, and symbol')
+        bundle, symbol = binding['bundle'], binding['symbol']
+        try:
+            donor_va = int(binding['donor_va'], 0) if isinstance(binding['donor_va'], str) else int(binding['donor_va'])
+        except (TypeError, ValueError) as exc:
+            raise ValueError('Source-interface donor_va must be an integer address') from exc
+        if not isinstance(bundle, str) or not bundle or not isinstance(symbol, str) or not symbol or \
+                not 0 < donor_va < 1 << 64 or donor_va % 4:
+            raise ValueError('Invalid source-interface binding identity or address')
+        if bundle not in source_manifest:
+            raise ValueError(f'Source-interface binding bundle is not declared: {bundle}')
+        if donor_va in normalized:
+            raise ValueError(f'Duplicate source-interface donor address: {donor_va:#x}')
+        matches = [(owner, segment) for owner, entry in source_manifest.items()
+                   for segment in entry['segments']
+                   if segment['va'] <= donor_va < segment['va'] + segment['size']]
+        if len(matches) != 1 or matches[0][0] != bundle or \
+                matches[0][1]['name'] != '__TEXT_EXEC' or not matches[0][1]['initprot'] & 4:
+            raise ValueError(f'Source-interface donor address {donor_va:#x} is not in one declared executable segment of {bundle}')
+        normalized[donor_va] = {'bundle': bundle, 'donor_va': donor_va, 'symbol': symbol}
+
+    native_image = native_prelink.macho(native_data)
+    native_by_name = {}
+    for address, names in exports(native_data, native_image).items():
+        for name in names:
+            native_by_name.setdefault(name, set()).add(address)
+    native_addresses = {}
+    for donor_va, binding in normalized.items():
+        choices = native_by_name.get(binding['symbol'], set())
+        if len(choices) != 1:
+            raise ValueError(f"Native source symbol {binding['symbol']} has {len(choices)} address candidates")
+        native_va = next(iter(choices))
+        executable = [segment for segment in native_image['segments']
+                      if segment['initprot'] & 4 and segment['va'] <= native_va < segment['va'] + segment['size']]
+        if len(executable) != 1 or native_va % 4:
+            raise ValueError(f"Native source symbol {binding['symbol']} is not in one aligned executable kernel segment")
+        native_addresses[donor_va] = native_va
+    return normalized, native_addresses
+
+
 def build_candidate(native_data, original_data, roots, slide, early_security_init=None,
-                    source_interfaces=()):
+                    source_interfaces=(), source_interface_bindings=(), kernelcache_sha256=None):
     original_digest = hashlib.sha256(original_data).hexdigest()
     transformed, source_manifest = rewrite_source_interfaces(original_data, source_interfaces)
-    image, report = emit_candidate(native_data, transformed, roots, slide, early_security_init)
     identifiers = sorted(set(source_interfaces))
+    binding_specs, native_addresses = normalize_source_interface_bindings(
+        native_data, source_manifest, source_interface_bindings,
+        kernelcache_sha256, original_digest)
+    resolved_counts = Counter()
+    binding_context = {
+        'binding_specs': binding_specs,
+        'native_addresses': native_addresses,
+        'resolved_counts': resolved_counts,
+    }
+    context_token = _SOURCE_INTERFACE_CONTEXT.set(binding_context)
+    try:
+        image, report = emit_candidate(native_data, transformed, roots, slide, early_security_init)
+    finally:
+        _SOURCE_INTERFACE_CONTEXT.reset(context_token)
+
+    missing = sorted(set(binding_specs) - set(resolved_counts))
+    if missing:
+        raise ValueError('Configured source-interface binding was not used by the pinned pointer table: ' +
+                         ', '.join(f'{address:#x}' for address in missing))
+    report['source_interface_bindings'] = [
+        {**binding_specs[address], 'native_va': native_addresses[address],
+         'reference_count': resolved_counts[address]}
+        for address in sorted(binding_specs)
+    ]
     if any(identifier not in report.get('codeless_components', []) or
            identifier in report.get('components', []) for identifier in identifiers):
         raise ValueError('Source interface was not emitted only as codeless metadata')
@@ -175,6 +282,9 @@ def main():
     parser.add_argument('--prelinked', required=True, type=Path)
     parser.add_argument('--root', required=True, action='append')
     parser.add_argument('--source-interface', action='append', default=[])
+    parser.add_argument('--source-interface-binding', action='append', default=[],
+                        metavar='BUNDLE=DONOR_VA=SYMBOL')
+    parser.add_argument('--kernelcache-sha256')
     parser.add_argument('--slide', required=True, type=lambda value: int(value, 0))
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--early-security-init', action='append', default=[], metavar='BUNDLE=ORIGINAL_VA')
@@ -185,10 +295,22 @@ def main():
         if not separator or not identifier or identifier in initializers:
             parser.error('Use one BUNDLE=ORIGINAL_VA initializer per module')
         initializers[identifier] = int(address, 0)
+    source_bindings = []
+    for request in args.source_interface_binding:
+        bundle, separator, rest = request.partition('=')
+        donor_address, separator2, symbol = rest.partition('=')
+        if not separator or not separator2 or not bundle or not donor_address or not symbol or '=' in symbol:
+            parser.error('Use BUNDLE=DONOR_VA=SYMBOL for each explicit source-interface binding')
+        try:
+            donor_va = int(donor_address, 0)
+        except ValueError:
+            parser.error('Source-interface donor address must be an integer literal')
+        source_bindings.append({'bundle': bundle, 'donor_va': donor_va, 'symbol': symbol})
     if args.output.exists() or args.output.with_suffix('.json').exists():
         raise SystemExit('Refuse to overwrite an existing candidate or report')
     image, report = build_candidate(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root,
-                                    args.slide, initializers, args.source_interface)
+                                    args.slide, initializers, args.source_interface,
+                                    source_bindings, args.kernelcache_sha256)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(image)
     args.output.with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')

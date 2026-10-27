@@ -10,6 +10,7 @@ The prelinked kernel combines a kernel built from source with the original Apple
 | Original kernelcache | IPSW `KernelCache`, or `--kernelcache FILE` |
 | Component list | `[kernel.prelink] roots` |
 | Source-provided component identities | `[kernel.prelink] source_interfaces` |
+| Explicit donor-to-native exports without donor names | `[kernel.prelink] source_interface_bindings` |
 | Slide | `[kernel.prelink] slide` |
 | Early security initializer | `[kernel.prelink] early_security_init` |
 
@@ -26,7 +27,11 @@ The kernelcache is the LZFSE payload of the `KernelCache` IM4P. The arm64 slice 
    a component implementation. Its selected prelink tool must retain the bundle
    version, dependencies, and IOKit personalities as codeless metadata while
    omitting the duplicate executable and kmod record. The default NativePrelink
-   emitter does not apply that board-specific transformation by itself.
+   emitter does not apply that board-specific transformation by itself. When a
+   donor address has no kernelcache symbol name, the board may pin a narrow
+   `source_interface_bindings` entry containing its bundle, donor VA, and native
+   export name. Such entries require the exact pinned kernelcache and a unique
+   executable donor segment and native export.
 4. Copy the selected component segments into the native kernel's empty coalesced segments.
 5. Rebind every pointer that references a selected component.
 6. Apply the slide to every selected address.
@@ -51,7 +56,7 @@ The prelink copies each component segment into the matching range. The ranges ke
 
 ## Pointer rebinding
 
-The native kernel imports symbols from the original components. The prelink resolves each import to the component export and writes the slid address at the import site. A board-specific source-interface tool must resolve any import targeting an omitted executable to exactly one native export; unresolved or ambiguous bindings fail closed.
+The native kernel imports symbols from the original components. The prelink resolves each import to the component export and writes the slid address at the import site. A board-specific source-interface tool must resolve any import targeting an omitted executable to exactly one native export; unresolved or ambiguous bindings fail closed. An explicit donor-to-native mapping applies only to its pinned donor address. The report records each configured symbol, its donor and native address, and how many relocation entries used it.
 
 The plan records every binding:
 
@@ -92,6 +97,7 @@ The prelink emits a sparse index. The kernel patch `native-4k-bootstrap-capacity
 | --- | --- |
 | `components` | Original bundle identifiers included |
 | `source_interfaces` | Original component identities implemented by the native kernel |
+| `source_interface_bindings` | Explicit donor addresses resolved to unique native exports |
 | `codeless_components` | Bundle metadata and personalities without duplicate executable code |
 | `kernel_interfaces` | Components that export kernel interfaces |
 | `bindings` | Import sites and slid targets |
