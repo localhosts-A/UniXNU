@@ -13,6 +13,7 @@ import subprocess
 import time
 import tempfile
 import xml.etree.ElementTree as ET
+from gdb_stop_support import finish_stop_action
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('address', type=lambda value: int(value, 0))
@@ -676,6 +677,41 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                             if packet(f'z1,{address:x},4') != 'OK':
                                 raise RuntimeError('Cannot retire exhausted syscall observation breakpoint')
 
+            def observe_tracepoint(current):
+                global progress_clock_event, mutation_return, mutation_event
+                address = current[32]
+                if address not in trace_remaining:
+                    return False
+                trace_events.append({'pc': hex(address), 'x0': hex(current[0]),
+                                     'x1': hex(current[1]), 'lr': hex(current[30]),
+                                     'elapsed_seconds': round(time.monotonic() - started, 3)})
+                if progress_clock and address == progress_clock[0]:
+                    epoch_raw = packet(f'm{progress_clock[1]:x},8')
+                    freq_raw = packet(f'm{progress_clock[2]:x},8')
+                    if len(epoch_raw) != 16 or len(freq_raw) != 16 or epoch_raw.startswith('E') or freq_raw.startswith('E'):
+                        raise RuntimeError('Cannot read initialized diagnostic clock')
+                    before = int.from_bytes(bytes.fromhex(epoch_raw), 'little')
+                    frequency = int.from_bytes(bytes.fromhex(freq_raw), 'little')
+                    if not 1000 <= frequency <= 10**10:
+                        raise RuntimeError('Invalid actual counter frequency')
+                    after = (before - progress_clock[3] * frequency) & ((1 << 64) - 1)
+                    raw = after.to_bytes(8, 'little').hex()
+                    if packet(f'M{progress_clock[1]:x},8:{raw}') != 'OK' or packet(f'm{progress_clock[1]:x},8') != raw:
+                        raise RuntimeError('Cannot qualify diagnostic-only epoch write/readback')
+                    progress_clock_event = dict(advance_seconds=progress_clock[3], frequency=frequency,
+                        epoch_before=before, epoch_after=after, entry=hex(address),
+                        changed_only_own_diagnostic_epoch=True, hardware_or_os_clock_modified=False)
+                if mutation is not None and address == mutation[0]:
+                    mutation_return = current[30]
+                    if mutation_return in {args.address, *args.also_stop, *trace_remaining}:
+                        raise RuntimeError('Mutation return must be distinct from existing breakpoints')
+                    if packet(f'Z1,{mutation_return:x},4') != 'OK':
+                        raise RuntimeError('Cannot observe authentication return')
+                if packet(f'z1,{address:x},4') != 'OK':
+                    raise RuntimeError('Cannot remove one-shot tracepoint')
+                trace_remaining.remove(address)
+                return True
+
             while True:
                 stop, values, interrupted = continue_observing()
                 connection.settimeout(3)
@@ -789,35 +825,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                         if packet(f'Z1,{values[32]:x},4') != 'OK':
                             raise RuntimeError('Cannot restore repeated logpoint')
                     continue
-                if interrupted or values[32] not in trace_remaining:
+                if interrupted or not observe_tracepoint(values):
                     break
-                trace_events.append({'pc': hex(values[32]), 'x0': hex(values[0]),
-                                     'x1': hex(values[1]), 'lr': hex(values[30]),
-                                     'elapsed_seconds': round(time.monotonic() - started, 3)})
-                if progress_clock and values[32]==progress_clock[0]:
-                    epoch_raw=packet(f'm{progress_clock[1]:x},8')
-                    freq_raw=packet(f'm{progress_clock[2]:x},8')
-                    if len(epoch_raw)!=16 or len(freq_raw)!=16 or epoch_raw.startswith('E') or freq_raw.startswith('E'):
-                        raise RuntimeError('Cannot read initialized diagnostic clock')
-                    before=int.from_bytes(bytes.fromhex(epoch_raw),'little')
-                    frequency=int.from_bytes(bytes.fromhex(freq_raw),'little')
-                    if not 1000<=frequency<=10**10:raise RuntimeError('Invalid actual counter frequency')
-                    after=(before-progress_clock[3]*frequency)&((1<<64)-1)
-                    raw=after.to_bytes(8,'little').hex()
-                    if packet(f'M{progress_clock[1]:x},8:{raw}')!='OK' or packet(f'm{progress_clock[1]:x},8')!=raw:
-                        raise RuntimeError('Cannot qualify diagnostic-only epoch write/readback')
-                    progress_clock_event=dict(advance_seconds=progress_clock[3],frequency=frequency,
-                        epoch_before=before,epoch_after=after,entry=hex(values[32]),
-                        changed_only_own_diagnostic_epoch=True,hardware_or_os_clock_modified=False)
-                if mutation is not None and values[32] == mutation[0]:
-                    mutation_return = values[30]
-                    if mutation_return in {args.address, *args.also_stop, *trace_remaining}:
-                        raise RuntimeError('Mutation return must be distinct from existing breakpoints')
-                    if packet(f'Z1,{mutation_return:x},4') != 'OK':
-                        raise RuntimeError('Cannot observe authentication return')
-                if packet(f'z1,{values[32]:x},4') != 'OK':
-                    raise RuntimeError('Cannot remove one-shot tracepoint')
-                trace_remaining.remove(values[32])
             connection.settimeout(3)
             followed_entry = None
             followed_main = None
@@ -1218,17 +1227,29 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                     raise RuntimeError('Cannot observe the function return')
                 stop, values, interrupted = continue_observing()
                 connection.settimeout(3)
-                while not interrupted and values[32] == return_target and values[31] != return_stack:
-                    other_stack_returns += 1
-                    if other_stack_returns > 64:
-                        raise RuntimeError('Too many unrelated thread returns at the shared caller')
-                    if packet(f'z1,{return_target:x},4') != 'OK':
-                        raise RuntimeError('Cannot step over another thread at the shared caller')
-                    packet('s')
-                    if packet(f'Z1,{return_target:x},4') != 'OK':
-                        raise RuntimeError('Cannot restore the original thread return observation')
-                    stop, values, interrupted = continue_observing()
-                    connection.settimeout(3)
+                while not interrupted:
+                    action = finish_stop_action(values[32], values[31], return_target, return_stack, trace_remaining)
+                    if action == 'function-return':
+                        break
+                    if action == 'other-stack-return':
+                        other_stack_returns += 1
+                        if other_stack_returns > 64:
+                            raise RuntimeError('Too many unrelated thread returns at the shared caller')
+                        if packet(f'z1,{return_target:x},4') != 'OK':
+                            raise RuntimeError('Cannot step over another thread at the shared caller')
+                        packet('s')
+                        if packet(f'Z1,{return_target:x},4') != 'OK':
+                            raise RuntimeError('Cannot restore the original thread return observation')
+                        stop, values, interrupted = continue_observing()
+                        connection.settimeout(3)
+                        continue
+                    if action == 'tracepoint':
+                        if not observe_tracepoint(values):
+                            raise RuntimeError('Finish-function tracepoint was not pending')
+                        stop, values, interrupted = continue_observing()
+                        connection.settimeout(3)
+                        continue
+                    break
             report = {f'x{i}': hex(value) for i, value in enumerate(values[:31])}
             if process_plan:
                 report['process_layout_audit']=dict(native_sha256=process_plan.get('native_sha256'),layout=process_plan['process_layout'])
