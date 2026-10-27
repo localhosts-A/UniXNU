@@ -11,6 +11,11 @@ SPEC.loader.exec_module(storage)
 
 
 class SourceStorageBuildTests(unittest.TestCase):
+    def test_guid_partition_content_mask_is_quoted_for_osunserialize(self):
+        patch = (Path(__file__).resolve().parents[2] / 'patches/xnu/source-storage-personalities.patch').read_text()
+        self.assertIn("'Content Mask'    = 'GUID_partition_scheme';", patch)
+        self.assertNotIn("'Content Mask'    = GUID_partition_scheme;", patch)
+
     def test_bsd_media_name_uses_the_iokit_bsd_header(self):
         fixture = (Path(__file__).resolve().parents[2] / 'scripts/fixtures/source-storage.cpp').read_text()
         self.assertIn('#include <IOKit/IOBSD.h>', fixture)

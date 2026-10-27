@@ -15,7 +15,7 @@ diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 +    "     'IOProviderClass' = IOMedia;"
 +    "     'IOMatchCategory' = IOStorage;"
 +    "     'IOProbeScore'    = 4000:32;"
-+    "     'Content Mask'    = GUID_partition_scheme;"
++    "     'Content Mask'    = 'GUID_partition_scheme';"
 +    "     'IOPropertyMatch' = { 'Whole' = .true.; };"
 +    "   },"
 +    "   {"

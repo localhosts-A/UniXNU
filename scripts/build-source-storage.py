@@ -223,6 +223,8 @@ def verify_kernel(root, kernel):
     for name in ('IOBlockStorageDriver', 'IOGUIDPartitionScheme', 'IOMediaBSDClient'):
         if ("'IOClass'         = " + name + ';').encode() not in data:
             raise ValueError('Final kernel lacks builtin storage personality: ' + name)
+    if b"'Content Mask'    = 'GUID_partition_scheme';" not in data:
+        raise ValueError('Final kernel lacks the quoted GUID partition-scheme content mask')
     result = dict(report, kernel_link_verified=True, kernel_sha256=digest(kernel),
                   storage_runtime_qualified=False, physical_ufs_qualified=False)
     (out / 'kernel-link-report.json').write_text(json.dumps(result, indent=2) + '\n')
