@@ -9,6 +9,7 @@
 | 原生内核 | `out/<board>/tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf` |
 | 原始 kernelcache | IPSW `KernelCache`，或 `--kernelcache FILE` |
 | 组件列表 | `[kernel.prelink] roots` |
+| 原生内核提供的组件身份 | `[kernel.prelink] source_interfaces` |
 | slide | `[kernel.prelink] slide` |
 | 早期安全初始化器 | `[kernel.prelink] early_security_init` |
 
@@ -21,6 +22,10 @@ kernelcache 是 `KernelCache` IM4P 的 LZFSE 负载。选出 arm64 切片，并�
 1. 解析原生和原始 Mach-O。
 2. 读取原始 kernelcache 的 `__PRELINK_INFO`。
 3. 选择 `roots` 中的组件及其导入的内核接口。
+   若原生内核已包含某个组件实现，板级文件可声明 `source_interfaces`。
+   选定的预链接工具必须保留 bundle 版本、依赖和 IOKit personality，
+   作为无代码元数据处理，并移除重复可执行代码与 kmod 记录。默认
+   NativePrelink emitter 本身不会自动执行这项板级转换。
 4. 把选中的组件段复制到原生内核的空合并段。
 5. 重绑定引用选中组件的指针。
 6. 对所有选中地址应用 slide。
@@ -45,7 +50,7 @@ kernelcache 是 `KernelCache` IM4P 的 LZFSE 负载。选出 arm64 切片，并�
 
 ## 指针重绑定
 
-原生内核从原始组件导入符号。预链接把每个导入解析为组件导出，并在导入位置写入 slide 后的地址。
+原生内核从原始组件导入符号。预链接把每个导入解析为组件导出，并在导入位置写入 slide 后的地址。板级 source-interface 工具必须把指向已省略可执行代码的导入唯一绑定到原生内核导出；找不到或存在歧义时立即拒绝。
 
 计划记录每个绑定：
 
@@ -85,6 +90,8 @@ kernelcache_sha256 = "..."
 | 字段 | 含义 |
 | --- | --- |
 | `components` | 包含的原始 bundle identifier |
+| `source_interfaces` | 由原生内核实现的原始组件身份 |
+| `codeless_components` | 保留 bundle 元数据和 personalities、但不含重复可执行代码的组件 |
 | `kernel_interfaces` | 导出内核接口的组件 |
 | `bindings` | 导入位置和 slide 后的目标 |
 | `instruction_inventory` | PC 相对编码和内联数据 |

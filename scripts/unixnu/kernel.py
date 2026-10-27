@@ -152,6 +152,8 @@ def prelink(ctx):
     if not cache.is_file():
         raise Error(f'kernelcache not found: {cache}')
     wanted = spec.get('kernelcache_sha256')
+    if spec.get('source_interfaces') and not wanted:
+        raise Error('board source-interface transforms require a pinned kernelcache_sha256')
     if wanted and sha256_file(cache) != wanted:
         raise Error(f'{cache} does not match the kernelcache this board was qualified against (sha256 {wanted})')
     kernel = ctx.tree / spec['kernel']
@@ -166,6 +168,8 @@ def prelink(ctx):
                f'--slide={spec["slide"]}', '--output', output]
     for root in spec.get('roots', []):
         command += ['--root', root]
+    for interface in spec.get('source_interfaces', []):
+        command += ['--source-interface', interface]
     if spec.get('early_security_init'):
         command += ['--early-security-init', spec['early_security_init']]
     command += spec.get('extra_args', [])
