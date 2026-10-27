@@ -44,7 +44,7 @@
 | 补丁 | 作用 |
 | --- | --- |
 | `native-trust-cache-runtime` | 在 BCM2837 初始化 trust cache 运行时 |
-| `source-corecrypto14-bootstrap` | 早期启动时注册源码 corecrypto |
+| `source-corecrypto14-bootstrap` | 校验已初始化的目标 provider，或只启动一次源码 provider；半初始化状态失败关闭 |
 | `source-pthread-bootstrap` | 早期启动时注册源码 pthread |
 | `native-aes-personality` | 加入 AES、VirtIO 块、VirtIO 控制台、RAM 块和 UFS personality |
 | `offline-owner-root-crypto-probe` | 设置 `offline-owner-root-check` 时启动 verified root 探针 |

@@ -44,7 +44,7 @@ Patches apply in name order from `patches/xnu/*.patch` and `kits/NativePrelink/p
 | Patch | Purpose |
 | --- | --- |
 | `native-trust-cache-runtime` | Initializes the trust cache runtime on BCM2837 |
-| `source-corecrypto14-bootstrap` | Registers the source corecrypto provider at early boot |
+| `source-corecrypto14-bootstrap` | Verifies an already initialized target provider or starts the source provider once; partial state fails closed |
 | `source-pthread-bootstrap` | Registers the source pthread component at early boot |
 | `native-aes-personality` | Adds the AES, VirtIO block, VirtIO console, RAM block and UFS personalities |
 | `offline-owner-root-crypto-probe` | Starts the verified root probe when `offline-owner-root-check` is set |

@@ -5,6 +5,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 PATCH = ROOT / 'patches/xnu/offline-component-load-probes.patch'
+CORECRYPTO_PATCH = ROOT / 'patches/xnu/source-corecrypto14-bootstrap.patch'
 HUNK = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 
 
@@ -37,6 +38,18 @@ class XnuPatchContracts(unittest.TestCase):
         self.assertGreater(declaration, guard)
         self.assertGreater(declaration - guard, 0)
         self.assertTrue(any(line.startswith('+#endif') for line in lines[call + 1:call + 3]))
+
+    def test_corecrypto_bootstrap_observes_ready_prelinked_provider_before_starting_it(self):
+        patch = CORECRYPTO_PATCH.read_text()
+        ready_state = patch.index('+\tif (prng_ready || crypto_init || g_crypto_funcs != NULL) {')
+        incomplete_state = patch.index('+\t\tif (!prng_ready || !crypto_init || g_crypto_funcs == NULL) {')
+        ready_return = patch.index('+\t\tsource_corecrypto14_status = KERN_SUCCESS;', incomplete_state)
+        source_start = patch.index('+\tsource_corecrypto14_status = corecrypto_kext_start(&info, NULL);')
+        self.assertLess(ready_state, incomplete_state)
+        self.assertLess(incomplete_state, ready_return)
+        self.assertLess(ready_return, source_start)
+        self.assertIn('+\tif (source_corecrypto14_status != KERN_SUCCESS || !prng_ready ||', patch)
+        self.assertIn('+\t    !crypto_init || g_crypto_funcs == NULL) {', patch)
 
 
 if __name__ == '__main__':

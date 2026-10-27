@@ -2,16 +2,17 @@ diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
 index c52f0ab..412c167 100644
 --- a/osfmk/prng/prng_random.c
 +++ b/osfmk/prng/prng_random.c
-@@ -420,3 +420,35 @@ random_bool_gen_bits(struct bool_gen * bg, unsigned int * buffer, unsigned int c
+@@ -420,3 +420,45 @@ random_bool_gen_bits(struct bool_gen * bg, unsigned int * buffer, unsigned int c
  	}
  	return rbits;
  }
 +
-+/* Internal source-provider verification; no replacement callbacks or skipped POST. */
++/* Observe the real provider; never register the PRNG twice or skip POST. */
 +#if defined(XNU_SOURCE_CORECRYPTO14)
 +#include <kern/startup.h>
 +#include <mach/kmod.h>
 +#include <mach-o/loader.h>
++#include <libkern/crypto/crypto_internal.h>
 +
 +extern struct mach_header_64 _mh_execute_header;
 +extern kern_return_t corecrypto_kext_start(kmod_info_t *, void *);
@@ -30,9 +31,18 @@ index c52f0ab..412c167 100644
 +	if (PE_parse_boot_argn("fips_mode", &mode, sizeof(mode)) && mode != 0) {
 +		panic("source corecrypto verification requires complete default POST");
 +	}
++	/* machine_startup may have initialized the target corecrypto kext already. */
++	if (prng_ready || crypto_init || g_crypto_funcs != NULL) {
++		if (!prng_ready || !crypto_init || g_crypto_funcs == NULL) {
++			panic("source corecrypto provider has partial initialization state");
++		}
++		source_corecrypto14_status = KERN_SUCCESS;
++		return;
++	}
 +	info.address = (vm_address_t)&_mh_execute_header;
 +	source_corecrypto14_status = corecrypto_kext_start(&info, NULL);
-+	if (source_corecrypto14_status != KERN_SUCCESS) {
++	if (source_corecrypto14_status != KERN_SUCCESS || !prng_ready ||
++	    !crypto_init || g_crypto_funcs == NULL) {
 +		panic("source corecrypto initialization failed: %d", source_corecrypto14_status);
 +	}
 +}
