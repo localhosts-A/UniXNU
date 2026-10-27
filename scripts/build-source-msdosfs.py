@@ -27,7 +27,7 @@ OUT = ROOT / 'build/source-msdosfs'
 ARCHIVE = OUT / 'libmsdosfs.a'
 REGISTRATION = ROOT / 'scripts/fixtures/source-msdosfs.c'
 PATCH = ROOT / 'patches/xnu/source-msdosfs-registration.patch'
-QEMU_TEST_PATCH = ROOT / 'patches/xnu/source-msdosfs-vfs-test.patch'
+QEMU_TEST_PATCH = ROOT / 'patches/xnu/zzzz-source-msdosfs-vfs-test.patch'
 KERNEL_LOCALARGS_PATCH = ROOT / 'patches/xnu/source-kernel-local-mount-args.patch'
 SYMBOLS = ('_msdosfs_module_start', '_msdosfs_vfsops',
            '_msdosfs_vnodeop_opv_desc', '_msdosfs_fat_vnodeop_opv_desc',

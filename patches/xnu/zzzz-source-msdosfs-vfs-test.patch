@@ -2,9 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index c1b7c62..46d8f5a 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7397,6 +7397,13 @@ load_init_program(proc_t p)
- 
- 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+@@ -7397,2 +7397,9 @@ load_init_program(proc_t p)
  	user_addr_t init_envp = USER_ADDR_NULL;
 +#if defined(XNU_SOURCE_MSDOSFS) && XNU_SOURCE_MSDOSFS
 +	{
@@ -14,5 +12,3 @@ index c1b7c62..46d8f5a 100644
 +	}
 +#endif
  #if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
- 	int cache_error = native_owner_cache_prepare(p, (user_addr_t)scratch_addr, &init_envp);
- 	if (cache_error) panic("offline owner SystemOS mount failed: %d", cache_error);

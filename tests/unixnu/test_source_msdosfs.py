@@ -120,11 +120,13 @@ class SourceMsdosfsTests(unittest.TestCase):
             '00000000 private external ' + helper, 'U ' + provider), {helper: True, provider: False})
 
     def test_kernel_mount_test_patch_is_gated_before_launchd(self):
-        patch = (ROOT / 'patches/xnu/source-msdosfs-vfs-test.patch').read_text()
+        patch_path = ROOT / 'patches/xnu/zzzz-source-msdosfs-vfs-test.patch'
+        patch = patch_path.read_text()
         mountpoint_patch = (ROOT / 'patches/xnu/mockfs-test-mountpoint.patch').read_text()
         fixture = (ROOT / 'scripts/fixtures/source-msdosfs.c').read_text()
         self.assertIn('source_msdosfs_qemu_test', patch)
         self.assertIn('user_addr_t init_envp = USER_ADDR_NULL;', patch)
+        self.assertGreater(patch_path.name, 'zzz-boot-progress.patch')
         self.assertIn('#if defined(XNU_SOURCE_MSDOSFS) && XNU_SOURCE_MSDOSFS', patch)
         self.assertIn('kernel_mount_localargs("msdos", mountpoint, device_path', fixture)
         self.assertIn('source_storage_fixture_copy_bsd_path', fixture)
