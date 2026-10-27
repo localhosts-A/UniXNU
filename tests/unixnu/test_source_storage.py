@@ -11,6 +11,11 @@ SPEC.loader.exec_module(storage)
 
 
 class SourceStorageBuildTests(unittest.TestCase):
+    def test_bsd_media_name_uses_the_iokit_bsd_header(self):
+        fixture = (Path(__file__).resolve().parents[2] / 'scripts/fixtures/source-storage.cpp').read_text()
+        self.assertIn('#include <IOKit/IOBSD.h>', fixture)
+        self.assertIn('media->getProperty(kIOBSDNameKey)', fixture)
+
     def test_compile_record_keeps_kernel_flags_without_clobbering_kernel_outputs(self):
         record = {'directory': '/build/xnu', 'file': 'IOService.cpp',
                   'arguments': ['clang++', '-target', 'arm64-apple-ios17.0', '-DKERNEL_PRIVATE=1',
