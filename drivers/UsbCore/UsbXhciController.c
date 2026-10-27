@@ -4,6 +4,7 @@
 #define HCSPARAMS2 0x08u
 #define OP_CMD 0x00u
 #define OP_STS 0x04u
+#define OP_PORTSC 0x400u
 #define OP_CRCR 0x18u
 #define OP_DCBAAP 0x30u
 #define OP_CONFIG 0x38u
@@ -17,9 +18,32 @@
 #define STS_HALTED 0x01u
 #define STS_NOT_READY 0x0800u
 #define STS_ERROR 0x1004u
+#define PORTSC_CCS (1u << 0)
+#define PORTSC_PED (1u << 1)
+#define PORTSC_OCA (1u << 3)
+#define PORTSC_PR (1u << 4)
+#define PORTSC_PLS_MASK (0xfu << 5)
+#define PORTSC_PP (1u << 9)
+#define PORTSC_SPEED_MASK (0xfu << 10)
+#define PORTSC_PIC_MASK (3u << 14)
+#define PORTSC_CSC (1u << 17)
+#define PORTSC_PEC (1u << 18)
+#define PORTSC_WRC (1u << 19)
+#define PORTSC_OCC (1u << 20)
+#define PORTSC_PRC (1u << 21)
+#define PORTSC_PLC (1u << 22)
+#define PORTSC_CEC (1u << 23)
+#define PORTSC_CHANGE_MASK (PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | \
+                            PORTSC_PRC | PORTSC_PLC | PORTSC_CEC)
+#define PORTSC_WAKE_MASK (7u << 25)
+#define PORTSC_RW_CONTROL_MASK (PORTSC_PLS_MASK | PORTSC_PP | PORTSC_PIC_MASK | \
+                                PORTSC_WAKE_MASK)
 #define RESET_TIMEOUT_US 10000000u
 #define HALT_TIMEOUT_US 32000u
 #define POLL_US 1000u
+
+static int read_event(struct usb_xhci_controller *, struct usb_xhci_event *);
+static int retain_event(struct usb_xhci_controller *, const struct usb_xhci_event *);
 
 static void zero_bytes(void *memory, size_t size)
 {
@@ -275,6 +299,161 @@ static int controller_ready(struct usb_xhci_controller *c)
         return result ? result : USB_IO;
     }
     return USB_OK;
+}
+
+static int root_port_offset(const struct usb_xhci_controller *c, uint8_t port,
+                            uint32_t *offset)
+{
+    if (!c || !offset || !port || port > c->caps.max_ports) return USB_RANGE;
+    if (!(c->caps.usb2_ports[(port - 1u) / 8u] &
+          (uint8_t)(1u << ((port - 1u) % 8u)))) return USB_UNSUPPORTED;
+    uint64_t address = (uint64_t)c->caps.operational_offset + OP_PORTSC +
+                       ((uint64_t)port - 1u) * 0x10u;
+    if (address > UINT32_MAX || address > c->mmio.size ||
+        c->mmio.size - (uint32_t)address < 4u) return USB_RANGE;
+    *offset = (uint32_t)address;
+    return USB_OK;
+}
+
+static int root_port_write(struct usb_xhci_controller *c, uint32_t offset,
+                           uint32_t current, bool start_reset, bool clear_prc)
+{
+    /* Preserve only PORTSC RW control fields. PED and change bits are RW1CS,
+     * so echoing sampled status would disable/ack unrelated port state. */
+    uint32_t value = current & PORTSC_RW_CONTROL_MASK;
+    if (start_reset) value |= PORTSC_PR;
+    if (clear_prc) value |= PORTSC_PRC;
+    return guarded_write(c, offset, value);
+}
+
+static int root_port_drain_old_events(struct usb_xhci_controller *c)
+{
+    /* Let the normal owner process all events that predate this reset. */
+    if (c->pending_event_count) return USB_BUSY;
+    for (;;) {
+        if (c->pending_event_count == USB_XHCI_PENDING_EVENTS) return USB_BUSY;
+        struct usb_xhci_event event;
+        int result = read_event(c, &event);
+        if (result == USB_AGAIN) break;
+        if (result) return result;
+        result = retain_event(c, &event);
+        if (result) return result;
+        if (c->state != USB_XHCI_CONTROLLER_RUNNING) return USB_IO;
+    }
+    return c->pending_event_count ? USB_BUSY : USB_OK;
+}
+
+int usb_xhci_root_port_reset(struct usb_xhci_controller *c, uint8_t port,
+                             uint32_t timeout_ms, enum usb_xhci_speed *speed)
+{
+    if (!c || !speed || !timeout_ms || timeout_ms > 10000u) return USB_INVALID;
+    if (c->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    int result = controller_ready(c);
+    if (result) return result;
+    uint32_t offset;
+    result = root_port_offset(c, port, &offset);
+    if (result) return result;
+    result = root_port_drain_old_events(c);
+    if (result) return result;
+
+    uint32_t value;
+    result = guarded_read(c, offset, &value);
+    if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+    if (!(value & PORTSC_PP)) return USB_BUSY; /* Power belongs to the platform owner. */
+    if (!(value & PORTSC_CCS)) return USB_DISCONNECTED;
+    if (value & PORTSC_OCA) return USB_IO;
+    if (value & PORTSC_PR) return USB_BUSY;
+
+    if (value & PORTSC_PRC) {
+        result = root_port_write(c, offset, value, false, true);
+        if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+        result = guarded_read(c, offset, &value);
+        if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+        if (value & PORTSC_PRC) {
+            c->state = USB_XHCI_CONTROLLER_FAULTED;
+            return USB_IO;
+        }
+    }
+    if (!(value & PORTSC_PP)) return USB_BUSY;
+    if (!(value & PORTSC_CCS)) return USB_DISCONNECTED;
+    if (value & PORTSC_OCA) return USB_IO;
+    if (value & PORTSC_PR) return USB_BUSY;
+    result = root_port_write(c, offset, value, true, false);
+    if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+
+    bool port_event_seen = false;
+    uint32_t elapsed = 0, timeout_us = timeout_ms * 1000u;
+    for (;;) {
+        if (c->pending_event_count == USB_XHCI_PENDING_EVENTS) {
+            c->state = USB_XHCI_CONTROLLER_FAULTED;
+            return USB_RANGE;
+        }
+        struct usb_xhci_event event;
+        result = read_event(c, &event);
+        if (result != USB_OK && result != USB_AGAIN) return result;
+        bool matching_port_event =
+            result == USB_OK &&
+            event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE &&
+            event.data.port_status.port_id == port;
+        if (result == USB_OK) {
+            result = retain_event(c, &event);
+            if (result) return result;
+        }
+        if (c->state != USB_XHCI_CONTROLLER_RUNNING) return USB_IO;
+
+        result = guarded_read(c, offset, &value);
+        if (result) { c->state = USB_XHCI_CONTROLLER_FAULTED; return result; }
+        if (value & PORTSC_OCA) {
+            /* The matching PSC, if present, is already retained above. */
+            c->state = USB_XHCI_CONTROLLER_FAULTED;
+            return USB_IO;
+        }
+        if (matching_port_event && !(value & PORTSC_PR) && (value & PORTSC_PRC))
+            port_event_seen = true;
+        if (port_event_seen && !(value & PORTSC_PR) && (value & PORTSC_PRC)) break;
+        if (elapsed >= timeout_us) {
+            /* Reset or its required PSC may still be pending; stop before reuse. */
+            c->state = USB_XHCI_CONTROLLER_FAULTED;
+            return USB_TIMEOUT;
+        }
+        uint32_t delay = timeout_us - elapsed < POLL_US ?
+                         timeout_us - elapsed : POLL_US;
+        c->mmio.delay_us(c->mmio.context, delay);
+        elapsed += delay;
+    }
+
+    enum usb_xhci_speed detected = USB_XHCI_SPEED_FULL;
+    if (value & PORTSC_OCA) result = USB_IO;
+    else if (!(value & PORTSC_CCS)) result = USB_DISCONNECTED;
+    else if (!(value & PORTSC_PED)) result = USB_IO;
+    else {
+        uint32_t speed_id = (value & PORTSC_SPEED_MASK) >> 10;
+        if (speed_id == USB_XHCI_SPEED_FULL) detected = USB_XHCI_SPEED_FULL;
+        else if (speed_id == USB_XHCI_SPEED_LOW) detected = USB_XHCI_SPEED_LOW;
+        else if (speed_id == USB_XHCI_SPEED_HIGH) detected = USB_XHCI_SPEED_HIGH;
+        else result = USB_UNSUPPORTED;
+    }
+    int clear = root_port_write(c, offset, value, false, true);
+    if (clear) { c->state = USB_XHCI_CONTROLLER_FAULTED; return clear; }
+    int verify = guarded_read(c, offset, &value);
+    if (verify) { c->state = USB_XHCI_CONTROLLER_FAULTED; return verify; }
+    if (value & (PORTSC_PR | PORTSC_PRC)) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return USB_IO;
+    }
+    if (value & PORTSC_OCA) {
+        c->state = USB_XHCI_CONTROLLER_FAULTED;
+        return USB_IO;
+    }
+    if (!result) {
+        if (!(value & PORTSC_PP)) result = USB_BUSY;
+        else if (!(value & PORTSC_CCS)) result = USB_DISCONNECTED;
+        else if (!(value & PORTSC_PED)) result = USB_IO;
+        else if (((value & PORTSC_SPEED_MASK) >> 10) != (uint32_t)detected)
+            result = USB_IO;
+    }
+    if (!result) *speed = detected;
+    return result;
 }
 
 int usb_xhci_controller_submit_command(struct usb_xhci_controller *c,

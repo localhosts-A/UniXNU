@@ -8,9 +8,22 @@
 
 #define OP 0x40u
 #define RT 0x500u
+#define PORTSC (OP + 0x400u)
 #define CMD_RUN 1u
 #define CMD_RESET 2u
 #define STS_HALTED 1u
+#define PORTSC_CCS (1u << 0)
+#define PORTSC_PED (1u << 1)
+#define PORTSC_OCA (1u << 3)
+#define PORTSC_PR (1u << 4)
+#define PORTSC_PP (1u << 9)
+#define PORTSC_SPEED_SHIFT 10u
+#define PORTSC_CSC (1u << 17)
+#define PORTSC_PEC (1u << 18)
+#define PORTSC_OCC (1u << 20)
+#define PORTSC_PRC (1u << 21)
+#define PORTSC_CHANGE_MASK (0x7fu << 17)
+#define PORTSC_CONTROL_MASK ((0xfu << 5) | PORTSC_PP | (3u << 14) | (7u << 25))
 
 struct model {
     uint32_t regs[0x1000 / 4];
@@ -18,13 +31,16 @@ struct model {
     unsigned accesses, fail_access, allocations, allocation_attempts, fail_allocate, releases, syncs, fail_sync;
     unsigned resets, starts, guard_calls, fail_guard, noncoherent_at, misalign_at, cnr_waits;
     unsigned reset_delay, cnr_delay, halt_delay, reset_remaining, cnr_remaining, halt_remaining;
+    unsigned port_reset_delay, port_reset_remaining, port_writes;
     uint32_t crcr_reserved, erstba_reserved;
     struct usb_xhci_controller *controller;
     struct usb_xhci_device_slot *slot;
     uint32_t event_index;
     uint8_t event_cycle, next_slot, next_usb_address;
+    uint8_t port_reset_speed;
     uint8_t device_descriptor[8];
     bool applied_error, guard_denied, guard_blocked, stuck_halt, stuck_reset, pending_on_reset;
+    bool port_reset_overcurrent, port_reset_no_event, port_reset_unrelated_event;
     bool allow_live_release;
     bool auto_commands, auto_control;
 };
@@ -32,6 +48,8 @@ struct model {
 static void put_le32(uint8_t *p, uint32_t value);
 static void event_at(struct usb_xhci_controller *c, uint32_t index, uint8_t cycle,
                      uint32_t type, uint64_t parameter, uint8_t code, uint32_t fields);
+static void queue_model_event(struct model *m, uint32_t type, uint64_t parameter,
+                              uint8_t code, uint32_t fields);
 
 static void init_model(struct model *m, unsigned scratchpads)
 {
@@ -51,6 +69,8 @@ static void init_model(struct model *m, unsigned scratchpads)
     m->regs[0x800u / 4u] = 2u | (2u << 24);
     m->regs[0x804u / 4u] = 0x20425355u;
     m->regs[0x808u / 4u] = 1u | (4u << 8);
+    m->regs[PORTSC / 4u] = PORTSC_CCS | PORTSC_PP;
+    m->port_reset_speed = USB_XHCI_SPEED_HIGH;
 }
 static int guard(void *context)
 {
@@ -96,6 +116,18 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
     } else if (offset == RT + 0x20u) {
         uint32_t pending = (m->regs[offset / 4u] & 1u) & ~(value & 1u);
         m->regs[offset / 4u] = (value & ~1u) | pending;
+    } else if (offset == PORTSC) {
+        ++m->port_writes;
+        uint32_t port = m->regs[offset / 4u];
+        port &= ~(value & PORTSC_CHANGE_MASK); /* RW1CS status changes. */
+        port = (port & ~PORTSC_CONTROL_MASK) | (value & PORTSC_CONTROL_MASK);
+        if (value & PORTSC_PED) port &= ~PORTSC_PED; /* RW1CS: software may disable only. */
+        if (value & PORTSC_PR) {
+            port |= PORTSC_PR;
+            port &= ~PORTSC_PED;
+            m->port_reset_remaining = m->port_reset_delay ? m->port_reset_delay : 1u;
+        }
+        m->regs[offset / 4u] = port;
     } else {
         m->regs[offset / 4u] = value;
         if (offset == 0x600u && m->auto_commands && m->controller &&
@@ -163,6 +195,29 @@ static void delay(void *context, uint32_t us)
         m->regs[(OP + 4u) / 4u] &= ~0x800u;
     if (m->halt_remaining && !--m->halt_remaining)
         m->regs[(OP + 4u) / 4u] |= STS_HALTED;
+    if (m->port_reset_remaining && !--m->port_reset_remaining) {
+        uint32_t port = m->regs[PORTSC / 4u];
+        port &= ~PORTSC_PR;
+        if (m->port_reset_overcurrent) {
+            port |= PORTSC_OCA | PORTSC_OCC;
+            port &= ~PORTSC_PED;
+        } else {
+            port |= PORTSC_PRC | PORTSC_PED;
+            port &= ~(0xfu << PORTSC_SPEED_SHIFT);
+            port |= (uint32_t)m->port_reset_speed << PORTSC_SPEED_SHIFT;
+        }
+        m->regs[PORTSC / 4u] = port;
+        if (!m->port_reset_no_event) {
+            if (m->port_reset_unrelated_event)
+                queue_model_event(m, USB_XHCI_TRB_TRANSFER_EVENT, 0x4560u,
+                                  USB_XHCI_CC_SUCCESS, (2u << 24) | (1u << 16));
+            if (m->port_reset_unrelated_event)
+                queue_model_event(m, USB_XHCI_TRB_PORT_STATUS_EVENT, 2u << 24,
+                                  USB_XHCI_CC_SUCCESS, 0);
+            queue_model_event(m, USB_XHCI_TRB_PORT_STATUS_EVENT, 1u << 24,
+                              USB_XHCI_CC_SUCCESS, 0);
+        }
+    }
 }
 static int allocate(void *context, size_t size, size_t alignment, uint64_t limit,
                     struct usb_dma_buffer *buffer)
@@ -227,6 +282,17 @@ static void event_at(struct usb_xhci_controller *c, uint32_t index, uint8_t cycl
     put_le32(p, (uint32_t)parameter); put_le32(p + 4, (uint32_t)(parameter >> 32));
     put_le32(p + 8, (uint32_t)code << 24);
     put_le32(p + 12, (type << USB_XHCI_TRB_TYPE_SHIFT) | fields | cycle);
+}
+
+static void queue_model_event(struct model *m, uint32_t type, uint64_t parameter,
+                              uint8_t code, uint32_t fields)
+{
+    assert(m->controller);
+    event_at(m->controller, m->event_index, m->event_cycle, type, parameter, code, fields);
+    if (++m->event_index == m->controller->events.entries) {
+        m->event_index = 0;
+        m->event_cycle ^= 1u;
+    }
 }
 
 static void test_commands_and_events(void)
@@ -306,6 +372,97 @@ static void test_commands_and_events(void)
         free(c);
     }
     puts("PASS: xHCI command doorbell, shared event delivery and retained faults");
+}
+
+static void test_root_port_reset(void)
+{
+    struct model m; init_model(&m, 0); m.port_reset_delay = 2;
+    m.port_reset_unrelated_event = true;
+    m.regs[PORTSC / 4u] |= PORTSC_CSC | PORTSC_PEC | PORTSC_PRC;
+    struct usb_xhci_controller *c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    enum usb_xhci_speed speed = 0;
+    queue_model_event(&m, USB_XHCI_TRB_TRANSFER_EVENT, 0x1230u,
+                      USB_XHCI_CC_SUCCESS, (2u << 24) | (1u << 16));
+    assert(usb_xhci_root_port_reset(c, 1u, 100u, &speed) == USB_BUSY);
+    assert(m.port_writes == 0u && c->pending_event_count == 1u);
+    struct usb_xhci_event event;
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_TRANSFER && event.data.transfer.pointer_or_data == 0x1230u);
+    assert(usb_xhci_root_port_reset(c, 1u, 100u, &speed) == USB_OK);
+    assert(speed == USB_XHCI_SPEED_HIGH);
+    uint32_t port = m.regs[PORTSC / 4u];
+    assert((port & (PORTSC_CCS | PORTSC_PED | PORTSC_PP)) ==
+           (PORTSC_CCS | PORTSC_PED | PORTSC_PP));
+    assert(!(port & (PORTSC_PR | PORTSC_PRC)) &&
+           ((port >> PORTSC_SPEED_SHIFT) & 0xfu) == USB_XHCI_SPEED_HIGH);
+    assert((port & (PORTSC_CSC | PORTSC_PEC)) == (PORTSC_CSC | PORTSC_PEC));
+    assert(m.port_writes == 3u); /* Clear stale PRC, assert PR, acknowledge PRC. */
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_TRANSFER && event.data.transfer.pointer_or_data == 0x4560u);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE && event.data.port_status.port_id == 2u);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE && event.data.port_status.port_id == 1u);
+    assert(usb_xhci_controller_next_event(c, &event) == USB_AGAIN);
+
+    unsigned before = m.port_writes;
+    assert(usb_xhci_root_port_reset(c, 0u, 100u, &speed) == USB_RANGE);
+    c->caps.usb2_ports[0] &= (uint8_t)~(1u << 1);
+    assert(usb_xhci_root_port_reset(c, 2u, 100u, &speed) == USB_UNSUPPORTED);
+    assert(m.port_writes == before);
+    m.regs[PORTSC / 4u] &= ~PORTSC_PP;
+    assert(usb_xhci_root_port_reset(c, 1u, 100u, &speed) == USB_BUSY);
+    assert(m.port_writes == before);
+    m.regs[PORTSC / 4u] |= PORTSC_PP;
+    m.regs[PORTSC / 4u] &= ~PORTSC_CCS;
+    assert(usb_xhci_root_port_reset(c, 1u, 100u, &speed) == USB_DISCONNECTED);
+    assert(m.port_writes == before);
+    m.regs[PORTSC / 4u] |= PORTSC_CCS;
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* Overcurrent aborts the reset, faults the controller and preserves its PSC. */
+    init_model(&m, 0); m.port_reset_delay = 1; m.port_reset_overcurrent = true;
+    c = new_controller(); assert(start(&m, c) == USB_OK);
+    speed = USB_XHCI_SPEED_LOW;
+    assert(usb_xhci_root_port_reset(c, 1u, 10u, &speed) == USB_IO);
+    assert(speed == USB_XHCI_SPEED_LOW && c->state == USB_XHCI_CONTROLLER_FAULTED);
+    assert((m.regs[PORTSC / 4u] & (PORTSC_OCA | PORTSC_OCC)) == (PORTSC_OCA | PORTSC_OCC));
+    assert(!(m.regs[PORTSC / 4u] & PORTSC_PRC));
+    assert(usb_xhci_controller_next_event(c, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE && event.data.port_status.port_id == 1u);
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* PORTSC alone cannot complete a reset without the required matching PSC. */
+    init_model(&m, 0); m.port_reset_delay = 1; m.port_reset_no_event = true;
+    c = new_controller(); assert(start(&m, c) == USB_OK);
+    speed = USB_XHCI_SPEED_FULL;
+    assert(usb_xhci_root_port_reset(c, 1u, 3u, &speed) == USB_TIMEOUT);
+    assert(speed == USB_XHCI_SPEED_FULL && c->state == USB_XHCI_CONTROLLER_FAULTED);
+    assert((m.regs[PORTSC / 4u] & (PORTSC_PRC | PORTSC_PED)) == (PORTSC_PRC | PORTSC_PED));
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* A timeout after PR publication leaves ownership fail-stopped. */
+    init_model(&m, 0); m.port_reset_delay = 10; c = new_controller();
+    assert(start(&m, c) == USB_OK);
+    speed = USB_XHCI_SPEED_FULL;
+    assert(usb_xhci_root_port_reset(c, 1u, 1u, &speed) == USB_TIMEOUT);
+    assert(speed == USB_XHCI_SPEED_FULL && c->state == USB_XHCI_CONTROLLER_FAULTED);
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+
+    /* An applied-but-error PR write also requires controller stop/reset. */
+    init_model(&m, 0); c = new_controller(); assert(start(&m, c) == USB_OK);
+    m.fail_access = m.accesses + 4u; m.applied_error = true;
+    assert(usb_xhci_root_port_reset(c, 1u, 10u, &speed) == USB_IO);
+    assert(c->state == USB_XHCI_CONTROLLER_FAULTED);
+    m.fail_access = 0;
+    assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
+    free(c);
+    puts("PASS: xHCI USB2 root-port reset and retained failure model");
 }
 
 static void test_control_transfer(void)
@@ -778,7 +935,7 @@ static void test_guards_and_timeouts(void)
 int main(void)
 {
     test_running_schedule(); test_failure_retention(); test_guards_and_timeouts(); test_commands_and_events();
-    test_control_transfer(); test_device_slots_and_routing();
+    test_control_transfer(); test_device_slots_and_routing(); test_root_port_reset();
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
 }

@@ -73,10 +73,21 @@ per-slot stop proof before context/ring memory is released; uncertain commands
 and transfers retain ownership until controller stop/reset succeeds.
 
 These are portable controller functions, not yet a production
-`usb_host_ops` backend. The platform owner still must reset/power root ports,
+`usb_host_ops` backend. The platform owner still must own root-port power and wire reset/event handling,
 map USB hub addresses to xHCI slot IDs, poll and route events, configure
 non-control endpoints/transfers, translate IRQs, supply qualified DMA/IOMMU
 mapping, and publish HID/BOT services. Those runtime owners remain required.
+
+`usb_xhci_root_port_reset()` now resets an already powered USB2 root port with
+all earlier queued events drained by the owner. Completion requires both
+PRC/CCS/PED state and a matching port-status event. The function retains events
+for other consumers and clears only the reset-change bit. It preserves unrelated
+RW1CS changes and refuses ports outside the USB2 Supported Protocol map. Overcurrent,
+event loss, or timeout fails closed; a timeout faults the controller because
+reset may still be active. The platform still owns port power, attachment policy
+and connector safety. The register model covers missing and matching port events,
+event ordering/retention, overcurrent, unrelated change preservation,
+unpowered/disconnected/invalid ports, timeout and applied-but-error reset writes.
 
 `UsbStorage.c` serializes block requests around a BOT device using caller-owned
 lock and bounce-buffer callbacks. It chunks large `IOStorage` requests to the

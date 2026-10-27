@@ -258,6 +258,14 @@ int usb_xhci_controller_command(struct usb_xhci_controller *, const struct usb_x
  * advances to the empty slot. */
 int usb_xhci_controller_next_event(struct usb_xhci_controller *, struct usb_xhci_event *);
 
+/* Reset an already powered USB2 root port under the controller's exclusive
+ * platform guard. Earlier events are returned to the owner first (USB_BUSY);
+ * completion requires both PRC/CCS/PED and a matching port-status event.
+ * The caller supplies a bounded timeout. This does not power the port or
+ * qualify the platform's power/connector policy. */
+int usb_xhci_root_port_reset(struct usb_xhci_controller *, uint8_t root_port,
+                             uint32_t timeout_ms, enum usb_xhci_speed *speed);
+
 /* One EP0 control TD on a slot/context and active endpoint ring established by
  * the owner, in the same controller DMA address space. The caller serializes
  * all ring use and routes every event to its
