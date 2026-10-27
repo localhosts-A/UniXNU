@@ -27,6 +27,7 @@ SPEC = importlib.util.spec_from_file_location(
 SOURCE_PRELINK = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SOURCE_PRELINK)
 STORAGE_SYMBOL = '__ZN7IOMedia13attachToChildEP15IORegistryEntryPK15IORegistryPlane'
+STORAGE_SYNCHRONIZE_SYMBOL = '__ZN7IOMedia11synchronizeEP9IOServiceyyj'
 
 
 def add_native_export(data, symbol, address):
@@ -198,6 +199,18 @@ class PrelinkProfileTests(unittest.TestCase):
             native, manifest, [binding], digest, digest)
         self.assertEqual(normalized[0x2800]['symbol'], STORAGE_SYMBOL)
         self.assertEqual(addresses, {0x2800: 0x100a00})
+
+        native = add_native_export(native, STORAGE_SYNCHRONIZE_SYMBOL, 0x100b00)
+        multi_manifest = {'test.storage': {'segments': [
+            {'name': '__TEXT_EXEC', 'va': 0x2800, 'size': 0x100, 'initprot': 5},
+        ]}}
+        multi_specs = [binding, {
+            'bundle': 'test.storage', 'donor_va': '0x2840', 'symbol': STORAGE_SYNCHRONIZE_SYMBOL,
+        }]
+        multi_names, multi_addresses = SOURCE_PRELINK.normalize_source_interface_bindings(
+            native, multi_manifest, multi_specs, digest, digest)
+        self.assertEqual(set(multi_names), {0x2800, 0x2840})
+        self.assertEqual(multi_addresses, {0x2800: 0x100a00, 0x2840: 0x100b00})
 
         with self.assertRaisesRegex(ValueError, 'exact pinned kernelcache'):
             SOURCE_PRELINK.normalize_source_interface_bindings(native, manifest, [binding], 'b' * 64, digest)
