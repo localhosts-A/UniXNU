@@ -50,9 +50,15 @@ TRBs with the first entry published last, tracks completion pointers, validates
 event cycles and retains memory after synchronization or completion faults until
 the caller provides a fresh stop proof. Each single ring segment fits within a
 64 KiB boundary, and event segments reserve full 64-byte lines with at most 4096
-TRBs as required by xHCI 1.2 sections 4.9 and 6.5. It does not start the controller, issue doorbells,
-translate IRQs, provide a DMA/IOMMU mapping, populate `usb_host_ops`, or publish
-HID/BOT services. Those runtime owners remain required.
+TRBs as required by xHCI 1.2 sections 4.9 and 6.5. `UsbXhciController.c`
+owns a polling-mode controller schedule: it requires an exclusive powered
+platform lease, resets a halted controller, allocates DCBAA/scratchpads and
+command/event rings, programs their registers and runs the controller. Stop
+retains memory until a fresh halt and reset are confirmed. This path uses
+4 KiB controller pages and refuses scratchpad arrays larger than one page;
+larger-page selection is not implemented. It does not issue
+commands or doorbells, translate IRQs, provide a DMA/IOMMU mapping, populate
+`usb_host_ops`, or publish HID/BOT services. Those runtime owners remain required.
 
 `UsbStorage.c` serializes block requests around a BOT device using caller-owned
 lock and bounce-buffer callbacks. It chunks large `IOStorage` requests to the

@@ -179,6 +179,41 @@ int usb_xhci_event_ring_erst_address(const struct usb_xhci_event_ring *, uint64_
 int usb_xhci_event_ring_halted(struct usb_xhci_event_ring *);
 int usb_xhci_event_ring_destroy(struct usb_xhci_event_ring *);
 
+/* Controller schedule owner. The platform guard must prove continuous exclusive
+ * controller/MMIO/power ownership and exclude other register/DMA users for the
+ * entire lifecycle. Calls are serialized by the owner. This polling-mode
+ * controller does not establish IRQ routing, USB ports or device services.
+ * Zero-initialize before first start. A failed start after reset is attempted
+ * retains state and DMA; call stop and keep the platform lease until it succeeds. */
+#define USB_XHCI_MAX_SCRATCHPADS 1023u
+enum usb_xhci_controller_state {
+    USB_XHCI_CONTROLLER_EMPTY, USB_XHCI_CONTROLLER_FAULTED, USB_XHCI_CONTROLLER_RUNNING
+};
+struct usb_xhci_controller {
+    struct usb_mmio mmio;
+    struct usb_dma_ops dma;
+    struct usb_xhci_capabilities caps;
+    int (*guard)(void *);
+    void *guard_context;
+    struct usb_dma_buffer dcbaa;
+    struct usb_dma_buffer scratch_array;
+    struct usb_dma_buffer scratch_pages[USB_XHCI_MAX_SCRATCHPADS];
+    struct usb_xhci_transfer_ring commands;
+    struct usb_xhci_event_ring events;
+    uint32_t page_bytes;
+    uint16_t scratch_count;
+    uint16_t scratch_allocated;
+    enum usb_xhci_controller_state state;
+    bool reset_proven;
+};
+int usb_xhci_controller_start(struct usb_xhci_controller *, const struct usb_mmio *,
+                              const struct usb_dma_ops *, int (*guard)(void *),
+                              void *guard_context, uint8_t slots,
+                              uint32_t command_entries, uint32_t event_entries);
+/* Stop submissions and children first. Stop requires fresh halt and reset
+ * proof before releasing any controller-visible memory; errors are retryable. */
+int usb_xhci_controller_stop(struct usb_xhci_controller *);
+
 #ifdef __cplusplus
 }
 #endif

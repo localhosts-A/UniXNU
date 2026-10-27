@@ -37,7 +37,9 @@ struct usb_dma_buffer {
 };
 struct usb_dma_ops {
     void *context;
-    /* Must prove exclusive device ownership and the actual mapping policy. */
+    /* Must prove exclusive device ownership and the actual mapping policy.
+     * Allocations must not alias each other in CPU or device address space and
+     * remain reserved until release. Failure must not hide an owned resource. */
     bool qualified;
     int (*allocate)(void *, size_t size, size_t alignment, uint64_t limit, struct usb_dma_buffer *);
     void (*release)(void *, struct usb_dma_buffer *);

@@ -14,6 +14,7 @@
   UsbMtu3Endpoints.c
   UsbMtu3Device.c
   UsbXhci.c
+  UsbXhciController.c
 [Packages]
   MdePkg/MdePkg.dec
   UsbCore/UsbCore.dec
