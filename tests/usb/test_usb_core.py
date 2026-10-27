@@ -47,7 +47,8 @@ class UsbCoreTests(unittest.TestCase):
         self.run_fixture("usb_xhci_controller_test.c", "PASS: xHCI production controller lifecycle",
                          production=[str(ROOT / "drivers/UsbCore/UsbXhci.c"),
                                      str(ROOT / "drivers/UsbCore/UsbXhciController.c"),
-                                     str(ROOT / "drivers/UsbCore/UsbXhciHost.c")])
+                                     str(ROOT / "drivers/UsbCore/UsbXhciHost.c"),
+                                     str(ROOT / "drivers/UsbCore/UsbHost.c")])
 
     def test_block_storage_adapter(self):
         self.run_fixture("usb_storage_test.c", "PASS: USB production block I/O",
