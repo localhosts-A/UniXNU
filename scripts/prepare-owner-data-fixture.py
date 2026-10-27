@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 import subprocess
 
@@ -19,6 +20,32 @@ LAUNCHD_SHA256 = '8cec9a3c44a443b08e977ccc5d577850316ad428c575dc01f09b018dbd5b6a
 DYLD_SHA256 = 'f8df3c58fae6e409db740df22c98aa699aee110b73523541a63f1bd5e23cf705'
 MIB = 1024 * 1024
 IMAGE_BYTES = 32 * MIB
+
+
+def select_whole_disk(system_entities):
+    devices = [entry.get('dev-entry') for entry in system_entities
+               if isinstance(entry.get('dev-entry'), str) and
+               re.fullmatch(r'/dev/disk[0-9]+', entry['dev-entry'])]
+    if len(devices) != 1:
+        raise SystemExit('Require one read-only whole-disk mapping for the Data seed image')
+    return devices[0]
+
+
+def select_apfs_partition(whole_device, listing):
+    disk_name = Path(whole_device).name
+    if not re.fullmatch(r'disk[0-9]+', disk_name):
+        raise SystemExit('Invalid Data seed whole-disk device name')
+    disks = [entry for entry in listing.get('AllDisksAndPartitions', [])
+             if entry.get('DeviceIdentifier') == disk_name]
+    if len(disks) != 1:
+        raise SystemExit('diskutil did not identify the Data seed whole disk')
+    partitions = [entry for entry in disks[0].get('Partitions', [])
+                  if entry.get('Content') == 'Apple_APFS' and
+                  isinstance(entry.get('DeviceIdentifier'), str) and
+                  re.fullmatch(r'disk[0-9]+s[0-9]+', entry['DeviceIdentifier'])]
+    if len(partitions) != 1:
+        raise SystemExit('Require exactly one Apple_APFS partition in the Data seed disk image')
+    return '/dev/' + partitions[0]['DeviceIdentifier']
 
 
 def sha256(path):
@@ -138,12 +165,11 @@ def main():
 
     raw_attached = plistlib.loads(subprocess.check_output(
         ['hdiutil', 'attach', '-nomount', '-readonly', '-noverify', '-noautofsck', '-plist', str(write_image)]))
-    raw_devices = [entry.get('dev-entry') for entry in raw_attached.get('system-entities', [])
-                   if entry.get('content-hint') == 'Apple_APFS' and entry.get('dev-entry')]
-    if len(raw_devices) != 1:
-        raise SystemExit('Require exactly one read-only Apple_APFS partition mapping for the Data seed image')
-    raw_device = raw_devices[0]
+    whole_device = select_whole_disk(raw_attached.get('system-entities', []))
     try:
+        listing = plistlib.loads(subprocess.check_output(
+            ['diskutil', 'list', '-plist', Path(whole_device).name]))
+        raw_device = select_apfs_partition(whole_device, listing)
         raw_info = plistlib.loads(subprocess.check_output(['diskutil', 'info', '-plist', raw_device]))
         if (raw_info.get('BusProtocol') != 'Disk Image' or raw_info.get('Writable') is not False or
                 raw_info.get('DeviceNode') != raw_device):
@@ -161,7 +187,7 @@ def main():
                     raise SystemExit(f'Short read while exporting raw APFS Data image at byte {copied}')
                 copied += len(data)
     finally:
-        subprocess.run(['hdiutil', 'detach', raw_device], check=True)
+        subprocess.run(['hdiutil', 'detach', whole_device], check=True)
     write_image.unlink()
 
     with image.open('rb') as source_image:
@@ -178,6 +204,8 @@ def main():
         'os_root_launchd_sha256': LAUNCHD_SHA256,
         'os_root_dyld_sha256': DYLD_SHA256,
         'volume_uuid': volume_uuid,
+        'whole_disk_device': Path(whole_device).name,
+        'apfs_partition_device': Path(raw_device).name,
         'bytes': image.stat().st_size,
         'sha256': sha256(image),
         'apfs_block_size': block_size,
