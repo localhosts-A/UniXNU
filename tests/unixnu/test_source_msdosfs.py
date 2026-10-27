@@ -158,6 +158,13 @@ class SourceMsdosfsTests(unittest.TestCase):
         self.assertIn('if [ "$BOOTSTRAP" = 1 ]; then', baseline)
         self.assertIn('SOURCE_MSDOSFS_REGISTER=0', baseline)
         self.assertIn('.source-msdosfs-registration-mode', baseline)
+        registration_mode = baseline.split('MSDOSFS_REGISTRATION_STAMP=', 1)[1].split(
+            'NATIVE_VIRTIO_CONSOLE=', 1)[0]
+        self.assertIn('/bsd/DEVELOPMENT/bsd_init.o', registration_mode)
+        self.assertIn('/bsd/DEVELOPMENT/kern_exec.o', registration_mode)
+        kern_exec_flags = next(line for line in baseline.splitlines()
+                               if 'kern_exec.o_CFLAGS_ADD=' in line)
+        self.assertIn('-DXNU_SOURCE_MSDOSFS=$SOURCE_MSDOSFS_REGISTER', kern_exec_flags)
         self.assertIn('MSDOSFS_ARCHIVE=$ROOT/build/source-msdosfs/libmsdosfs.a', baseline)
         self.assertIn('-Wl,-force_load,$MSDOSFS_ARCHIVE', baseline)
         self.assertIn('KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $MSDOSFS_ARCHIVE"', baseline)
