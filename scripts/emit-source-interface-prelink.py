@@ -73,6 +73,36 @@ def plist_references(root):
     return references
 
 
+DATA_BINDING_LAYOUTS = {
+    'data_const': {'segment': '__DATA_CONST', 'section': '__const', 'initprot': 1, 'maxprot': 1},
+    'data_rw': {'segment': '__DATA', 'section': '__common', 'initprot': 3, 'maxprot': 3},
+}
+
+
+def exact_data_owner(segments, address, target_kind, symbol, label):
+    """Require an exact class-data symbol in the pinned readonly/writable layout."""
+    layout = DATA_BINDING_LAYOUTS.get(target_kind)
+    if layout is None:
+        raise ValueError(f'Unsupported non-code source-interface target kind: {target_kind}')
+    owners = [(segment, section) for segment in segments
+              for section in segment.get('sections', [])
+              if segment['va'] <= address < segment['va'] + segment['size'] and
+              section['va'] <= address < section['va'] + section['size']]
+    if len(owners) != 1:
+        raise ValueError(f'{label} data target {address:#x} does not have exactly one segment/section owner')
+    segment, section = owners[0]
+    if (segment['name'], section['name'], segment['initprot'], segment['maxprot']) != (
+            layout['segment'], layout['section'], layout['initprot'], layout['maxprot']):
+        raise ValueError(f'{label} data target {address:#x} is outside the pinned {target_kind} layout')
+    if address % 8:
+        raise ValueError(f'{label} data target {address:#x} is not 8-byte aligned')
+    if target_kind == 'data_const' and not (symbol.startswith('__ZTV') or symbol.endswith('metaClassE')):
+        raise ValueError(f'Native data-const source symbol has an unsupported identity: {symbol}')
+    if target_kind == 'data_rw' and not symbol.endswith('gMetaClassE'):
+        raise ValueError(f'Native writable source symbol has an unsupported identity: {symbol}')
+    return segment, section
+
+
 def dict_value(element, key, references):
     element = resolve_element(element, references)
     if element.tag != 'dict':
@@ -144,7 +174,9 @@ def rewrite_source_interfaces(original_data, source_interfaces):
         if module['kind'] != 11:
             raise ValueError(f'Source-interface donor is not an MH_KEXT_BUNDLE: {identifier}')
         donor_segments = [{'name': segment['name'], 'va': segment['va'], 'size': segment['size'],
-                           'initprot': segment['initprot']}
+                           'initprot': segment['initprot'], 'maxprot': segment['maxprot'],
+                           'sections': [{'name': section['name'], 'va': section['va'], 'size': section['size']}
+                                        for section in segment['sections'] if section['size']]}
                           for segment in module['segments']
                           if segment['size'] and segment['name'] != '__LINKEDIT']
         if not donor_segments:
@@ -175,9 +207,9 @@ def rewrite_source_interfaces(original_data, source_interfaces):
 
 def normalize_source_interface_bindings(native_data, source_manifest, bindings,
                                         kernelcache_sha256, original_digest):
-    """Validate narrowly pinned donor addresses and their unique native code exports."""
+    """Validate pinned donor addresses and matching native code/data symbols."""
     if not bindings:
-        return {}, {}
+        return {}, {}, {}
     if not isinstance(kernelcache_sha256, str) or \
             not re.fullmatch(r'[0-9a-f]{64}', kernelcache_sha256) or \
             original_digest != kernelcache_sha256:
@@ -185,15 +217,18 @@ def normalize_source_interface_bindings(native_data, source_manifest, bindings,
 
     normalized = {}
     for binding in bindings:
-        if not isinstance(binding, dict) or set(binding) != {'bundle', 'donor_va', 'symbol'}:
-            raise ValueError('Source-interface binding requires exactly bundle, donor_va, and symbol')
+        if not isinstance(binding, dict) or set(binding) not in (
+                {'bundle', 'donor_va', 'symbol'}, {'bundle', 'donor_va', 'symbol', 'target_kind'}):
+            raise ValueError('Source-interface binding requires bundle, donor_va, symbol, and optional target_kind')
         bundle, symbol = binding['bundle'], binding['symbol']
+        target_kind = binding.get('target_kind', 'code')
         try:
             donor_va = int(binding['donor_va'], 0) if isinstance(binding['donor_va'], str) else int(binding['donor_va'])
         except (TypeError, ValueError) as exc:
             raise ValueError('Source-interface donor_va must be an integer address') from exc
-        if not isinstance(bundle, str) or not bundle or not isinstance(symbol, str) or not symbol or \
-                not 0 < donor_va < 1 << 64 or donor_va % 4:
+        if target_kind not in ('code', *DATA_BINDING_LAYOUTS) or \
+                not isinstance(bundle, str) or not bundle or not isinstance(symbol, str) or not symbol or \
+                not 0 < donor_va < 1 << 64 or donor_va % (8 if target_kind in DATA_BINDING_LAYOUTS else 4):
             raise ValueError('Invalid source-interface binding identity or address')
         if bundle not in source_manifest:
             raise ValueError(f'Source-interface binding bundle is not declared: {bundle}')
@@ -202,10 +237,16 @@ def normalize_source_interface_bindings(native_data, source_manifest, bindings,
         matches = [(owner, segment) for owner, entry in source_manifest.items()
                    for segment in entry['segments']
                    if segment['va'] <= donor_va < segment['va'] + segment['size']]
-        if len(matches) != 1 or matches[0][0] != bundle or \
-                matches[0][1]['name'] != '__TEXT_EXEC' or not matches[0][1]['initprot'] & 4:
-            raise ValueError(f'Source-interface donor address {donor_va:#x} is not in one declared executable segment of {bundle}')
-        normalized[donor_va] = {'bundle': bundle, 'donor_va': donor_va, 'symbol': symbol}
+        if len(matches) != 1 or matches[0][0] != bundle:
+            raise ValueError(f'Source-interface donor address {donor_va:#x} is not in one declared segment of {bundle}')
+        donor_segment = matches[0][1]
+        if target_kind == 'code':
+            if donor_segment['name'] != '__TEXT_EXEC' or not donor_segment['initprot'] & 4:
+                raise ValueError(f'Source-interface donor address {donor_va:#x} is not in one declared executable segment of {bundle}')
+        else:
+            exact_data_owner([donor_segment], donor_va, target_kind, symbol, 'Donor')
+        normalized[donor_va] = {'bundle': bundle, 'donor_va': donor_va, 'symbol': symbol,
+                                 'target_kind': target_kind}
 
     native_image = native_prelink.macho(native_data)
     native_by_name = {}
@@ -213,17 +254,31 @@ def normalize_source_interface_bindings(native_data, source_manifest, bindings,
         for name in names:
             native_by_name.setdefault(name, set()).add(address)
     native_addresses = {}
+    native_target_layouts = {}
     for donor_va, binding in normalized.items():
         choices = native_by_name.get(binding['symbol'], set())
         if len(choices) != 1:
             raise ValueError(f"Native source symbol {binding['symbol']} has {len(choices)} address candidates")
         native_va = next(iter(choices))
-        executable = [segment for segment in native_image['segments']
-                      if segment['initprot'] & 4 and segment['va'] <= native_va < segment['va'] + segment['size']]
-        if len(executable) != 1 or native_va % 4:
-            raise ValueError(f"Native source symbol {binding['symbol']} is not in one aligned executable kernel segment")
+        if binding['target_kind'] == 'code':
+            executable = [segment for segment in native_image['segments']
+                          if segment['initprot'] & 4 and segment['va'] <= native_va < segment['va'] + segment['size']]
+            if len(executable) != 1 or native_va % 4:
+                raise ValueError(f"Native source symbol {binding['symbol']} is not in one aligned executable kernel segment")
+        else:
+            segment, section = exact_data_owner(
+                native_image['segments'], native_va, binding['target_kind'], binding['symbol'], 'Native')
+            donor_owner, donor_section = exact_data_owner(
+                source_manifest[binding['bundle']]['segments'], donor_va,
+                binding['target_kind'], binding['symbol'], 'Donor')
+            native_target_layouts[donor_va] = {
+                'donor_segment': donor_owner['name'], 'donor_section': donor_section['name'],
+                'donor_initprot': donor_owner['initprot'], 'donor_maxprot': donor_owner['maxprot'],
+                'native_segment': segment['name'], 'native_section': section['name'],
+                'native_initprot': segment['initprot'], 'native_maxprot': segment['maxprot'],
+            }
         native_addresses[donor_va] = native_va
-    return normalized, native_addresses
+    return normalized, native_addresses, native_target_layouts
 
 
 def build_candidate(native_data, original_data, roots, slide, early_security_init=None,
@@ -231,7 +286,7 @@ def build_candidate(native_data, original_data, roots, slide, early_security_ini
     original_digest = hashlib.sha256(original_data).hexdigest()
     transformed, source_manifest = rewrite_source_interfaces(original_data, source_interfaces)
     identifiers = sorted(set(source_interfaces))
-    binding_specs, native_addresses = normalize_source_interface_bindings(
+    binding_specs, native_addresses, native_target_layouts = normalize_source_interface_bindings(
         native_data, source_manifest, source_interface_bindings,
         kernelcache_sha256, original_digest)
     resolved_counts = Counter()
@@ -250,11 +305,12 @@ def build_candidate(native_data, original_data, roots, slide, early_security_ini
     if missing:
         raise ValueError('Configured source-interface binding was not used by the pinned pointer table: ' +
                          ', '.join(f'{address:#x}' for address in missing))
-    report['source_interface_bindings'] = [
-        {**binding_specs[address], 'native_va': native_addresses[address],
-         'reference_count': resolved_counts[address]}
-        for address in sorted(binding_specs)
-    ]
+    report['source_interface_bindings'] = []
+    for address in sorted(binding_specs):
+        record = {**binding_specs[address], 'native_va': native_addresses[address],
+                  'reference_count': resolved_counts[address]}
+        record.update(native_target_layouts.get(address, {}))
+        report['source_interface_bindings'].append(record)
     if any(identifier not in report.get('codeless_components', []) or
            identifier in report.get('components', []) for identifier in identifiers):
         raise ValueError('Source interface was not emitted only as codeless metadata')
@@ -266,7 +322,7 @@ def build_candidate(native_data, original_data, roots, slide, early_security_ini
     report['pointer_counts'] = dict(Counter(binding['kind'] for binding in report.get('bindings', [])))
     report['source_interfaces'] = identifiers
     report['source_interface_transform'] = {
-        'version': 1,
+        'version': 2,
         'original_kernelcache_sha256': original_digest,
         'rewritten_prelink_input_sha256': hashlib.sha256(transformed).hexdigest(),
         'entries': source_manifest,
@@ -283,7 +339,7 @@ def main():
     parser.add_argument('--root', required=True, action='append')
     parser.add_argument('--source-interface', action='append', default=[])
     parser.add_argument('--source-interface-binding', action='append', default=[],
-                        metavar='BUNDLE=DONOR_VA=SYMBOL')
+                        metavar='BUNDLE=DONOR_VA=SYMBOL[=TARGET_KIND]')
     parser.add_argument('--kernelcache-sha256')
     parser.add_argument('--slide', required=True, type=lambda value: int(value, 0))
     parser.add_argument('--output', required=True, type=Path)
@@ -297,15 +353,18 @@ def main():
         initializers[identifier] = int(address, 0)
     source_bindings = []
     for request in args.source_interface_binding:
-        bundle, separator, rest = request.partition('=')
-        donor_address, separator2, symbol = rest.partition('=')
-        if not separator or not separator2 or not bundle or not donor_address or not symbol or '=' in symbol:
-            parser.error('Use BUNDLE=DONOR_VA=SYMBOL for each explicit source-interface binding')
+        parts = request.split('=')
+        if len(parts) not in (3, 4) or any(not part for part in parts):
+            parser.error('Use BUNDLE=DONOR_VA=SYMBOL[=TARGET_KIND] for each explicit source-interface binding')
+        bundle, donor_address, symbol = parts[:3]
         try:
             donor_va = int(donor_address, 0)
         except ValueError:
             parser.error('Source-interface donor address must be an integer literal')
-        source_bindings.append({'bundle': bundle, 'donor_va': donor_va, 'symbol': symbol})
+        binding = {'bundle': bundle, 'donor_va': donor_va, 'symbol': symbol}
+        if len(parts) == 4:
+            binding['target_kind'] = parts[3]
+        source_bindings.append(binding)
     if args.output.exists() or args.output.with_suffix('.json').exists():
         raise SystemExit('Refuse to overwrite an existing candidate or report')
     image, report = build_candidate(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root,

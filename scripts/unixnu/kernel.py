@@ -172,7 +172,8 @@ def prelink(ctx):
         command += ['--source-interface', interface]
     for binding in spec.get('source_interface_bindings', []):
         command += ['--source-interface-binding',
-                    f"{binding['bundle']}={binding['donor_va']}={binding['symbol']}"]
+                    f"{binding['bundle']}={binding['donor_va']}={binding['symbol']}="
+                    f"{binding.get('target_kind', 'code')}"]
     if spec.get('source_interface_bindings'):
         command += ['--kernelcache-sha256', spec['kernelcache_sha256']]
     if spec.get('early_security_init'):

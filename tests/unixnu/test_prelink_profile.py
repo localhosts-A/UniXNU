@@ -66,6 +66,34 @@ def add_native_export(data, symbol, address):
 
 
 class PrelinkProfileTests(unittest.TestCase):
+    def test_source_interface_data_targets_require_exact_section_and_permissions(self):
+        data_const = {
+            'name': '__DATA_CONST', 'va': 0x5000, 'size': 0x100,
+            'initprot': 1, 'maxprot': 1,
+            'sections': [{'name': '__const', 'va': 0x5020, 'size': 0x40}],
+        }
+        segment, section = SOURCE_PRELINK.exact_data_owner(
+            [data_const], 0x5030, 'data_const', '__ZTVFixture', 'Donor')
+        self.assertIs(segment, data_const)
+        self.assertEqual(section['name'], '__const')
+
+        writable = {
+            'name': '__DATA', 'va': 0x6000, 'size': 0x100,
+            'initprot': 3, 'maxprot': 3,
+            'sections': [{'name': '__common', 'va': 0x6020, 'size': 0x40}],
+        }
+        _, section = SOURCE_PRELINK.exact_data_owner(
+            [writable], 0x6030, 'data_rw', '__ZN7IOMedia10gMetaClassE', 'Donor')
+        self.assertEqual(section['name'], '__common')
+
+        bad_protection = {**data_const, 'maxprot': 3}
+        with self.assertRaisesRegex(ValueError, 'pinned data_const layout'):
+            SOURCE_PRELINK.exact_data_owner(
+                [bad_protection], 0x5030, 'data_const', '__ZTVFixture', 'Donor')
+        with self.assertRaisesRegex(ValueError, 'unsupported identity'):
+            SOURCE_PRELINK.exact_data_owner(
+                [data_const], 0x5030, 'data_const', '__ZN7IOMedia10gMetaClassE', 'Donor')
+
     def test_source_interface_rewrite_preserves_donor_identity_without_executable(self):
         native, original = prelink_images()
         native = add_native_export(native, STORAGE_SYMBOL, 0x100a00)
@@ -116,6 +144,7 @@ class PrelinkProfileTests(unittest.TestCase):
         self.assertEqual(record["personalities"], ["StorageFixture"])
         self.assertEqual(report['source_interface_bindings'], [{
             'bundle': 'test.storage', 'donor_va': 0x2800, 'symbol': STORAGE_SYMBOL,
+            'target_kind': 'code',
             'native_va': 0x100a00, 'reference_count': 1,
         }])
         binding, = (item for item in report['bindings'] if item['target'] == 0x2800)
@@ -195,10 +224,11 @@ class PrelinkProfileTests(unittest.TestCase):
         ]}}
         binding = {'bundle': 'test.storage', 'donor_va': '0x2800', 'symbol': STORAGE_SYMBOL}
         digest = 'a' * 64
-        normalized, addresses = SOURCE_PRELINK.normalize_source_interface_bindings(
+        normalized, addresses, target_layouts = SOURCE_PRELINK.normalize_source_interface_bindings(
             native, manifest, [binding], digest, digest)
         self.assertEqual(normalized[0x2800]['symbol'], STORAGE_SYMBOL)
         self.assertEqual(addresses, {0x2800: 0x100a00})
+        self.assertEqual(target_layouts, {})
 
         native = add_native_export(native, STORAGE_SYNCHRONIZE_SYMBOL, 0x100b00)
         multi_manifest = {'test.storage': {'segments': [
@@ -207,14 +237,14 @@ class PrelinkProfileTests(unittest.TestCase):
         multi_specs = [binding, {
             'bundle': 'test.storage', 'donor_va': '0x2840', 'symbol': STORAGE_SYNCHRONIZE_SYMBOL,
         }]
-        multi_names, multi_addresses = SOURCE_PRELINK.normalize_source_interface_bindings(
+        multi_names, multi_addresses, _ = SOURCE_PRELINK.normalize_source_interface_bindings(
             native, multi_manifest, multi_specs, digest, digest)
         self.assertEqual(set(multi_names), {0x2800, 0x2840})
         self.assertEqual(multi_addresses, {0x2800: 0x100a00, 0x2840: 0x100b00})
 
         with self.assertRaisesRegex(ValueError, 'exact pinned kernelcache'):
             SOURCE_PRELINK.normalize_source_interface_bindings(native, manifest, [binding], 'b' * 64, digest)
-        with self.assertRaisesRegex(ValueError, 'not in one declared executable segment'):
+        with self.assertRaisesRegex(ValueError, 'not in one declared segment'):
             SOURCE_PRELINK.normalize_source_interface_bindings(
                 native, manifest, [{**binding, 'donor_va': '0x2900'}], digest, digest)
         non_executable = {'test.storage': {'segments': [
@@ -225,7 +255,7 @@ class PrelinkProfileTests(unittest.TestCase):
         overlapping = {**manifest, 'other.storage': {'segments': [
             {'name': '__TEXT_EXEC', 'va': 0x2800, 'size': 0x20, 'initprot': 5},
         ]}}
-        with self.assertRaisesRegex(ValueError, 'not in one declared executable segment'):
+        with self.assertRaisesRegex(ValueError, 'not in one declared segment'):
             SOURCE_PRELINK.normalize_source_interface_bindings(native, overlapping, [binding], digest, digest)
         with self.assertRaisesRegex(ValueError, '0 address candidates'):
             SOURCE_PRELINK.normalize_source_interface_bindings(
@@ -289,7 +319,7 @@ class PrelinkProfileTests(unittest.TestCase):
             self.assertIn("--source-interface", command)
             self.assertIn("com.apple.iokit.IOStorageFamily", command)
             self.assertIn("--source-interface-binding", command)
-            self.assertIn("com.apple.iokit.IOStorageFamily=0xfffffff0059762a8=" + STORAGE_SYMBOL, command)
+            self.assertIn("com.apple.iokit.IOStorageFamily=0xfffffff0059762a8=" + STORAGE_SYMBOL + "=code", command)
             self.assertIn("--kernelcache-sha256", command)
             self.assertIn("0" * 64, command)
 
