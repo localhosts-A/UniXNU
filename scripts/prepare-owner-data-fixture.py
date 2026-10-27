@@ -33,6 +33,10 @@ def select_whole_disk(system_entities):
     if len(partitioned) > 1:
         raise SystemExit('Require one GUID partition-scheme parent for the Data seed image')
 
+    untyped = [entry for entry in devices if not entry.get('content-hint')]
+    if len(untyped) == 1:
+        return untyped[0]['dev-entry']
+
     apfs_parents = {match.group(1) for entry in entities
                     if entry.get('content-hint') == 'Apple_APFS' and
                     isinstance(entry.get('dev-entry'), str)
