@@ -112,6 +112,34 @@ class SourceMsdosfsTests(unittest.TestCase):
         self.assertEqual(FAT.kernel_localargs_support('00000000 T ' + symbol), {symbol: True})
         self.assertEqual(FAT.kernel_localargs_support('', 'U ' + symbol), {symbol: False})
 
+    def test_qemu_mount_test_requires_localargs_and_ram_provider_symbols(self):
+        helper, provider = FAT.QEMU_MOUNT_SUPPORT_SYMBOLS
+        self.assertEqual(FAT.qemu_mount_test_support('00000000 T ' + provider,
+            '00000000 private external ' + helper), {helper: True, provider: True})
+        self.assertEqual(FAT.qemu_mount_test_support('00000000 T ' + provider,
+            '00000000 private external ' + helper, 'U ' + provider), {helper: True, provider: False})
+
+    def test_kernel_mount_test_patch_is_gated_before_launchd(self):
+        patch = (ROOT / 'patches/xnu/source-msdosfs-vfs-test.patch').read_text()
+        mountpoint_patch = (ROOT / 'patches/xnu/mockfs-test-mountpoint.patch').read_text()
+        fixture = (ROOT / 'scripts/fixtures/source-msdosfs.c').read_text()
+        self.assertIn('source_msdosfs_qemu_test', patch)
+        self.assertIn('user_addr_t init_envp = USER_ADDR_NULL;', patch)
+        self.assertIn('#if defined(XNU_SOURCE_MSDOSFS) && XNU_SOURCE_MSDOSFS', patch)
+        self.assertIn('kernel_mount_localargs("msdos", mountpoint, device_path', fixture)
+        self.assertIn('source_storage_fixture_copy_bsd_path', fixture)
+        self.assertIn('PE_parse_boot_argn("source-msdosfs-test"', fixture)
+        self.assertIn('if (mode != 1)', fixture)
+        self.assertIn('MSDOSFS_ARGSMAGIC', fixture)
+        self.assertIn('MNT_RDONLY', fixture)
+        self.assertIn('VNOP_READ(file, auio', fixture)
+        self.assertIn('uio_resid(auio) != 0', fixture)
+        self.assertIn('memcmp(contents, expected', fixture)
+        self.assertIn('error == EROFS', fixture)
+        self.assertIn('vnode_put(file)', fixture)
+        self.assertIn('MOCKFS_TEST_MOUNTPOINT', mountpoint_patch)
+        self.assertIn('"mnt"', mountpoint_patch)
+
     def test_feed_is_fetched_only_for_the_selected_kernel_profile(self):
         modules = {('refer', 'msdosfs'): SimpleNamespace(name='msdosfs', kind='refer', origin='git')}
         for enabled in (False, True):

@@ -1,6 +1,7 @@
 /* Production xHCI controller lifecycle against a fault-injected register/DMA model. */
 #define _POSIX_C_SOURCE 200112L
 #include "UsbXhciHost.h"
+#include "usb_xhci_controller_test_api.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,15 @@ static const uint8_t disk_full_speed_configuration_descriptor[32] = {
     7, 5, 0x81, 2, 64, 0, 0,
     7, 5, 0x02, 2, 64, 0, 0
 };
+static const uint8_t hid_bot_configuration_descriptor[57] = {
+    9, 2, 57, 0, 2, 1, 0, 0x80, 50,
+    9, 4, 0, 0, 1, 3, 1, 1, 0,
+    9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0x3f, 0,
+    7, 5, 0x81, 3, 8, 0, 10,
+    9, 4, 1, 0, 2, 8, 6, 0x50, 0,
+    7, 5, 0x83, 2, 64, 0, 0,
+    7, 5, 0x03, 2, 64, 0, 0
+};
 static const uint8_t hub_device_descriptor[18] = {
     18, 1, 0, 2, 9, 0, 1, 64, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1
 };
@@ -79,16 +89,22 @@ struct model {
     size_t expected_out_size;
     uint8_t device_descriptor[8];
     uint8_t test_media[4096];
+    uint8_t *bot_media;
+    size_t bot_media_size;
     uint8_t bot_cdb[16];
     uint32_t bot_tag, bot_transfer_size, bot_lba, bot_blocks;
-    unsigned bot_phase, bot_commands, bot_sync_commands;
+    unsigned bot_phase, bot_commands, bot_sync_commands, bot_capacity_commands;
+    unsigned bot_read_only_commands, bot_read_commands, bot_write_commands;
     uint16_t bot_tt_clear_value[2], bot_tt_clear_index[2];
     uint8_t bot_clear_feature_endpoint[2];
     unsigned bot_class_resets, bot_tt_buffer_clears, bot_clear_features, bot_stalls;
     uint8_t bot_cdb_length;
     unsigned host_control_requests, host_get_device8, host_get_device18;
     unsigned host_get_config_header, host_get_config, host_set_config;
-    bool host_stack_enumeration, bot_direction_in;
+    bool host_stack_enumeration, bot_direction_in, composite_hid_bot;
+    uint8_t bot_in_endpoint, bot_out_endpoint;
+    uint8_t hid_input_report[8];
+    unsigned hid_interrupts, hid_protocol_selections;
     uint8_t hub_interrupt_bitmap[USB_HOST_HUB_MAX_BITMAP_BYTES];
     uint16_t hub_port_status, hub_port_change;
     uint32_t hub_reset_complete_ms, current_ms;
@@ -100,7 +116,6 @@ struct model {
 };
 
 static void put_le32(uint8_t *p, uint32_t value);
-static uint64_t get_le64(const uint8_t *p);
 static void event_at(struct usb_xhci_controller *c, uint32_t index, uint8_t cycle,
                      uint32_t type, uint64_t parameter, uint8_t code, uint32_t fields);
 static void queue_model_event(struct model *m, uint32_t type, uint64_t parameter,
@@ -116,6 +131,11 @@ static void init_model(struct model *m, unsigned scratchpads)
     m->device_descriptor[7] = 8u;
     m->endpoint_completion_code = USB_XHCI_CC_SUCCESS;
     m->endpoint_pattern_start = 0xa0u;
+    m->bot_media = m->test_media;
+    m->bot_media_size = sizeof(m->test_media);
+    m->bot_in_endpoint = 0x81u;
+    m->bot_out_endpoint = 0x02u;
+    m->hid_input_report[2] = 4u;
     m->regs[0] = 0x01000040u;
     m->regs[1] = 8u | (1u << 8) | (4u << 24);
     m->regs[2] = ((scratchpads & 31u) << 27) | ((scratchpads >> 5) << 21);
@@ -197,6 +217,9 @@ static void complete_host_control(struct model *m, struct usb_xhci_device_slot *
             if (m->slot_is_hub[slot->slot_id]) {
                 response = hub_configuration_descriptor;
                 response_size = sizeof(hub_configuration_descriptor);
+            } else if (m->composite_hid_bot) {
+                response = hid_bot_configuration_descriptor;
+                response_size = sizeof(hid_bot_configuration_descriptor);
             } else if (slot->speed == USB_XHCI_SPEED_FULL) {
                 response = disk_full_speed_configuration_descriptor;
                 response_size = sizeof(disk_full_speed_configuration_descriptor);
@@ -217,6 +240,11 @@ static void complete_host_control(struct model *m, struct usb_xhci_device_slot *
                setup.index == 0u && setup.length == 0u) {
         assert(!td->input && !td->data.cpu);
         ++m->host_set_config;
+    } else if (!m->slot_is_hub[slot->slot_id] && m->composite_hid_bot &&
+               setup.type == 0x21u && setup.request == 0x0bu && setup.value == 0u &&
+               setup.index == 0u && setup.length == 0u) {
+        assert(!td->input && !td->data.cpu);
+        ++m->hid_protocol_selections;
     } else if (m->slot_is_hub[slot->slot_id] && setup.type == 0xa0u &&
                setup.request == 6u && setup.value == 0x2900u && setup.index == 0u &&
                (setup.length == 7u || setup.length == sizeof(hub_descriptor))) {
@@ -277,7 +305,8 @@ static void complete_host_control(struct model *m, struct usb_xhci_device_slot *
         ++m->bot_class_resets;
     } else if (!m->slot_is_hub[slot->slot_id] && setup.type == 0x02u &&
                setup.request == 1u && setup.value == 0u && setup.length == 0u &&
-               (setup.index == 0x81u || setup.index == 0x02u)) {
+               (setup.index == m->bot_in_endpoint || setup.index == m->bot_out_endpoint ||
+                (m->composite_hid_bot && setup.index == 0x81u))) {
         assert(!td->input && !td->data.cpu && m->bot_clear_features < 2u);
         m->bot_clear_feature_endpoint[m->bot_clear_features++] = (uint8_t)setup.index;
     } else {
@@ -311,7 +340,7 @@ static void complete_bot_endpoint(struct model *m, struct usb_xhci_device_endpoi
     assert(bytes && endpoint->descriptor.type == 2u);
     (void)current_endpoint_transfer_trb(endpoint);
     if (!endpoint->input) {
-        assert(endpoint->descriptor.address == 0x02u);
+        assert(endpoint->descriptor.address == m->bot_out_endpoint);
         if (m->bot_phase == 0u) {
             assert(size == 31u && get_le32(bytes) == 0x43425355u);
             m->bot_tag = get_le32(bytes + 4u);
@@ -330,9 +359,14 @@ static void complete_bot_endpoint(struct model *m, struct usb_xhci_device_endpoi
             } else {
                 assert((m->bot_direction_in &&
                         ((m->bot_cdb[0] == 0x25u && m->bot_cdb_length == 10u && m->bot_transfer_size == 8u) ||
+                         (m->bot_cdb[0] == 0x1au && m->bot_cdb_length == 6u && m->bot_transfer_size == 4u) ||
                          (m->bot_cdb[0] == 0x28u && m->bot_cdb_length == 10u))) ||
                        (!m->bot_direction_in && m->bot_cdb[0] == 0x2au &&
                         m->bot_cdb_length == 10u));
+                if (m->bot_cdb[0] == 0x25u) ++m->bot_capacity_commands;
+                if (m->bot_cdb[0] == 0x1au) ++m->bot_read_only_commands;
+                if (m->bot_cdb[0] == 0x28u) ++m->bot_read_commands;
+                if (m->bot_cdb[0] == 0x2au) ++m->bot_write_commands;
                 m->bot_phase = 1u;
             }
         } else {
@@ -341,25 +375,32 @@ static void complete_bot_endpoint(struct model *m, struct usb_xhci_device_endpoi
             m->bot_lba = get_be32(m->bot_cdb + 2u);
             m->bot_blocks = ((uint32_t)m->bot_cdb[7] << 8) | m->bot_cdb[8];
             size_t offset = (size_t)m->bot_lba * 512u;
-            assert(m->bot_blocks && size == (size_t)m->bot_blocks * 512u &&
-                   offset <= sizeof(m->test_media) && size <= sizeof(m->test_media) - offset);
-            memcpy(m->test_media + offset, bytes, size);
+            assert(m->bot_media && m->bot_blocks && size == (size_t)m->bot_blocks * 512u &&
+                   offset <= m->bot_media_size && size <= m->bot_media_size - offset);
+            memcpy(m->bot_media + offset, bytes, size);
             m->bot_phase = 2u;
         }
     } else {
-        assert(endpoint->descriptor.address == 0x81u);
+        assert(endpoint->descriptor.address == m->bot_in_endpoint);
         if (m->bot_phase == 1u) {
             assert(m->bot_direction_in && size == m->bot_transfer_size);
             if (m->bot_cdb[0] == 0x25u) {
                 assert(size == 8u);
-                put_be32(bytes, 7u); put_be32(bytes + 4u, 512u);
+                assert(m->bot_media && m->bot_media_size >= 512u &&
+                       m->bot_media_size / 512u <= UINT32_MAX);
+                put_be32(bytes, (uint32_t)(m->bot_media_size / 512u - 1u));
+                put_be32(bytes + 4u, 512u);
+            } else if (m->bot_cdb[0] == 0x1au) {
+                assert(size == 4u);
+                memset(bytes, 0, size);
+                bytes[2] = 0x80u; /* The modeled medium is write-protected. */
             } else if (m->bot_cdb[0] == 0x28u) {
                 m->bot_lba = get_be32(m->bot_cdb + 2u);
                 m->bot_blocks = ((uint32_t)m->bot_cdb[7] << 8) | m->bot_cdb[8];
                 size_t offset = (size_t)m->bot_lba * 512u;
-                assert(m->bot_blocks && size == (size_t)m->bot_blocks * 512u &&
-                       offset <= sizeof(m->test_media) && size <= sizeof(m->test_media) - offset);
-                memcpy(bytes, m->test_media + offset, size);
+                assert(m->bot_media && m->bot_blocks && size == (size_t)m->bot_blocks * 512u &&
+                       offset <= m->bot_media_size && size <= m->bot_media_size - offset);
+                memcpy(bytes, m->bot_media + offset, size);
             } else {
                 assert(0 && "unexpected BOT data-in command");
             }
@@ -380,6 +421,14 @@ static void complete_host_endpoint(struct model *m, struct usb_xhci_device_slot 
         (void)current_endpoint_transfer_trb(endpoint);
         memcpy(endpoint->transfer_data.cpu, m->hub_interrupt_bitmap, 1u);
         ++m->hub_interrupts;
+        return;
+    }
+    if (m->composite_hid_bot && endpoint->descriptor.type == 3u &&
+        endpoint->descriptor.address == 0x81u) {
+        assert(endpoint->input && endpoint->transfer_data.cpu && endpoint->transfer_length == 8u);
+        (void)current_endpoint_transfer_trb(endpoint);
+        memcpy(endpoint->transfer_data.cpu, m->hid_input_report, sizeof(m->hid_input_report));
+        ++m->hid_interrupts;
         return;
     }
     complete_bot_endpoint(m, endpoint);
@@ -646,12 +695,18 @@ static struct usb_xhci_controller *new_controller(void)
     struct usb_xhci_controller *c = calloc(1, sizeof(*c));
     assert(c); return c;
 }
-static int start(struct model *m, struct usb_xhci_controller *c)
+static int start_with_dma(struct model *m, struct usb_xhci_controller *c,
+                          const struct usb_dma_ops *external_dma)
 {
-    struct usb_mmio io = mmio(m); struct usb_dma_ops d = dma(m);
+    struct usb_mmio io = mmio(m);
+    struct usb_dma_ops d = external_dma ? *external_dma : dma(m);
     m->controller = c;
     return usb_xhci_controller_start(c, &io, &d, guard, m, 4, 16, 16);
 }
+#ifndef USB_XHCI_TEST_MODEL_ONLY
+static int start(struct model *m, struct usb_xhci_controller *c)
+{ return start_with_dma(m, c, NULL); }
+#endif
 struct adapter_lock_state { bool held; unsigned acquisitions, releases; };
 static int adapter_test_lock(void *context)
 {
@@ -667,12 +722,14 @@ static void adapter_test_unlock(void *context)
 }
 static uint32_t adapter_test_clock(void *context)
 { return *(const uint32_t *)context; }
+#ifndef USB_XHCI_TEST_MODEL_ONLY
 static uint64_t get_le64(const uint8_t *p)
 {
     uint64_t value = 0;
     for (unsigned i = 0; i < 8; ++i) value |= (uint64_t)p[i] << (8u * i);
     return value;
 }
+#endif
 static void put_le32(uint8_t *p, uint32_t value)
 {
     for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(value >> (8u * i));
@@ -697,6 +754,7 @@ static void queue_model_event(struct model *m, uint32_t type, uint64_t parameter
     }
 }
 
+#ifndef USB_XHCI_TEST_MODEL_ONLY
 static void test_commands_and_events(void)
 {
     struct model m; init_model(&m, 0); struct usb_xhci_controller *c = new_controller();
@@ -1965,3 +2023,110 @@ int main(void)
     puts("PASS: xHCI production controller lifecycle model; hardware_qualified=false");
     return 0;
 }
+#else
+struct usb_xhci_test_host {
+    struct model model;
+    struct usb_xhci_controller *controller;
+    struct usb_xhci_host_device devices[1];
+    struct usb_xhci_host_adapter adapter;
+    struct adapter_lock_state lock_state;
+    uint32_t clock_ms;
+    bool controller_started;
+};
+
+struct usb_xhci_test_host *usb_xhci_test_host_create(
+    uint8_t *media, size_t media_size, const uint8_t keyboard_report[8],
+    const struct usb_dma_ops *dma_ops)
+{
+    if (!media || media_size < 512u || media_size % 512u ||
+        media_size / 512u > UINT32_MAX || !keyboard_report || !dma_ops ||
+        !dma_ops->qualified || !dma_ops->allocate || !dma_ops->release || !dma_ops->sync)
+        return NULL;
+    struct usb_xhci_test_host *host = calloc(1, sizeof(*host));
+    if (!host) return NULL;
+    init_model(&host->model, 0);
+    host->model.auto_commands = true;
+    host->model.auto_control = true;
+    host->model.auto_endpoint = true;
+    host->model.host_stack_enumeration = true;
+    host->model.composite_hid_bot = true;
+    host->model.bot_media = media;
+    host->model.bot_media_size = media_size;
+    host->model.bot_in_endpoint = 0x83u;
+    host->model.bot_out_endpoint = 0x03u;
+    memcpy(host->model.hid_input_report, keyboard_report,
+           sizeof(host->model.hid_input_report));
+    host->model.slot = &host->devices[0].slot;
+    host->model.allow_live_release = true;
+    host->controller = new_controller();
+    if (start_with_dma(&host->model, host->controller, dma_ops) != USB_OK) {
+        host->model.allow_live_release = false;
+        if (usb_xhci_controller_stop(host->controller) == USB_OK)
+            free(host->controller);
+        free(host);
+        return NULL;
+    }
+    host->controller_started = true;
+    host->clock_ms = 1u;
+    int result = usb_xhci_host_adapter_init(&host->adapter, host->controller,
+        host->devices, 1u, adapter_test_lock, adapter_test_unlock, &host->lock_state,
+        adapter_test_clock, &host->clock_ms, 100u);
+    if (result != USB_OK) {
+        host->model.allow_live_release = false;
+        if (usb_xhci_controller_stop(host->controller) == USB_OK) {
+            host->controller_started = false;
+            free(host->controller);
+        }
+        free(host);
+        return NULL;
+    }
+    return host;
+}
+
+int usb_xhci_test_host_get_ops(struct usb_xhci_test_host *host,
+                               struct usb_host_ops *ops)
+{
+    if (!host || !host->controller_started || !ops) return USB_INVALID;
+    return usb_xhci_host_adapter_get_ops(&host->adapter, ops);
+}
+
+int usb_xhci_test_host_get_counters(struct usb_xhci_test_host *host,
+                                    struct usb_xhci_test_host_counters *out)
+{
+    if (!host || !out) return USB_INVALID;
+    struct usb_xhci_test_host_counters counters = {
+        .host_control_requests = host->model.host_control_requests,
+        .hid_protocol_selections = host->model.hid_protocol_selections,
+        .hid_interrupts = host->model.hid_interrupts,
+        .bot_capacity_commands = host->model.bot_capacity_commands,
+        .bot_read_only_commands = host->model.bot_read_only_commands,
+        .bot_read_commands = host->model.bot_read_commands,
+        .bot_sync_commands = host->model.bot_sync_commands,
+        .bot_write_commands = host->model.bot_write_commands
+    };
+    *out = counters;
+    return USB_OK;
+}
+
+int usb_xhci_test_host_stop(struct usb_xhci_test_host *host)
+{
+    if (!host || !host->controller_started) return USB_INVALID;
+    if (host->devices[0].owned) return USB_BUSY;
+    host->model.allow_live_release = false;
+    int result = usb_xhci_controller_stop(host->controller);
+    if (result) return result;
+    result = usb_xhci_host_adapter_release_stopped(&host->adapter);
+    if (result) return result;
+    host->controller_started = false;
+    return USB_OK;
+}
+
+int usb_xhci_test_host_destroy(struct usb_xhci_test_host *host)
+{
+    if (!host) return USB_INVALID;
+    if (host->controller_started) return USB_BUSY;
+    free(host->controller);
+    free(host);
+    return USB_OK;
+}
+#endif

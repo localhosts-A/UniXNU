@@ -27,14 +27,17 @@ OUT = ROOT / 'build/source-msdosfs'
 ARCHIVE = OUT / 'libmsdosfs.a'
 REGISTRATION = ROOT / 'scripts/fixtures/source-msdosfs.c'
 PATCH = ROOT / 'patches/xnu/source-msdosfs-registration.patch'
+QEMU_TEST_PATCH = ROOT / 'patches/xnu/source-msdosfs-vfs-test.patch'
 KERNEL_LOCALARGS_PATCH = ROOT / 'patches/xnu/source-kernel-local-mount-args.patch'
 SYMBOLS = ('_msdosfs_module_start', '_msdosfs_vfsops',
            '_msdosfs_vnodeop_opv_desc', '_msdosfs_fat_vnodeop_opv_desc',
            '_msdosfs_vfs_mount', '_msdosfs_vfs_sync', '_msdosfs_vfs_unmount',
-           '_source_msdosfs_register')
+           '_source_msdosfs_register', '_source_msdosfs_qemu_test',
+           '_source_msdosfs_test_checkpoint')
 PRIVATE_SYMBOLS = ('_msdosfs_fat_vnodeop_opv_desc',)
 GLOBAL_SYMBOLS = tuple(name for name in SYMBOLS if name not in PRIVATE_SYMBOLS)
 KERNEL_LOCALARGS_SUPPORT_SYMBOLS = ('_vfs_is_kernel_localargs',)
+QEMU_MOUNT_SUPPORT_SYMBOLS = ('_kernel_mount_localargs', '_source_storage_fixture_copy_bsd_path')
 VFSOPS = 'msdosfs_vfsops.c'
 KERNEL_LOCALARGS_TRANSFORM = 'msdosfs-kernel-localargs-v1'
 
@@ -124,6 +127,13 @@ def kernel_localargs_support(defined, undefined=''):
             for name in KERNEL_LOCALARGS_SUPPORT_SYMBOLS}
 
 
+def qemu_mount_test_support(defined, private_defined='', undefined=''):
+    definitions = symbol_names(defined) | symbol_names(private_defined)
+    unresolved = symbol_names(undefined)
+    return {name: name in definitions and name not in unresolved
+            for name in QEMU_MOUNT_SUPPORT_SYMBOLS}
+
+
 def build():
     revision = subprocess.check_output(['git', '-C', SOURCE, 'rev-parse', 'HEAD'], text=True).strip()
     if revision != REVISION or subprocess.check_output(['git', '-C', SOURCE, 'status', '--porcelain'], text=True).strip():
@@ -194,6 +204,7 @@ def build():
               'kernel_localargs_transform': KERNEL_LOCALARGS_TRANSFORM,
               'kernel_localargs_transform_sha256': digest(Path(__file__).resolve()),
               'kernel_localargs_xnu_patch_sha256': digest(KERNEL_LOCALARGS_PATCH),
+              'qemu_mount_test_patch_sha256': digest(QEMU_TEST_PATCH),
               'upstream_vfsops_sha256': digest(next(path for path in upstream_sources if path.name == VFSOPS)),
               'kernel_localargs_vfsops_sha256': digest(generated_vfsops),
               'registration_source_sha256': digest(REGISTRATION), 'registration_patch_sha256': digest(PATCH),
@@ -213,6 +224,7 @@ def verify_kernel(kernel):
             report.get('kernel_localargs_transform') != KERNEL_LOCALARGS_TRANSFORM or
             report.get('kernel_localargs_transform_sha256') != digest(Path(__file__).resolve()) or
             report.get('kernel_localargs_xnu_patch_sha256') != digest(KERNEL_LOCALARGS_PATCH) or
+            report.get('qemu_mount_test_patch_sha256') != digest(QEMU_TEST_PATCH) or
             report.get('upstream_vfsops_sha256') != digest(next(
                 path for path in kernel_sources() if path.name == VFSOPS)) or
             report.get('kernel_localargs_vfsops_sha256') != digest(OUT / 'generated' / VFSOPS) or
@@ -226,24 +238,37 @@ def verify_kernel(kernel):
     private_definitions = symbol_names(private_defined)
     unresolved = symbol_names(undefined)
     localargs_support = kernel_localargs_support(defined, undefined)
+    qemu_mount_support = qemu_mount_test_support(defined, private_defined, undefined)
     symbol_report = {
         'kernel_sha256': digest(kernel),
         'global_definitions': {name: name in definitions for name in GLOBAL_SYMBOLS},
         'private_definitions': {name: name in private_definitions for name in PRIVATE_SYMBOLS},
         'kernel_localargs_support': localargs_support,
+        'qemu_mount_test_support': qemu_mount_support,
         'unresolved_required': sorted(set(SYMBOLS) & unresolved),
     }
     (OUT / 'kernel-symbol-report.json').write_text(json.dumps(symbol_report, indent=2) + '\n')
     check_symbols(defined, undefined, private_defined)
     if not all(localargs_support.values()):
         raise ValueError('Final kernel lacks the opted-in local mount-args VFS API')
+    if not all(qemu_mount_support.values()):
+        raise ValueError('Final kernel lacks the production QEMU mount-test dependencies')
     caller = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o'
     references = subprocess.check_output(['xcrun', 'nm', '-u', caller], text=True)
     if '_source_msdosfs_register' not in {line.split()[-1] for line in references.splitlines() if line.split()}:
         raise ValueError('Compiled bsd_init does not call source msdosfs registration')
+    objects = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
+    exec_callers = list(objects.rglob('kern_exec.o'))
+    if len(exec_callers) != 1:
+        raise ValueError('Expected exactly one final-configuration kern_exec object')
+    exec_references = subprocess.check_output(['xcrun', 'nm', '-u', exec_callers[0]], text=True)
+    if '_source_msdosfs_qemu_test' not in {line.split()[-1] for line in exec_references.splitlines() if line.split()}:
+        raise ValueError('Compiled kern_exec does not call the gated source msdosfs QEMU mount test')
     report.update(kernel_link_verified=True, kernel_sha256=digest(kernel),
                   kernel_symbols_verified=symbol_report,
-                  registration_caller_sha256=digest(caller), registration_hook_compiled=True)
+                  registration_caller_sha256=digest(caller), registration_hook_compiled=True,
+                  qemu_mount_test_caller_sha256=digest(exec_callers[0]),
+                  qemu_mount_test_hook_compiled=True)
     (OUT / 'kernel-link-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print('PASS: source msdosfs implementations and VFS registration hook linked; FAT32 runtime remains unqualified')
 

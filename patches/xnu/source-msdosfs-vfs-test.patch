@@ -1,0 +1,18 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index c1b7c62..46d8f5a 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7397,6 +7397,13 @@ load_init_program(proc_t p)
+ 
+ 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+ 	user_addr_t init_envp = USER_ADDR_NULL;
++#if defined(XNU_SOURCE_MSDOSFS) && XNU_SOURCE_MSDOSFS
++	{
++		extern int source_msdosfs_qemu_test(void);
++		int msdosfs_test_error = source_msdosfs_qemu_test();
++		if (msdosfs_test_error) panic("source msdosfs QEMU mount/read test failed: %d", msdosfs_test_error);
++	}
++#endif
+ #if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
+ 	int cache_error = native_owner_cache_prepare(p, (user_addr_t)scratch_addr, &init_envp);
+ 	if (cache_error) panic("offline owner SystemOS mount failed: %d", cache_error);

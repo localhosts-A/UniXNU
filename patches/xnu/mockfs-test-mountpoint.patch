@@ -1,0 +1,142 @@
+diff --git a/bsd/miscfs/mockfs/mockfs_fsnode.c b/bsd/miscfs/mockfs/mockfs_fsnode.c
+index 70b6bcb..87b0174 100644
+--- a/bsd/miscfs/mockfs/mockfs_fsnode.c
++++ b/bsd/miscfs/mockfs/mockfs_fsnode.c
+@@ -81,6 +81,8 @@ mockfs_fsnode_create(mount_t mp, uint8_t type, mockfs_fsnode_t * fsnpp)
+ 		 */
+ 		new_size = mp->mnt_devvp->v_specinfo->si_devsize;
+ 		break;
++	case MOCKFS_TEST_MOUNTPOINT:
++		break;
+ 	default:
+ 		rvalue = EINVAL;
+ 		goto done;
+@@ -152,6 +154,12 @@ mockfs_fsnode_destroy(mockfs_fsnode_t fsnp)
+ 		}
+ 	}
+ 
++	if (fsnp->child_d) {
++		if ((rvalue = mockfs_fsnode_destroy(fsnp->child_d))) {
++			panic("mockfs: failed to destroy FAT mountpoint");
++		}
++	}
++
+ 	/*
+ 	 * We need to orphan this node before we destroy it.
+ 	 */
+@@ -212,6 +220,9 @@ mockfs_fsnode_adopt(mockfs_fsnode_t parent, mockfs_fsnode_t child)
+ 	} else if (!parent->child_c) {
+ 		parent->child_c = child;
+ 		child->parent = parent;
++	} else if (!parent->child_d) {
++		parent->child_d = child;
++		child->parent = parent;
+ 	} else {
+ 		rvalue = ENOMEM;
+ 	}
+@@ -256,6 +267,9 @@ mockfs_fsnode_orphan(mockfs_fsnode_t fsnp)
+ 	} else if (parent->child_c == fsnp) {
+ 		parent->child_c = NULL;
+ 		fsnp->parent = NULL;
++	} else if (parent->child_d == fsnp) {
++		parent->child_d = NULL;
++		fsnp->parent = NULL;
+ 	} else {
+ 		panic("mockfs_fsnode_orphan insanity, fsnp->parent != parent->child; fsnp = %p (in case gdb is screwing with you)", fsnp);
+ 	}
+@@ -293,6 +307,8 @@ mockfs_fsnode_child_by_type(mockfs_fsnode_t parent, uint8_t type, mockfs_fsnode_
+ 		*child = parent->child_b;
+ 	} else if ((parent->child_c) && (parent->child_c->type == type)) {
+ 		*child = parent->child_c;
++	} else if ((parent->child_d) && (parent->child_d->type == type)) {
++		*child = parent->child_d;
+ 	} else {
+ 		rvalue = ENOENT;
+ 	}
+diff --git a/bsd/miscfs/mockfs/mockfs_fsnode.h b/bsd/miscfs/mockfs/mockfs_fsnode.h
+index fcaf674..fd644a3 100644
+--- a/bsd/miscfs/mockfs/mockfs_fsnode.h
++++ b/bsd/miscfs/mockfs/mockfs_fsnode.h
+@@ -47,7 +47,8 @@ enum mockfs_fsnode_type {
+ 	MOCKFS_ROOT,
+ 	MOCKFS_DEV,
+ 	MOCKFS_FILE,
+-	MOCKFS_TEST_FILE
++	MOCKFS_TEST_FILE,
++	MOCKFS_TEST_MOUNTPOINT
+ };
+ 
+ /*
+@@ -69,6 +70,7 @@ struct mockfs_fsnode {
+ 	struct mockfs_fsnode * child_a; /* TEMPORARY */
+ 	struct mockfs_fsnode * child_b; /* TEMPORARY */
+ 	struct mockfs_fsnode * child_c; /* Offline test input. */
++	struct mockfs_fsnode * child_d; /* Offline FAT mountpoint. */
+ };
+ 
+ typedef struct mockfs_fsnode * mockfs_fsnode_t;
+diff --git a/bsd/miscfs/mockfs/mockfs_vfsops.c b/bsd/miscfs/mockfs/mockfs_vfsops.c
+index ed8f041..84b8e46 100644
+--- a/bsd/miscfs/mockfs/mockfs_vfsops.c
++++ b/bsd/miscfs/mockfs/mockfs_vfsops.c
+@@ -80,6 +80,7 @@ mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
+ 	mockfs_fsnode_t dev_fsnode = NULL;
+ 	mockfs_fsnode_t file_fsnode = NULL;
+ 	mockfs_fsnode_t test_fsnode = NULL;
++	mockfs_fsnode_t mount_fsnode = NULL;
+ 	struct mockfs_test_header header = {0};
+ 	buf_t header_buf = NULL;
+ 	boolean_t test_image = FALSE;
+@@ -99,8 +100,9 @@ mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
+ 	mockfs_fsnode_create(mp, MOCKFS_ROOT, &root_fsnode);
+ 	mockfs_fsnode_create(mp, MOCKFS_DEV, &dev_fsnode);
+ 	mockfs_fsnode_create(mp, MOCKFS_FILE, &file_fsnode);
++	mockfs_fsnode_create(mp, MOCKFS_TEST_MOUNTPOINT, &mount_fsnode);
+ 
+-	if (!root_fsnode || !dev_fsnode || !file_fsnode) {
++	if (!root_fsnode || !dev_fsnode || !file_fsnode || !mount_fsnode) {
+ 		rvalue = ENOMEM;
+ 		goto done;
+ 	}
+@@ -180,11 +182,18 @@ mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
+ 		goto done;
+ 	}
+ 
++	if ((rvalue = mockfs_fsnode_adopt(root_fsnode, mount_fsnode))) {
++		goto done;
++	}
++
+ 	mockfs_mount_data->mockfs_root = root_fsnode;
+ 	mp->mnt_data = (typeof(mp->mnt_data))mockfs_mount_data;
+ 
+ done:
+ 	if (rvalue) {
++		if (mount_fsnode) {
++			mockfs_fsnode_destroy(mount_fsnode);
++		}
+ 		if (test_fsnode) {
+ 			mockfs_fsnode_destroy(test_fsnode);
+ 		}
+@@ -290,7 +299,8 @@ static int
+ mockfs_getattr(mount_t mp, struct vfs_attr *attributes, __unused vfs_context_t ctx)
+ {
+ 	mockfs_fsnode_t root = ((mockfs_mount_t)mp->mnt_data)->mockfs_root;
+-	uint64_t nodes = 1 + (root->child_a != NULL) + (root->child_b != NULL) + (root->child_c != NULL);
++	uint64_t nodes = 1 + (root->child_a != NULL) + (root->child_b != NULL) +
++	    (root->child_c != NULL) + (root->child_d != NULL);
+ 	uint64_t bytes = mp->mnt_devvp->v_specinfo->si_devsize;
+ 	uint64_t blocks = bytes / 4096 + ((bytes & 4095) != 0);
+ 	VFSATTR_RETURN(attributes, f_bsize, 4096);
+diff --git a/bsd/miscfs/mockfs/mockfs_vnops.c b/bsd/miscfs/mockfs/mockfs_vnops.c
+index 6cbfce2..fdba2ff 100644
+--- a/bsd/miscfs/mockfs/mockfs_vnops.c
++++ b/bsd/miscfs/mockfs/mockfs_vnops.c
+@@ -132,6 +132,8 @@ mockfs_lookup(struct vnop_lookup_args * ap)
+ 			mockfs_fsnode_child_by_type(fsnode, MOCKFS_TEST_FILE, &target_fsnode);
+ 		} else if (!strncmp(cnp->cn_nameptr, "probe.bin", 10)) {
+ 			mockfs_fsnode_child_by_type(fsnode, MOCKFS_TEST_FILE, &target_fsnode);
++		} else if (!strncmp(cnp->cn_nameptr, "mnt", 4)) {
++			mockfs_fsnode_child_by_type(fsnode, MOCKFS_TEST_MOUNTPOINT, &target_fsnode);
+ 		} else if (!strncmp(cnp->cn_nameptr, "launchd", 8)) {
+ 			mockfs_fsnode_child_by_type(fsnode, MOCKFS_FILE, &target_fsnode);
+ 		} else {
