@@ -79,6 +79,9 @@ struct model {
     uint8_t bot_cdb[16];
     uint32_t bot_tag, bot_transfer_size, bot_lba, bot_blocks;
     unsigned bot_phase, bot_commands, bot_sync_commands;
+    uint16_t bot_tt_clear_value[2], bot_tt_clear_index[2];
+    uint8_t bot_clear_feature_endpoint[2];
+    unsigned bot_class_resets, bot_tt_buffer_clears, bot_clear_features, bot_stalls;
     uint8_t bot_cdb_length;
     unsigned host_control_requests, host_get_device8, host_get_device18;
     unsigned host_get_config_header, host_get_config, host_set_config;
@@ -89,7 +92,7 @@ struct model {
     unsigned hub_interrupts, hub_power_sets, hub_power_clears, hub_port_resets;
     bool applied_error, guard_denied, guard_blocked, stuck_halt, stuck_reset, pending_on_reset;
     bool port_reset_overcurrent, port_reset_no_event, port_reset_unrelated_event;
-    bool allow_live_release;
+    bool allow_live_release, stall_next_bot_transfer;
     bool auto_commands, auto_control, auto_endpoint, endpoint_output_matches;
 };
 
@@ -247,6 +250,13 @@ static void complete_host_control(struct model *m, struct usb_xhci_device_slot *
         m->hub_reset_complete_ms = m->current_ms + 50u;
         ++m->hub_port_resets;
     } else if (m->slot_is_hub[slot->slot_id] && setup.type == 0x23u &&
+               setup.request == 8u && setup.length == 0u && setup.index == 1u &&
+               (setup.value == 0x9021u || setup.value == 0x1022u)) {
+        assert(!td->input && !td->data.cpu && m->bot_tt_buffer_clears < 2u);
+        unsigned index = m->bot_tt_buffer_clears++;
+        m->bot_tt_clear_value[index] = setup.value;
+        m->bot_tt_clear_index[index] = setup.index;
+    } else if (m->slot_is_hub[slot->slot_id] && setup.type == 0x23u &&
                setup.length == 0u && setup.index == 1u && setup.request == 1u) {
         assert(!td->input && !td->data.cpu);
         if (setup.value == 8u) {
@@ -257,6 +267,16 @@ static void complete_host_control(struct model *m, struct usb_xhci_device_slot *
         } else {
             assert(0 && "unexpected hub port feature clear");
         }
+    } else if (!m->slot_is_hub[slot->slot_id] && setup.type == 0x21u &&
+               setup.request == 0xffu && setup.value == 0u && setup.index == 0u &&
+               setup.length == 0u) {
+        assert(!td->input && !td->data.cpu);
+        ++m->bot_class_resets;
+    } else if (!m->slot_is_hub[slot->slot_id] && setup.type == 0x02u &&
+               setup.request == 1u && setup.value == 0u && setup.length == 0u &&
+               (setup.index == 0x81u || setup.index == 0x02u)) {
+        assert(!td->input && !td->data.cpu && m->bot_clear_features < 2u);
+        m->bot_clear_feature_endpoint[m->bot_clear_features++] = (uint8_t)setup.index;
     } else {
         assert(0 && "unexpected xHCI-backed host control request");
     }
@@ -510,7 +530,13 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
             assert(endpoint->transfer_pending && endpoint->dci == dci);
             ++m->endpoint_doorbells;
             m->last_endpoint_doorbell_order = ++m->operation_order;
-            if (m->host_stack_enumeration) {
+            uint8_t completion_code = m->endpoint_completion_code;
+            if (m->host_stack_enumeration && m->stall_next_bot_transfer &&
+                !m->slot_is_hub[slot_id] && endpoint->descriptor.type == 2u) {
+                m->stall_next_bot_transfer = false;
+                ++m->bot_stalls;
+                completion_code = USB_XHCI_CC_STALL_ERROR;
+            } else if (m->host_stack_enumeration) {
                 complete_host_endpoint(m, doorbell_slot, endpoint);
             } else {
                 if (endpoint->input && endpoint->transfer_data.cpu) {
@@ -525,11 +551,11 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
             }
             event_at(m->controller, m->event_index, m->event_cycle,
                      USB_XHCI_TRB_TRANSFER_EVENT, endpoint->transfer_trb,
-                     m->endpoint_completion_code,
+                     completion_code,
                      ((uint32_t)slot_id << 24) | ((uint32_t)dci << 16));
             put_le32((uint8_t *)m->controller->events.trbs.cpu +
                      (size_t)m->event_index * USB_XHCI_TRB_BYTES + 8u,
-                     ((uint32_t)m->endpoint_completion_code << 24) |
+                     ((uint32_t)completion_code << 24) |
                      (m->endpoint_residual & 0x00ffffffu));
             if (++m->event_index == m->controller->events.entries) {
                 m->event_index = 0; m->event_cycle ^= 1u;
@@ -1601,6 +1627,16 @@ static void test_xhci_hub_enumeration_child_bot(void)
     assert((get_le32(child_input_slot + 8u) & 0x0000ffffu) ==
            ((uint32_t)slots[0].slot.slot_id | (1u << 8)));
 
+    m.stall_next_bot_transfer = true;
+    assert(usb_host_start_storage(&test.child) == USB_STALL);
+    assert(!m.stall_next_bot_transfer);
+    assert(m.bot_stalls == 1u && m.bot_class_resets == 1u);
+    assert(m.reset_endpoint_commands == 1u);
+    assert(m.bot_tt_buffer_clears == 2u && m.bot_clear_features == 2u);
+    assert(m.bot_tt_clear_value[0] == 0x9021u && m.bot_tt_clear_index[0] == 1u);
+    assert(m.bot_tt_clear_value[1] == 0x1022u && m.bot_tt_clear_index[1] == 1u);
+    assert(m.bot_clear_feature_endpoint[0] == 0x81u);
+    assert(m.bot_clear_feature_endpoint[1] == 0x02u && m.bot_phase == 0u);
     assert(usb_host_start_storage(&test.child) == USB_OK &&
            test.child.bot.blocks == 8u && test.child.bot.block_size == 512u);
     uint8_t written[512], readback[512];
