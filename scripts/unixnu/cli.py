@@ -53,6 +53,8 @@ def parser():
     b.add_argument('steps', nargs='*', choices=STEPS + OPTIONAL_STEPS + ('all', 'prelink'), default=['all'])
     b.add_argument('--source-only', action='store_true',
                    help='build and validate the native XNU Mach-O without kernelcache prelink (kernel step only)')
+    b.add_argument('--prelink-profile', metavar='NAME',
+                   help='select a board-declared [kernel.prelink.profiles.NAME] override')
     i = sub.add_parser('bootimg', parents=[c], help='pack the boot image from the firmware volume and a device tree')
     i.add_argument('--fd', metavar='FILE', help='firmware volume (default: the build output under --uefi)')
     i.add_argument('--dtb', metavar='FILE', help='compiled device tree; or UNIXNU_DTB')
@@ -143,9 +145,9 @@ def cmd_build(ctx):
             path, digest = kernel.validate_source_output(ctx)
             log(f'kernel: source-only output {path} sha256 {digest}')
             return
-        kernel.prelink(ctx)
+        kernel.prelink(ctx, profile=getattr(ctx.args, 'prelink_profile', None))
     elif 'prelink' in steps:
-        kernel.prelink(ctx)
+        kernel.prelink(ctx, profile=getattr(ctx.args, 'prelink_profile', None))
     if 'package' in steps:
         package.build(ctx, modules, ctx.args.target)
     if 'payload' in steps:

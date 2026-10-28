@@ -361,6 +361,57 @@ class PrelinkProfileTests(unittest.TestCase):
             with patch("unixnu.kernel.log"), self.assertRaises(kernel.Error):
                 kernel.prelink(ctx)
 
+    def test_board_prelink_profile_adds_roots_and_can_select_original_donor_code(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.macho"
+            source.write_bytes(b"native kernel")
+            cache = root / "kernelcache.macho"
+            cache.write_bytes(b"original kernelcache")
+            spec = {
+                "tool": "scripts/emit-source-interface-prelink.py",
+                "kernel": "source.macho",
+                "slide": "-0x1000000",
+                "roots": ["com.apple.filesystems.apfs"],
+                "kernelcache_sha256": "0" * 64,
+                "source_interfaces": ["com.apple.iokit.IOStorageFamily"],
+                "source_interface_bindings": [{"bundle": "com.apple.iokit.IOStorageFamily",
+                                                "donor_va": "0x2800", "symbol": STORAGE_SYMBOL}],
+                "profiles": {"donor-runtime-audit": {
+                    "add_roots": ["com.apple.iokit.IOStorageFamily"],
+                    "source_interfaces": [],
+                    "source_interface_bindings": [],
+                }},
+            }
+            ctx = SimpleNamespace(
+                board={"kernel": {"prelink": spec}},
+                tree=root,
+                work=root / "out",
+                logs=root / "logs",
+                option=lambda name, env: cache if name == "kernelcache" else None,
+            )
+            with patch("unixnu.kernel.run") as run, patch("unixnu.kernel.log"), \
+                    patch("unixnu.kernel.sha256_file", return_value="0" * 64):
+                kernel.prelink(ctx, profile="donor-runtime-audit")
+            command = run.call_args_list[0].args[0]
+            verification = run.call_args_list[1].args[0]
+            self.assertEqual(command.count("--root"), 2)
+            self.assertIn("com.apple.iokit.IOStorageFamily", command)
+            self.assertNotIn("--source-interface", command)
+            self.assertNotIn("--source-interface-binding", command)
+            self.assertEqual(verification.count("--root"), 2)
+            self.assertNotIn("--source-interface", verification)
+            self.assertNotIn("--source-interface-binding", verification)
+
+    def test_unknown_prelink_profile_fails_closed(self):
+        ctx = SimpleNamespace(
+            board={"kernel": {"prelink": {"profiles": {"known": {}}}}},
+            tree=Path("."), work=Path("/tmp/out"), logs=Path("/tmp/logs"),
+            option=lambda name, env: None,
+        )
+        with patch("unixnu.kernel.log"), self.assertRaisesRegex(kernel.Error, "unknown prelink profile"):
+            kernel.prelink(ctx, profile="missing")
+
 
 if __name__ == "__main__":
     unittest.main()

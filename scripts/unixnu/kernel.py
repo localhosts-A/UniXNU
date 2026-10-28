@@ -139,12 +139,27 @@ def validate_source_output(ctx):
     return path, sha256_file(path)
 
 
-def prelink(ctx):
+def prelink(ctx, profile=None):
     """Produce out/<device>/kernel/kernel.macho from the XNU build and the original kernelcache."""
     log('kernel: prelink')
-    spec = ctx.board.get('kernel', {}).get('prelink')
-    if not spec:
+    base_spec = ctx.board.get('kernel', {}).get('prelink')
+    if not base_spec:
         raise Error('board.toml has no [kernel.prelink]')
+    spec = dict(base_spec)
+    if profile:
+        profiles = base_spec.get('profiles', {})
+        selected = profiles.get(profile) if isinstance(profiles, dict) else None
+        if not isinstance(selected, dict):
+            available = ', '.join(sorted(profiles)) if isinstance(profiles, dict) else ''
+            raise Error(f'unknown prelink profile {profile!r}; available: {available or "none"}')
+        spec.update(selected)
+        extra_roots = selected.get('add_roots', [])
+        if not isinstance(extra_roots, list) or any(not isinstance(root, str) or not root for root in extra_roots):
+            raise Error(f'prelink profile {profile!r} has invalid add_roots')
+        spec['roots'] = list(base_spec.get('roots', [])) + extra_roots
+        spec.pop('add_roots', None)
+        spec.pop('profiles', None)
+        log(f'kernel: prelink profile {profile}')
     cache = ctx.option('kernelcache', 'UNIXNU_KERNELCACHE') or (expand(ctx.tree / spec['kernelcache']) if spec.get('kernelcache') else None)
     if not cache:
         # Not given: take it from the IPSW (--ipsw PATH_OR_URL, or the url of board.toml [ipsw]).

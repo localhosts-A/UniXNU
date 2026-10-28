@@ -19,6 +19,11 @@ class SourceOnlyBuild(unittest.TestCase):
         args = cli.parser().parse_args(['build', '--source-only'])
         self.assertEqual(cli.build_steps(args.steps, args.source_only), ['kernel'])
 
+    def test_build_prelink_accepts_a_board_named_profile(self):
+        args = cli.parser().parse_args(['build', 'prelink', '--prelink-profile', 'donor-runtime-audit'])
+        self.assertEqual(args.steps, ['prelink'])
+        self.assertEqual(args.prelink_profile, 'donor-runtime-audit')
+
     def test_source_only_accepts_explicit_kernel_and_all(self):
         self.assertEqual(cli.build_steps(['kernel'], True), ['kernel'])
         self.assertEqual(cli.build_steps(['all'], True), ['kernel'])

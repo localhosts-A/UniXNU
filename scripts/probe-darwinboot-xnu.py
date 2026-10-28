@@ -94,6 +94,8 @@ parser.add_argument('--test-service', action='append', default=[], metavar='NODE
                     help='Explicit offline software-service nub without hardware resources')
 parser.add_argument('--read-kernel-symbol', action='append', default=[], metavar='SYMBOL:BYTES',
                     help='Read 1..512 bytes at an exact symbol in the current kernel artifact')
+parser.add_argument('--read-memory', action='append', default=[], metavar='HEX_ADDRESS:HEX_LENGTH',
+                    help='Read 1..4096 bytes at an exact numeric kernel virtual address')
 parser.add_argument('--read-user-symbol', action='append', default=[], metavar='SYMBOL:BYTES',
                     help='Read 1..512 bytes at an exact symbol in the owned native-user image')
 parser.add_argument('--native-data-user-image',type=Path,help='Observe a fixed-address own static instrument staged through the signed original-root/Data init path; no mockfs boot')
@@ -178,6 +180,16 @@ def symbol_read(value):
     return name, count
 requested_kernel_symbols = [symbol_read(v) for v in args.read_kernel_symbol]
 requested_user_symbols = [symbol_read(v) for v in args.read_user_symbol]
+requested_memory = []
+for value in args.read_memory:
+    try:
+        address_text, length_text = value.split(':', 1)
+        address, length = int(address_text, 16), int(length_text, 16)
+    except ValueError:
+        parser.error('Numeric memory reads use HEX_ADDRESS:HEX_LENGTH')
+    if not 0 <= address < 1 << 64 or not 1 <= length <= 4096 or address + length > 1 << 64:
+        parser.error('Numeric memory reads require a 64-bit address and 1..4096 bytes')
+    requested_memory.append(f'{address:x}:{length:x}')
 if args.qemu_ramfb_high_resolution:
     if not args.qemu_ramfb:
         parser.error('High-resolution fixture requires the actual QEMU ramfb')
@@ -588,6 +600,8 @@ gdb_command = ['python3', ROOT / 'scripts/qemu-entry/gdb-stop.py', f'0x{panic[1]
 if args.qemu_firmware:
     gdb_command += ['--firmware', args.qemu_firmware.resolve()]
 gdb_command += process_list_args
+for request in requested_memory:
+    gdb_command += ['--read-memory', request]
 if args.capture_scratch_data:
     if not args.data_ramdisk:
         parser.error('Scratch Data capture requires an actual Data RAM disk input')
@@ -1652,6 +1666,7 @@ if args.check_commpage:
         raise SystemExit(f"Incorrect native user ABI: {report['commpage_user64_shifts']}")
 report['requested_kernel_symbols'] = {name: report['memory'][page_globals[name]]
                                       for name, _ in requested_kernel_symbols}
+report['requested_memory'] = {request: report['memory'][request] for request in requested_memory}
 (output / 'gdb-stop.json').write_text(json.dumps(report, indent=2) + '\n')
 print('PASS: real UEFI -> UniXNU -> DarwinBoot -> active native 4K XNU translation')
 print(json.dumps(report['kernel_page_globals'], indent=2))
