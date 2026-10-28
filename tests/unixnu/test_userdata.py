@@ -10,7 +10,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from unixnu.userdata import (check_capacity, flash_command, partition_capacity, partition_lun,
-                             partition_name, verify_attached_disk, verify_built_image)
+                             partition_name, select_whole_disk, verify_attached_disk, verify_built_image,
+                             attach)
 from unixnu.util import Error
 
 
@@ -134,6 +135,42 @@ class UserdataImageVerificationTests(unittest.TestCase):
 
 
 class UserdataAttachmentTests(unittest.TestCase):
+    def test_selects_backing_whole_disk_and_ignores_apfs_children(self):
+        cases = (
+            [
+                {'dev-entry': '/dev/disk9', 'content-hint': 'GUID_partition_scheme'},
+                {'dev-entry': '/dev/disk9s1', 'content-hint': 'Apple_APFS'},
+                {'dev-entry': '/dev/disk10', 'content-hint': 'EF57347C-0000-11AA-AA11-0030654'},
+                {'dev-entry': '/dev/disk10s1', 'content-hint': '41504653-0000-11AA-AA11-0030654'},
+            ],
+            [
+                {'dev-entry': '/dev/disk9'},
+                {'dev-entry': '/dev/disk10', 'content-hint': 'EF57347C-0000-11AA-AA11-0030654'},
+                {'dev-entry': '/dev/disk10s1', 'content-hint': '41504653-0000-11AA-AA11-0030654'},
+            ],
+            [{'dev-entry': '/dev/disk9'}],
+        )
+        for entities in cases:
+            with self.subTest(entities=entities):
+                self.assertEqual(select_whole_disk(entities), '/dev/disk9')
+
+    def test_rejects_ambiguous_whole_disk_mappings(self):
+        with self.assertRaisesRegex(Error, 'one whole-disk image mapping'):
+            select_whole_disk([{'dev-entry': '/dev/disk9'}, {'dev-entry': '/dev/disk10'}])
+
+    def test_attach_uses_plist_whole_disk_not_first_synthesized_device(self):
+        attached = plistlib.dumps({'system-entities': [
+            {'dev-entry': '/dev/disk9', 'content-hint': 'GUID_partition_scheme'},
+            {'dev-entry': '/dev/disk9s1', 'content-hint': 'Apple_APFS'},
+            {'dev-entry': '/dev/disk10', 'content-hint': 'EF57347C-0000-11AA-AA11-0030654'},
+        ]})
+        disk_info = plistlib.dumps({'BusProtocol': 'Disk Image', 'Writable': False,
+                                    'DeviceNode': '/dev/disk9', 'TotalSize': 6_000_000})
+        with patch('unixnu.userdata.subprocess.check_output', side_effect=[attached, disk_info]) as check_output:
+            self.assertEqual(attach(Path('/tmp/os.dmg'), 6_000_000), '/dev/disk9')
+        self.assertIn('-plist', check_output.call_args_list[0].args[0])
+        self.assertEqual(check_output.call_args_list[1].args[0][-1], '/dev/disk9')
+
     def test_accepts_only_exact_read_only_disk_image_mapping(self):
         record = {'BusProtocol': 'Disk Image', 'Writable': False,
                   'DeviceNode': '/dev/disk4', 'TotalSize': 6_000_000}
@@ -150,7 +187,7 @@ class UserdataAttachmentTests(unittest.TestCase):
         for record in records:
             with self.subTest(record=record), patch(
                     'unixnu.userdata.subprocess.check_output', return_value=plistlib.dumps(record)):
-                with self.assertRaisesRegex(Error, 'expected read-only disk image'):
+                with self.assertRaisesRegex(Error, 'expected .* observed'):
                     verify_attached_disk('/dev/disk4', 6_000_000)
 
 

@@ -80,6 +80,36 @@ def check_capacity(image_bytes, capacity):
         raise Error('the image is larger than the target partition')
 
 
+def select_whole_disk(system_entities):
+    """Select hdiutil's backing whole-disk node, never an APFS/container child."""
+    entities = [entry for entry in system_entities if isinstance(entry, dict)]
+    devices = [entry for entry in entities
+               if isinstance(entry.get('dev-entry'), str) and
+               re.fullmatch(r'/dev/disk[0-9]+', entry['dev-entry'])]
+    partitioned = [entry for entry in devices if entry.get('content-hint') == 'GUID_partition_scheme']
+    if len(partitioned) == 1:
+        return partitioned[0]['dev-entry']
+    if len(partitioned) > 1:
+        raise Error('hdiutil reported multiple GUID partition-scheme whole disks')
+
+    untyped = [entry for entry in devices if not entry.get('content-hint')]
+    if len(untyped) == 1:
+        return untyped[0]['dev-entry']
+
+    apfs_parents = {match.group(1) for entry in entities
+                    if entry.get('content-hint') == 'Apple_APFS' and
+                    isinstance(entry.get('dev-entry'), str)
+                    for match in [re.fullmatch(r'(/dev/disk[0-9]+)s[0-9]+', entry['dev-entry'])]
+                    if match}
+    matching = [entry['dev-entry'] for entry in devices if entry['dev-entry'] in apfs_parents]
+    if len(matching) == 1:
+        return matching[0]
+    if not matching and len(devices) == 1:
+        return devices[0]['dev-entry']
+    summary = ', '.join(f"{entry.get('dev-entry')}:{entry.get('content-hint', '?')}" for entry in entities)
+    raise Error(f'hdiutil did not identify one whole-disk image mapping; reported [{summary}]')
+
+
 def verify_built_image(image, entries, capacity):
     """Validate the complete container and every byte of its read-only windows before it can be flashed."""
     image_bytes = image.stat().st_size
@@ -168,23 +198,22 @@ def verify_attached_disk(device, expected_size):
         info = plistlib.loads(subprocess.check_output(['diskutil', 'info', '-plist', device]))
     except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException) as error:
         raise Error(f'could not verify attached disk {device}: {error}') from error
-    if (info.get('BusProtocol') != 'Disk Image' or info.get('Writable') is not False or
-            info.get('DeviceNode') != device or info.get('TotalSize') != expected_size):
-        raise Error(f'{device} is not the expected read-only disk image of {expected_size} bytes')
+    required = {'BusProtocol': 'Disk Image', 'Writable': False,
+                'DeviceNode': device, 'TotalSize': expected_size}
+    if any(info.get(key) != value for key, value in required.items()):
+        observed = {key: info.get(key) for key in required}
+        raise Error(f'{device} is not the expected read-only disk image; '
+                    f'expected {required}, observed {observed}')
 
 
 def attach(dmg, expected_size):
     """Attach read-only without mounting; return only a verified whole-disk device."""
-    out = subprocess.run(['hdiutil', 'attach', '-nomount', '-readonly', '-noverify', '-noautofsck', str(dmg)],
-                         capture_output=True, text=True, check=True).stdout
-    device = None
-    for line in out.splitlines():
-        match = re.match(r'(/dev/disk\d+)\s', line)
-        if match:
-            device = match.group(1)
-            break
-    if not device:
-        raise Error('could not find the attached disk device')
+    try:
+        attached = plistlib.loads(subprocess.check_output(
+            ['hdiutil', 'attach', '-nomount', '-readonly', '-noverify', '-noautofsck', '-plist', str(dmg)]))
+    except (OSError, subprocess.CalledProcessError, plistlib.InvalidFileException) as error:
+        raise Error(f'could not attach disk image {dmg}: {error}') from error
+    device = select_whole_disk(attached.get('system-entities', []))
     try:
         verify_attached_disk(device, expected_size)
     except Exception:
