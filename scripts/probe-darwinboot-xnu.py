@@ -196,7 +196,7 @@ for value in args.read_memory:
         parser.error('Numeric memory reads require a 64-bit address and 1..4096 bytes')
     requested_memory.append(f'{address:x}:{length:x}')
 requested_indirect_memory = []
-for value in args.read_indirect:
+for value in args.read_indirect_optional:
     try:
         address, offset, length = parse_indirect_memory_request(value)
     except ValueError as error:
