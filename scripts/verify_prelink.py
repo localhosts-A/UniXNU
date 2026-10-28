@@ -66,6 +66,11 @@ def _closure(entries, roots):
 def _module_catalog(data, image, entries):
     modules, owners = {}, []
     for identifier, entry in entries.items():
+        # XNU interface resources are represented by synthetic/prelink metadata,
+        # not standalone kext Mach-Os. NativePrelink excludes them from its
+        # executable component catalog for the same reason.
+        if entry.get('OSKernelResource') is True:
+            continue
         address = entry.get('_PrelinkExecutableLoadAddr')
         size = entry.get('_PrelinkExecutableSize')
         if not address or not size:

@@ -9,8 +9,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'kits/NativePrelink')]
 from emit_prelink import emit
+from native_prelink import macho
 from test_emit_prelink import images
-from verify_prelink import verify
+from verify_prelink import _module_catalog, verify
 
 
 class VerifyPrelinkTests(unittest.TestCase):
@@ -19,6 +20,18 @@ class VerifyPrelinkTests(unittest.TestCase):
         candidate, report = emit(native, original, ['test.component'], 0x4000)
         audit = verify(native, original, candidate, report, ['test.component'], 0x4000)
         return native, original, candidate, report, audit
+
+    def test_kernel_interface_resources_are_not_parsed_as_kext_machos(self):
+        _native, original = images()
+        resource = {
+            'CFBundleIdentifier': 'test.kernel-interface',
+            'OSKernelResource': True,
+            '_PrelinkExecutableLoadAddr': 0xdeadbeef,
+            '_PrelinkExecutableSize': 0x100,
+        }
+        modules, owners = _module_catalog(original, macho(original), {'resource': resource})
+        self.assertEqual(modules, {})
+        self.assertEqual(owners, [])
 
     def test_independently_verifies_pointer_table_and_mach_o_layout(self):
         _native, _original, _candidate, _report, audit = self.candidate()
