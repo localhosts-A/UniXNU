@@ -285,6 +285,51 @@ static int adapter_interrupt(void *context, const struct usb_host_route *route,
     return result;
 }
 
+int usb_xhci_host_adapter_interrupt_submit(struct usb_xhci_host_adapter *adapter,
+                                           const struct usb_host_route *route,
+                                           uint8_t address, uint8_t endpoint,
+                                           size_t capacity, uint32_t timeout_ms)
+{
+    int result = adapter_lock(adapter);
+    if (result) return result;
+    struct usb_xhci_host_device *device = find_device(adapter, route, address);
+    result = device ? usb_xhci_device_interrupt_submit(&device->slot, address, endpoint,
+                                                        capacity, timeout_ms) :
+                      USB_DISCONNECTED;
+    adapter_unlock(adapter);
+    return result;
+}
+
+int usb_xhci_host_adapter_interrupt_event(struct usb_xhci_host_adapter *adapter,
+                                          const struct usb_xhci_event *event,
+                                          void *buffer, size_t capacity, size_t *actual,
+                                          struct usb_host_route *route,
+                                          uint8_t *endpoint_address)
+{
+    if (!adapter || !event || !actual || !route || !endpoint_address ||
+        (!buffer && capacity) || event->kind != USB_XHCI_EVENT_TRANSFER)
+        return USB_INVALID;
+    int result = adapter_lock(adapter);
+    if (result) return result;
+    struct usb_xhci_host_device *device = NULL;
+    for (size_t i = 0; i < adapter->device_capacity; ++i) {
+        struct usb_xhci_host_device *candidate = &adapter->devices[i];
+        if (candidate->owned && candidate->slot.slot_id == event->data.transfer.slot_id) {
+            device = candidate;
+            break;
+        }
+    }
+    if (!device) {
+        adapter_unlock(adapter);
+        return USB_AGAIN;
+    }
+    result = usb_xhci_device_interrupt_event(&device->slot, event, buffer, capacity,
+                                             actual, endpoint_address);
+    if (result != USB_AGAIN) *route = device->route;
+    adapter_unlock(adapter);
+    return result;
+}
+
 static int adapter_bulk(void *context, const struct usb_host_route *route,
                         uint8_t address, uint8_t endpoint, void *buffer,
                         size_t length, size_t *actual, uint32_t timeout_ms)

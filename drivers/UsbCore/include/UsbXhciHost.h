@@ -49,6 +49,18 @@ int usb_xhci_host_adapter_root_port_get_status(struct usb_xhci_host_adapter *, u
 int usb_xhci_host_adapter_root_port_ack_changes(struct usb_xhci_host_adapter *, uint8_t root_port,
                                                 uint32_t changes);
 int usb_xhci_host_adapter_next_event(struct usb_xhci_host_adapter *, struct usb_xhci_event *);
+/* Start one asynchronous interrupt-IN TD for a configured endpoint. */
+int usb_xhci_host_adapter_interrupt_submit(struct usb_xhci_host_adapter *,
+                                           const struct usb_host_route *, uint8_t address,
+                                           uint8_t endpoint, size_t capacity,
+                                           uint32_t timeout_ms);
+/* Route a transfer event to its active asynchronous endpoint. USB_AGAIN means
+ * the event is unrelated and remains the caller's responsibility. */
+int usb_xhci_host_adapter_interrupt_event(struct usb_xhci_host_adapter *,
+                                          const struct usb_xhci_event *, void *,
+                                          size_t capacity, size_t *actual,
+                                          struct usb_host_route *,
+                                          uint8_t *endpoint_address);
 
 /* Acquires the adapter lock. Call only after every USB host/child user has
  * stopped and usb_xhci_controller_stop succeeded. */

@@ -1383,7 +1383,7 @@ static int device_endpoint_transfer_one(struct usb_xhci_device_slot *slot,
                                         uint32_t timeout_ms, size_t *actual)
 {
     struct usb_xhci_controller *controller = slot->controller;
-    if (endpoint->transfer_pending || endpoint->faulted || endpoint->halted ||
+    if (endpoint->async_interrupt || endpoint->transfer_pending || endpoint->faulted || endpoint->halted ||
         endpoint->ring.faulted || endpoint->ring.outstanding) return USB_BUSY;
     int result = endpoint_set_dequeue(slot, endpoint, timeout_ms);
     if (result) return result;
@@ -1566,6 +1566,237 @@ int usb_xhci_device_interrupt(struct usb_xhci_device_slot *slot, uint8_t address
                                     actual, timeout_ms, 3u, true);
 }
 
+static bool endpoint_transfer_stopped(uint8_t completion_code)
+{
+    return completion_code == USB_XHCI_CC_STOPPED ||
+           completion_code == USB_XHCI_CC_STOPPED_LENGTH_INVALID ||
+           completion_code == USB_XHCI_CC_STOPPED_SHORT_PACKET;
+}
+
+static int interrupt_event_failstop(struct usb_xhci_device_slot *slot,
+                                    struct usb_xhci_device_endpoint *endpoint,
+                                    int result)
+{
+    endpoint->faulted = true;
+    slot->controller->state = USB_XHCI_CONTROLLER_FAULTED;
+    slot->state = USB_XHCI_SLOT_FAULTED;
+    return result;
+}
+
+static int device_interrupt_event_apply(struct usb_xhci_device_slot *slot,
+                                        struct usb_xhci_device_endpoint *endpoint,
+                                        const struct usb_xhci_event *event,
+                                        void *buffer, size_t capacity, size_t *actual,
+                                        bool copy_data)
+{
+    if (!endpoint->async_interrupt || event->kind != USB_XHCI_EVENT_TRANSFER ||
+        event->data.transfer.slot_id != slot->slot_id ||
+        event->data.transfer.endpoint_id != endpoint->dci) return USB_AGAIN;
+
+    if (!endpoint->transfer_pending) {
+        uint64_t dequeue = endpoint->ring.trbs.address +
+            (uint64_t)endpoint->ring.consumer_index * USB_XHCI_TRB_BYTES;
+        if (endpoint->cancel_pending && endpoint->ring.outstanding == 0u &&
+            event->completion_code == USB_XHCI_CC_STOPPED_LENGTH_INVALID &&
+            event->data.transfer.trb_pointer_valid &&
+            !event->data.transfer.event_data &&
+            event->data.transfer.pointer_or_data == dequeue) {
+            endpoint->cancel_pending = false;
+            if (actual) *actual = 0;
+            return USB_DISCONNECTED;
+        }
+        return USB_AGAIN;
+    }
+
+    if (!event->data.transfer.trb_pointer_valid || event->data.transfer.event_data ||
+        event->data.transfer.pointer_or_data != endpoint->transfer_trb ||
+        event->data.transfer.residual_bytes > endpoint->transfer_length)
+        return interrupt_event_failstop(slot, endpoint, USB_PHASE_ERROR);
+    const bool stopped = endpoint_transfer_stopped(event->completion_code);
+    if (!stopped && event->completion_code == USB_XHCI_CC_SUCCESS &&
+        event->data.transfer.residual_bytes)
+        return interrupt_event_failstop(slot, endpoint, USB_PHASE_ERROR);
+    if (copy_data && !stopped && capacity < endpoint->transfer_length) return USB_RANGE;
+    if (copy_data && !stopped && endpoint->transfer_length && !buffer) return USB_INVALID;
+
+    uint32_t completed = 0;
+    int result = usb_xhci_transfer_ring_complete_event(&endpoint->ring, event, &completed);
+    if (result || completed != 1u)
+        return interrupt_event_failstop(slot, endpoint, result ? result : USB_PHASE_ERROR);
+    const size_t transferred = (size_t)endpoint->transfer_length -
+                               event->data.transfer.residual_bytes;
+    if (copy_data && !stopped && transferred) {
+        result = usb_dma_sync(&slot->dma, &endpoint->transfer_data, 0,
+                              endpoint->transfer_length, USB_DMA_FROM_DEVICE, false);
+        if (result) return interrupt_event_failstop(slot, endpoint, result);
+        copy_bytes(buffer, endpoint->transfer_data.cpu, transferred);
+    }
+
+    endpoint->transfer_pending = false;
+    endpoint->transfer_trb = 0;
+    endpoint->transfer_length = 0;
+    usb_dma_free(&slot->dma, &endpoint->transfer_data);
+    if (actual) *actual = copy_data && !stopped ? transferred : 0;
+    if (stopped) {
+        endpoint->cancel_pending = false;
+        return USB_DISCONNECTED;
+    }
+    if (event->completion_code == USB_XHCI_CC_STALL_ERROR) {
+        endpoint->halted = true;
+        return USB_STALL;
+    }
+    if (event->completion_code == USB_XHCI_CC_SUCCESS ||
+        event->completion_code == USB_XHCI_CC_SHORT_PACKET) return USB_OK;
+    return interrupt_event_failstop(slot, endpoint, USB_PHASE_ERROR);
+}
+
+int usb_xhci_device_interrupt_submit(struct usb_xhci_device_slot *slot, uint8_t address,
+                                     uint8_t endpoint_address, size_t capacity,
+                                     uint32_t timeout_ms)
+{
+    if (!slot || !slot->controller || !capacity || capacity > UINT32_MAX ||
+        !timeout_ms || timeout_ms > 10000u || address != slot->address ||
+        slot->state != USB_XHCI_SLOT_ADDRESSED ||
+        slot->controller->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    struct usb_xhci_device_endpoint *endpoint = find_slot_endpoint(slot, endpoint_address);
+    if (!endpoint || endpoint->descriptor.type != 3u || !endpoint->input)
+        return USB_UNSUPPORTED;
+    if (capacity > (size_t)endpoint->descriptor.max_packet *
+                   endpoint->descriptor.transactions) return USB_RANGE;
+    if (endpoint->transfer_pending || endpoint->cancel_pending || endpoint->halted ||
+        endpoint->faulted || endpoint->ring.faulted || endpoint->ring.outstanding ||
+        endpoint->transfer_data.cpu) return USB_BUSY;
+
+    int result = endpoint_set_dequeue(slot, endpoint, timeout_ms);
+    if (result) return result;
+    result = usb_dma_alloc32(&slot->dma, capacity, 65536u, &endpoint->transfer_data);
+    if (result) return result;
+    result = usb_dma_sync(&slot->dma, &endpoint->transfer_data, 0, capacity,
+                          USB_DMA_FROM_DEVICE, true);
+    if (result) {
+        usb_dma_free(&slot->dma, &endpoint->transfer_data);
+        return result;
+    }
+
+    struct usb_xhci_trb transfer = {{0}};
+    put_le64(transfer.bytes, endpoint->transfer_data.address);
+    put_le32(transfer.bytes + 8u, (uint32_t)capacity);
+    put_le32(transfer.bytes + 12u,
+             (USB_XHCI_TRB_NORMAL << USB_XHCI_TRB_TYPE_SHIFT) |
+             USB_XHCI_TRB_IOC | USB_XHCI_TRB_ISP);
+    endpoint->transfer_length = (uint32_t)capacity;
+    endpoint->transfer_pending = true;
+    endpoint->async_interrupt = true;
+    result = usb_xhci_transfer_ring_enqueue(&endpoint->ring, &transfer, 1u,
+                                           &endpoint->transfer_trb);
+    if (result) {
+        if (endpoint->ring.faulted) {
+            return interrupt_event_failstop(slot, endpoint, result);
+        }
+        endpoint->transfer_pending = false;
+        endpoint->async_interrupt = false;
+        endpoint->transfer_trb = 0;
+        endpoint->transfer_length = 0;
+        usb_dma_free(&slot->dma, &endpoint->transfer_data);
+        return result;
+    }
+    uint32_t doorbell = slot->controller->caps.doorbell_offset +
+                        (uint32_t)slot->slot_id * 4u;
+    result = guarded_write(slot->controller, doorbell, endpoint->dci);
+    if (!result) {
+        uint32_t posted;
+        result = guarded_read(slot->controller, doorbell, &posted);
+    }
+    if (result) return interrupt_event_failstop(slot, endpoint, result);
+    return USB_OK;
+}
+
+int usb_xhci_device_interrupt_event(struct usb_xhci_device_slot *slot,
+                                   const struct usb_xhci_event *event, void *buffer,
+                                   size_t capacity, size_t *actual,
+                                   uint8_t *endpoint_address)
+{
+    if (!slot || !slot->controller || !event || !actual || !endpoint_address ||
+        (!buffer && capacity) || slot->state != USB_XHCI_SLOT_ADDRESSED ||
+        slot->controller->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    *actual = 0;
+    if (event->kind != USB_XHCI_EVENT_TRANSFER || event->data.transfer.endpoint_id < 2u ||
+        event->data.transfer.endpoint_id > 31u) return USB_AGAIN;
+    struct usb_xhci_device_endpoint *endpoint =
+        &slot->endpoints[event->data.transfer.endpoint_id - 2u];
+    int result = device_interrupt_event_apply(slot, endpoint, event, buffer, capacity,
+                                              actual, true);
+    if (result != USB_AGAIN) *endpoint_address = endpoint->descriptor.address;
+    return result;
+}
+
+static int device_interrupt_cancel_events(struct usb_xhci_device_slot *slot,
+                                          struct usb_xhci_device_endpoint *endpoint)
+{
+    struct usb_xhci_controller *controller = slot->controller;
+    struct usb_xhci_event remaining[USB_XHCI_PENDING_EVENTS];
+    struct usb_xhci_event original[USB_XHCI_PENDING_EVENTS];
+    const uint8_t count = controller->pending_event_count;
+    bool matched = false;
+    int failure = USB_OK;
+    for (uint8_t i = 0; i < count; ++i) {
+        uint8_t index = (uint8_t)((controller->pending_event_head + i) %
+                                  USB_XHCI_PENDING_EVENTS);
+        original[i] = controller->pending_events[index];
+    }
+    controller->pending_event_head = 0;
+    controller->pending_event_count = 0;
+    uint8_t remaining_count = 0;
+    for (uint8_t i = 0; i < count; ++i) {
+        const struct usb_xhci_event *event = &original[i];
+        bool consumed = false;
+        if (event->kind == USB_XHCI_EVENT_TRANSFER &&
+            event->data.transfer.slot_id == slot->slot_id &&
+            event->data.transfer.endpoint_id == endpoint->dci) {
+            int result = device_interrupt_event_apply(slot, endpoint, event, NULL, 0,
+                                                      NULL, false);
+            if (result != USB_AGAIN) {
+                consumed = true;
+                matched = true;
+                if (result != USB_OK && result != USB_DISCONNECTED && result != USB_STALL &&
+                    failure == USB_OK) failure = result;
+            }
+        }
+        if (!consumed) remaining[remaining_count++] = *event;
+    }
+    for (uint8_t i = 0; i < remaining_count; ++i)
+        controller->pending_events[i] = remaining[i];
+    controller->pending_event_count = remaining_count;
+    if (failure) return failure;
+    if (!matched && (endpoint->transfer_pending || endpoint->cancel_pending)) return USB_BUSY;
+    return endpoint->transfer_pending || endpoint->cancel_pending ? USB_BUSY : USB_OK;
+}
+
+static int device_interrupt_cancel(struct usb_xhci_device_slot *slot,
+                                   struct usb_xhci_device_endpoint *endpoint,
+                                   uint32_t timeout_ms)
+{
+    if (!endpoint->async_interrupt ||
+        (!endpoint->transfer_pending && !endpoint->cancel_pending)) return USB_OK;
+    if (!endpoint->cancel_pending) {
+        struct usb_xhci_trb command;
+        struct usb_xhci_event completion;
+        make_slot_command(&command, USB_XHCI_TRB_STOP_ENDPOINT, 0, slot->slot_id, false);
+        uint32_t control = get_le32(command.bytes + 12u) |
+                           ((uint32_t)endpoint->dci << 16);
+        put_le32(command.bytes + 12u, control);
+        endpoint->cancel_pending = true;
+        int result = usb_xhci_controller_command(slot->controller, &command, slot->slot_id,
+                                                 timeout_ms, &completion);
+        if (result == USB_BUSY) {
+            endpoint->cancel_pending = false;
+            return result;
+        }
+        if (result) return interrupt_event_failstop(slot, endpoint, result);
+    }
+    return device_interrupt_cancel_events(slot, endpoint);
+}
+
 int usb_xhci_device_bulk(struct usb_xhci_device_slot *slot, uint8_t address,
                          uint8_t endpoint, void *buffer, size_t length,
                          size_t *actual, uint32_t timeout_ms)
@@ -1578,9 +1809,18 @@ int usb_xhci_device_disable(struct usb_xhci_device_slot *slot, uint32_t timeout_
 {
     if (!slot || !slot->controller || !slot->slot_id ||
         slot->controller->state != USB_XHCI_CONTROLLER_RUNNING ||
-        slot->state == USB_XHCI_SLOT_FAULTED || slot->control.pending) return USB_INVALID;
-    for (size_t i = 0; i < USB_XHCI_MAX_NONCONTROL_ENDPOINTS; ++i)
-        if (slot->endpoints[i].transfer_pending) return USB_BUSY;
+        slot->state == USB_XHCI_SLOT_FAULTED || slot->control.pending ||
+        !timeout_ms || timeout_ms > 10000u) return USB_INVALID;
+    for (size_t i = 0; i < USB_XHCI_MAX_NONCONTROL_ENDPOINTS; ++i) {
+        struct usb_xhci_device_endpoint *endpoint = &slot->endpoints[i];
+        if (endpoint->transfer_pending && !endpoint->async_interrupt) return USB_BUSY;
+        if (endpoint->async_interrupt &&
+            (endpoint->transfer_pending || endpoint->cancel_pending)) {
+            int cancelled = device_interrupt_cancel(slot, endpoint, timeout_ms);
+            if (cancelled) return cancelled;
+        }
+        if (endpoint->transfer_pending || endpoint->cancel_pending) return USB_BUSY;
+    }
     struct usb_xhci_trb command;
     struct usb_xhci_event completion;
     make_slot_command(&command, USB_XHCI_TRB_DISABLE_SLOT, 0, slot->slot_id, false);

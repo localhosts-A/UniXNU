@@ -329,8 +329,8 @@ int usb_xhci_control_finish(struct usb_xhci_control_td *, void *buffer, size_t c
 /* Only after controller/endpoint stop proof and ring_halted has succeeded. */
 int usb_xhci_control_release_stopped(struct usb_xhci_control_td *);
 
-/* USB2 bulk/interrupt endpoint state. One synchronous TD may be active per
- * endpoint. Buffers and rings remain owned until a completion event or a fresh
+/* USB2 bulk/interrupt endpoint state. One TD may be active per endpoint.
+ * Buffers and rings remain owned until a completion event or a fresh
  * controller/slot stop proof. */
 struct usb_xhci_device_endpoint {
     struct usb_endpoint descriptor;
@@ -340,6 +340,7 @@ struct usb_xhci_device_endpoint {
     uint32_t transfer_length;
     uint8_t dci;
     bool configured, transfer_pending, halted, needs_dequeue, faulted, input;
+    bool async_interrupt, cancel_pending;
 };
 
 enum usb_xhci_device_slot_state {
@@ -385,6 +386,18 @@ int usb_xhci_device_configure_endpoint(struct usb_xhci_device_slot *,
 int usb_xhci_device_interrupt(struct usb_xhci_device_slot *, uint8_t address,
                               uint8_t endpoint, void *, size_t capacity,
                               size_t *actual, uint32_t timeout_ms);
+/* Asynchronous USB2 interrupt-IN path. Submit keeps its private DMA buffer until
+ * the matching transfer event is delivered to interrupt_event(). On disconnect,
+ * device_disable() stops and drains any active asynchronous endpoint before it
+ * issues Disable Slot. */
+int usb_xhci_device_interrupt_submit(struct usb_xhci_device_slot *, uint8_t address,
+                                     uint8_t endpoint, size_t capacity,
+                                     uint32_t timeout_ms);
+/* USB_AGAIN means this event does not belong to a live asynchronous interrupt TD.
+ * A stopped/cancelled TD returns USB_DISCONNECTED after its DMA is safe to release. */
+int usb_xhci_device_interrupt_event(struct usb_xhci_device_slot *,
+                                   const struct usb_xhci_event *, void *, size_t capacity,
+                                   size_t *actual, uint8_t *endpoint_address);
 int usb_xhci_device_bulk(struct usb_xhci_device_slot *, uint8_t address,
                          uint8_t endpoint, void *, size_t length,
                          size_t *actual, uint32_t timeout_ms);

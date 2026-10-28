@@ -80,6 +80,7 @@ struct model {
     uint32_t event_index;
     uint32_t operation_order, last_endpoint_doorbell_order, last_set_dequeue_order;
     unsigned configure_endpoint_commands, reset_endpoint_commands, set_dequeue_commands;
+    unsigned stop_endpoint_commands;
     unsigned endpoint_doorbells;
     uint32_t last_command_control, last_command_dword0, last_command_dword1;
     uint8_t last_command_type;
@@ -115,6 +116,7 @@ struct model {
     bool port_reset_overcurrent, port_reset_no_event, port_reset_unrelated_event;
     bool allow_live_release, stall_next_bot_transfer;
     bool auto_commands, auto_control, auto_endpoint, endpoint_output_matches;
+    bool stop_endpoint_force_event;
 };
 
 static void put_le32(uint8_t *p, uint32_t value);
@@ -553,6 +555,32 @@ static void apply_write(struct model *m, uint32_t offset, uint32_t value)
                     uint32_t ep0 = get_le32(output + output_offset);
                     put_le32(output + output_offset, (ep0 & ~7u) | 1u);
                 }
+            }
+            if (type == USB_XHCI_TRB_STOP_ENDPOINT) {
+                ++m->stop_endpoint_commands;
+                uint8_t dci = (uint8_t)((control >> 16) & 0x1fu);
+                assert(command_slot && dci >= 2u && dci <= 31u);
+                struct usb_xhci_device_endpoint *endpoint =
+                    &command_slot->endpoints[dci - 2u];
+                uint64_t pointer = endpoint->transfer_trb;
+                uint8_t code = USB_XHCI_CC_STOPPED;
+                if (m->stop_endpoint_force_event) {
+                    uint32_t next = endpoint->ring.consumer_index + 1u;
+                    if (next == endpoint->ring.usable_entries) {
+                        next = 0;
+                    }
+                    pointer = endpoint->ring.trbs.address +
+                              (uint64_t)next * USB_XHCI_TRB_BYTES;
+                    code = USB_XHCI_CC_STOPPED_LENGTH_INVALID;
+                }
+                event_at(m->controller, m->event_index, m->event_cycle,
+                         USB_XHCI_TRB_TRANSFER_EVENT, pointer, code,
+                         ((uint32_t)slot_id << 24) | ((uint32_t)dci << 16));
+                if (++m->event_index == m->controller->events.entries) {
+                    m->event_index = 0;
+                    m->event_cycle ^= 1u;
+                }
+                m->stop_endpoint_force_event = false;
             }
             event_at(m->controller, m->event_index, m->event_cycle,
                      USB_XHCI_TRB_COMMAND_EVENT, address, USB_XHCI_CC_SUCCESS,
@@ -1495,9 +1523,76 @@ static void test_noncontrol_endpoints(void)
            m.last_command_dword0 == (uint32_t)expected_dequeue &&
            !(m.last_command_dword0 & 1u));
 
+    /* Async interrupt-IN submission returns with its private DMA still owned. */
+    m.auto_endpoint = false;
+    m.endpoint_pattern_start = 0xc0u;
+    assert(usb_xhci_device_interrupt_submit(&slot, address, 0x81u, 8u, 100u) == USB_OK);
+    assert(endpoint->async_interrupt && endpoint->transfer_pending &&
+           endpoint->transfer_data.cpu && endpoint->ring.outstanding == 1u);
+    for (uint32_t i = 0; i < endpoint->transfer_length; ++i)
+        ((uint8_t *)endpoint->transfer_data.cpu)[i] = (uint8_t)(0xc0u + i);
+    queue_model_event(&m, USB_XHCI_TRB_PORT_STATUS_EVENT, 1u << 24,
+                      USB_XHCI_CC_SUCCESS, 0);
+    queue_model_event(&m, USB_XHCI_TRB_TRANSFER_EVENT, endpoint->transfer_trb,
+                      USB_XHCI_CC_SHORT_PACKET,
+                      ((uint32_t)slot.slot_id << 24) | ((uint32_t)endpoint->dci << 16));
+    uint32_t queued_event = (m.event_index + c->events.entries - 1u) % c->events.entries;
+    put_le32((uint8_t *)c->events.trbs.cpu + (size_t)queued_event * USB_XHCI_TRB_BYTES + 8u,
+             ((uint32_t)USB_XHCI_CC_SHORT_PACKET << 24) | 3u);
+    struct usb_xhci_event async_event;
+    assert(usb_xhci_controller_next_event(c, &async_event) == USB_OK &&
+           async_event.kind == USB_XHCI_EVENT_PORT_STATUS_CHANGE);
+    uint8_t async_report[8] = {0};
+    uint8_t async_endpoint_address = 0xeeu;
+    actual = 99u;
+    assert(usb_xhci_device_interrupt_event(&slot, &async_event, async_report,
+                                           sizeof(async_report), &actual,
+                                           &async_endpoint_address) == USB_AGAIN);
+    assert(actual == 0u && async_endpoint_address == 0xeeu && endpoint->transfer_pending);
+    assert(usb_xhci_controller_next_event(c, &async_event) == USB_OK &&
+           async_event.kind == USB_XHCI_EVENT_TRANSFER);
+    m.allow_live_release = true;
+    assert(usb_xhci_device_interrupt_event(&slot, &async_event, async_report,
+                                           sizeof(async_report), &actual,
+                                           &async_endpoint_address) == USB_OK);
+    m.allow_live_release = false;
+    assert(actual == 5u && async_endpoint_address == 0x81u &&
+           async_report[0] == 0xc0u && async_report[4] == 0xc4u &&
+           !endpoint->transfer_pending && !endpoint->transfer_data.cpu &&
+           endpoint->ring.outstanding == 0u && c->state == USB_XHCI_CONTROLLER_RUNNING);
+
+    /* A transfer that completed just before Stop Endpoint is drained before
+     * the forced stopped event, preserving the xHCI ring's dequeue order. */
+    m.auto_commands = true;
+    assert(usb_xhci_device_interrupt_submit(&slot, address, 0x81u, 8u, 100u) == USB_OK);
+    for (uint32_t i = 0; i < endpoint->transfer_length; ++i)
+        ((uint8_t *)endpoint->transfer_data.cpu)[i] = (uint8_t)(0xd0u + i);
+    queue_model_event(&m, USB_XHCI_TRB_TRANSFER_EVENT, endpoint->transfer_trb,
+                      USB_XHCI_CC_SUCCESS,
+                      ((uint32_t)slot.slot_id << 24) | ((uint32_t)endpoint->dci << 16));
+    m.stop_endpoint_force_event = true;
     m.allow_live_release = true;
     assert(usb_xhci_device_disable(&slot, 100u) == USB_OK);
     m.allow_live_release = false;
+    assert(m.stop_endpoint_commands == 1u && slot.state == USB_XHCI_SLOT_EMPTY &&
+           !slot.endpoints[3u - 2u].transfer_data.cpu);
+
+    /* A live TD is stopped with a Stopped Transfer Event before Disable Slot. */
+    struct usb_xhci_device_slot cancelled = {0};
+    m.slot = &cancelled;
+    assert(usb_xhci_device_prepare(&cancelled, c, &route, USB_XHCI_SPEED_HIGH,
+                                   &cleanup) == USB_OK && cleanup);
+    assert(usb_xhci_device_address(&cancelled, 64u, &address) == USB_OK);
+    assert(usb_xhci_device_configure_endpoint(&cancelled, &interrupt_in) == USB_OK);
+    struct usb_xhci_device_endpoint *cancelled_endpoint = &cancelled.endpoints[3u - 2u];
+    assert(usb_xhci_device_interrupt_submit(&cancelled, address, 0x81u, 8u, 100u) == USB_OK);
+    m.allow_live_release = true;
+    assert(usb_xhci_device_disable(&cancelled, 100u) == USB_OK);
+    m.allow_live_release = false;
+    assert(m.stop_endpoint_commands == 2u && cancelled.state == USB_XHCI_SLOT_EMPTY &&
+           !cancelled_endpoint->transfer_pending);
+
+    m.allow_live_release = true;
     assert(usb_xhci_controller_stop(c) == USB_OK && m.allocations == m.releases);
     free(c);
 
@@ -1639,6 +1734,24 @@ static void test_xhci_host_adapter(void)
     m.allow_live_release = false;
     assert(m.reset_endpoint_commands == 1u && m.set_dequeue_commands == 1u &&
            m.last_set_dequeue_order < m.last_endpoint_doorbell_order);
+
+    /* The host adapter submits and routes the completion to the owning route. */
+    assert(usb_xhci_host_adapter_interrupt_submit(&adapter, &child_route, child_address,
+                                                   0x81u, sizeof(input), 100u) == USB_OK);
+    assert(usb_xhci_host_adapter_next_event(&adapter, &event) == USB_OK &&
+           event.kind == USB_XHCI_EVENT_TRANSFER);
+    struct usb_host_route report_route = {0};
+    uint8_t report_endpoint = 0;
+    size_t report_actual = 99u;
+    m.allow_live_release = true;
+    assert(usb_xhci_host_adapter_interrupt_event(&adapter, &event, input, sizeof(input),
+                                                 &report_actual, &report_route,
+                                                 &report_endpoint) == USB_OK);
+    m.allow_live_release = false;
+    assert(report_actual == sizeof(input) && report_endpoint == 0x81u &&
+           report_route.depth == child_route.depth &&
+           report_route.hub_address[0] == child_route.hub_address[0] &&
+           report_route.hub_port[0] == child_route.hub_port[0]);
 
     assert(usb_xhci_host_adapter_release_stopped(&adapter) == USB_BUSY);
     m.allow_live_release = true;
