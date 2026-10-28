@@ -374,6 +374,7 @@ if args.virtio_console_socket:
                 '-chardev', f'socket,id=offline-console,path={console_path},server=off',
                 '-device', 'virtio-serial-device,id=offline-serial',
                 '-device', 'virtconsole,chardev=offline-console,name=offline-transport']
+firmware_info = None
 if args.esp:
     qemu = shutil.which('qemu-system-aarch64')
     if not qemu:
@@ -383,6 +384,11 @@ if args.esp:
     if not code.is_file():
         parser.error('UEFI code FD not found; use --firmware')
     variables = code.with_name('edk2-arm-vars.fd')
+    firmware_info = dict(code_file=code.name, code_bytes=code.stat().st_size,
+                         code_sha256=hashlib.sha256(code.read_bytes()).hexdigest(),
+                         variables_file=variables.name if variables.is_file() else None,
+                         variables_sha256=(hashlib.sha256(variables.read_bytes()).hexdigest()
+                                           if variables.is_file() else None))
     command += ['-drive', f'if=pflash,format=raw,readonly=on,file={code}']
     if variables.is_file():
         shutil.copyfile(variables, fixture / 'vars.fd')
@@ -1270,6 +1276,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                           registry_string_events=registry_string_events,
                           registry_string_log_exhausted=(len(registry_string_events) == 128),
                           boot_path='uefi-unixnu-darwinboot' if args.esp else 'raw-entry-fixture')
+            if firmware_info is not None:
+                report['qemu_firmware'] = firmware_info
             if block_input:
                 report['virtio_block_input'] = block_input
             if extra_block_input:

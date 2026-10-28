@@ -49,6 +49,7 @@ parser.add_argument('--owned-memory-size', type=lambda value: int(value, 0), hel
 parser.add_argument('--qemu-memory-mib', type=int, choices=[1024, 2048, 4096, 8192], default=1024,
                     help='Actual offline VM RAM; DarwinBoot must still allocate its entire separate requested window')
 parser.add_argument('--qemu-accel', choices=['tcg', 'hvf'], default='tcg', help='Offline test accelerator; HVF requires explicit actual QEMU VMM identity')
+parser.add_argument('--qemu-firmware', type=Path, help='Local AArch64 UEFI code FD passed to QEMU; defaults to the QEMU share directory')
 parser.add_argument('--zone-pgz-probe-case', type=int, choices=[1, 2, 3, 4], help='Run the explicit opt-in owned allocator fixture: positive, misaligned, wrong-zone, freed')
 parser.add_argument('--capture-qemu-screen',action='store_true',help='Read actual paused QEMU scanout through QMP screendump')
 parser.add_argument('--qemu-ramfb', action='store_true', help='Attach actual offline ramfb and pass firmware GOP through the loader')
@@ -183,6 +184,8 @@ if args.qemu_ramfb_high_resolution:
     args.inspect_boot_video = True
     args.capture_qemu_screen = True
 if args.timeout>300 and not args.live_hid_dir:parser.error('Deadlines above 300 seconds require explicit live HID control')
+if args.qemu_firmware and not args.qemu_firmware.is_file():
+    parser.error('QEMU firmware code FD does not exist')
 if args.inspect_ui_threads:
     args.inspect_current_process = True
     args.inspect_process_list = True
@@ -582,6 +585,8 @@ gdb_command = ['python3', ROOT / 'scripts/qemu-entry/gdb-stop.py', f'0x{panic[1]
                '--fixture', output, '--esp', esp, '--kernel', args.kernel,
                '--system-registers', '--timeout', str(args.timeout), '--qemu-accel', args.qemu_accel,
                '--qemu-memory-mib', str(args.qemu_memory_mib)]
+if args.qemu_firmware:
+    gdb_command += ['--firmware', args.qemu_firmware.resolve()]
 gdb_command += process_list_args
 if args.capture_scratch_data:
     if not args.data_ramdisk:
