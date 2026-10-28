@@ -13,7 +13,8 @@ import subprocess
 import time
 import tempfile
 import xml.etree.ElementTree as ET
-from gdb_stop_support import finish_stop_action, parse_indirect_memory_request
+from gdb_stop_support import (finish_stop_action, parse_indirect_memory_request,
+                              parse_trace_register_memory_request)
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('address', type=lambda value: int(value, 0))
@@ -45,6 +46,9 @@ parser.add_argument('--firmware', type=Path, help='QEMU AArch64 UEFI code FD for
 parser.add_argument('--timeout', type=float, default=3, help='Maximum seconds waiting for the guest breakpoint')
 parser.add_argument('--primary-start-address', type=lambda value: int(value, 0), help='Arm the primary breakpoint only after this actual one-shot kernel entry')
 parser.add_argument('--trace-address', action='append', default=[], type=lambda value: int(value, 0))
+parser.add_argument('--trace-read-register-offset', action='append', default=[],
+                    metavar='HEX_PC:x0-x30:HEX_OFFSET:HEX_LENGTH',
+                    help='Read a bounded kernel field relative to a register at a selected trace PC')
 parser.add_argument('--syscall-number', type=int, action='append', default=[], help='Capture only these genuine syscall numbers, preserving the bounded event budget')
 parser.add_argument('--syscall-start-address', type=lambda value: int(value, 0), help='Arm syscall saved-state observation only after this actual kernel entry')
 parser.add_argument('--kext-log-address', type=lambda value: int(value, 0), help='Capture up to 256 real OSKextLog calls within the same guest deadline')
@@ -117,6 +121,15 @@ parser.add_argument('--gic-version', choices=['2', '3'], default='2')
 parser.add_argument('--smp', type=int, default=1, help='QEMU CPU count (offline secondary-CPU start check)')
 parser.add_argument('--boot-progress-clock-fixture', help='Own diagnostic-only clock epoch: ENTRY:EPOCH:FREQUENCY:SECONDS')
 args = parser.parse_args()
+trace_register_reads = {}
+for request in args.trace_read_register_offset:
+    try:
+        pc, register_index, offset, length = parse_trace_register_memory_request(request)
+    except ValueError as error:
+        parser.error(str(error))
+    if pc not in args.trace_address:
+        parser.error('Trace-register reads require the same PC in --trace-address')
+    trace_register_reads.setdefault(pc, []).append((request, register_index, offset, length))
 progress_clock=None
 if args.boot_progress_clock_fixture:
     parts=args.boot_progress_clock_fixture.split(':')
@@ -691,9 +704,31 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                 address = current[32]
                 if address not in trace_remaining:
                     return False
-                trace_events.append({'pc': hex(address), 'x0': hex(current[0]),
-                                     'x1': hex(current[1]), 'lr': hex(current[30]),
-                                     'elapsed_seconds': round(time.monotonic() - started, 3)})
+                event = {'pc': hex(address), 'x0': hex(current[0]),
+                         'x1': hex(current[1]), 'lr': hex(current[30]),
+                         'elapsed_seconds': round(time.monotonic() - started, 3)}
+                reads = {}
+                for request, register_index, offset, length in trace_register_reads.get(address, []):
+                    base = current[register_index]
+                    result = {'register': f'x{register_index}', 'base': hex(base),
+                              'offset': hex(offset), 'length': length}
+                    target = base + offset
+                    if not base:
+                        result['unavailable'] = 'trace register is null'
+                    elif not 0xfffffff000000000 <= base < 1 << 64:
+                        result['unavailable'] = 'trace register is not a kernel pointer'
+                    elif target >= 1 << 64 or target + length > 1 << 64:
+                        result['unavailable'] = 'trace register target overflows 64 bits'
+                    else:
+                        raw = packet(f'm{target:x},{length:x}')
+                        if raw.startswith('E') or len(raw) != length * 2:
+                            result['unavailable'] = 'GDB could not read the bounded trace target'
+                        else:
+                            result.update(address=hex(target), raw_hex=raw)
+                    reads[request] = result
+                if reads:
+                    event['register_memory_reads'] = reads
+                trace_events.append(event)
                 if progress_clock and address == progress_clock[0]:
                     epoch_raw = packet(f'm{progress_clock[1]:x},8')
                     freq_raw = packet(f'm{progress_clock[2]:x},8')

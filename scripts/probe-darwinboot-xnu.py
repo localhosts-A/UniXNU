@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
 from unixnu.artifacts import package_efi
-from gdb_stop_support import parse_indirect_memory_request
+from gdb_stop_support import (parse_indirect_memory_request,
+                              parse_trace_register_memory_request)
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernel', type=Path, default=ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf')
@@ -46,6 +47,11 @@ parser.add_argument('--native-air-init', '--native-graphics-init', dest='native_
 parser.add_argument('--break-symbol', default='_panic')
 parser.add_argument('--inspect-sheng-pmgr', action='store_true', help='Read the opt-in original PMGR lifecycle observations')
 parser.add_argument('--break-address', type=lambda value: int(value, 0), help='Observe a qualified original component address with an exact prelink report')
+parser.add_argument('--trace-address', action='append', default=[], type=lambda value: int(value, 0),
+                    help='Trace one aligned address within an exact prelink component text extent')
+parser.add_argument('--trace-read-register-offset', action='append', default=[],
+                    metavar='HEX_PC:x0-x30:HEX_OFFSET:HEX_LENGTH',
+                    help='At a selected trace PC, read a bounded kernel field relative to a saved register')
 parser.add_argument('--require-crypto14', action='store_true', help='Require the real provider and PRNG to have completed initialization')
 parser.add_argument('--owned-memory-size', type=lambda value: int(value, 0), help='Request this many real UEFI-owned bytes through the DarwinBoot DT property')
 parser.add_argument('--qemu-memory-mib', type=int, choices=[1024, 2048, 4096, 8192], default=1024,
@@ -202,6 +208,16 @@ for value in args.read_indirect_optional:
     except ValueError as error:
         parser.error(str(error))
     requested_indirect_memory.append(f'{address:x}:{offset:x}:{length:x}')
+requested_trace_register_memory = []
+for value in args.trace_read_register_offset:
+    try:
+        pc, register_index, offset, length = parse_trace_register_memory_request(value)
+    except ValueError as error:
+        parser.error(str(error))
+    if pc not in args.trace_address:
+        parser.error('Trace-register reads require the same PC in --trace-address')
+    requested_trace_register_memory.append(
+        f'{pc:x}:x{register_index}:{offset:x}:{length:x}')
 if args.qemu_ramfb_high_resolution:
     if not args.qemu_ramfb:
         parser.error('High-resolution fixture requires the actual QEMU ramfb')
@@ -302,6 +318,14 @@ if args.prelink_report:
     prelink_report = json.loads(args.prelink_report.read_text())
     if hashlib.sha256(args.kernel.read_bytes()).hexdigest() != prelink_report['candidate_sha256']:
         raise SystemExit('Prelink report does not identify this exact candidate')
+if args.trace_address or requested_trace_register_memory:
+    if not prelink_report:
+        parser.error('Original component trace addresses require an exact prelink candidate report')
+    for address in args.trace_address:
+        if address & 3 or not any(
+                extent['segment'] == '__TEXT_EXEC' and extent['va'] <= address < extent['va'] + extent['size']
+                for extent in prelink_report['extents']):
+            parser.error(f'Trace address {address:#x} is not aligned inside this candidate text extent')
 if args.break_address is not None:
     if (not prelink_report or args.break_symbol != '_panic' or
             not any(e['segment'] == '__TEXT_EXEC' and e['va'] <= args.break_address < e['va'] + e['size']
@@ -805,6 +829,13 @@ if mobile_component:
             address = original + prelink_report['slide']
             trace_symbols[address] = name
             gdb_command += ['--trace-address', hex(address)]
+for address in args.trace_address:
+    extent, = (extent for extent in prelink_report['extents']
+               if extent['segment'] == '__TEXT_EXEC' and extent['va'] <= address < extent['va'] + extent['size'])
+    trace_symbols[address] = f"{extent['module']}+0x{address - extent['va']:x}"
+    gdb_command += ['--trace-address', hex(address)]
+for request in requested_trace_register_memory:
+    gdb_command += ['--trace-read-register-offset', request]
 for name in args.trace_symbol:
     match = re.search(r'^([0-9a-fA-F]+)\s+\S\s+' + re.escape(name) + '$', symbols, re.M)
     if not match:
