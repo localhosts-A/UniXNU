@@ -12,9 +12,31 @@
 **/
 
 #include "Internal.h"
+#include <Protocol/UniXNUPlatformPoll.h>
 
 #define TICK_MS             100
 #define DEFAULT_ROTATE_SEC  2
+
+STATIC
+VOID
+PollPlatformService (
+  VOID
+  )
+{
+  EFI_STATUS                         Status;
+  UNIXNU_PLATFORM_POLL_PROTOCOL    *Protocol;
+
+  Protocol = NULL;
+  Status = gBS->LocateProtocol (&gUniXNUPlatformPollProtocolGuid, NULL, (VOID **)&Protocol);
+  if (EFI_ERROR (Status) || (Protocol == NULL) ||
+      (Protocol->Revision < UNIXNU_PLATFORM_POLL_PROTOCOL_REVISION) ||
+      (Protocol->Size < sizeof (*Protocol)) || (Protocol->Poll == NULL))
+  {
+    return;
+  }
+
+  (VOID)Protocol->Poll (Protocol);
+}
 
 #ifndef SCAN_SUSPEND
 #define SCAN_SUSPEND  0x0102
@@ -240,6 +262,9 @@ RunMenu (
         UniXNULog ("menu: enter, booting %u", (UINT32)Selected); break;
       }
     } else if (!MouseActive && Signaled == 0) {
+      // This is the TPL_APPLICATION foreground loop. It is the safe place for
+      // platform work that cannot run from the TPL_CALLBACK timer notification.
+      PollPlatformService ();
       if (RemainingMs > 0) {
         RemainingMs -= TICK_MS;
         if (RemainingMs <= 0) {
@@ -282,7 +307,11 @@ UniXNUMenuConfirm (
   )
 {
   EFI_INPUT_KEY  Key;
-  UINTN          Index;
+  EFI_EVENT      Timer;
+  EFI_EVENT      Events[2];
+  UINTN          Signaled;
+  EFI_STATUS     Status;
+  BOOLEAN        Confirmed;
   UINTN          Shown;
   UINTN          Items;
   CHAR16         Line[160];
@@ -342,6 +371,19 @@ UniXNUMenuConfirm (
   while (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
   }
 
+  Status = gBS->CreateEvent (EVT_TIMER, TPL_CALLBACK, NULL, NULL, &Timer);
+  if (EFI_ERROR (Status)) {
+    return FALSE;
+  }
+  Status = gBS->SetTimer (Timer, TimerPeriodic, EFI_TIMER_PERIOD_MILLISECONDS (TICK_MS));
+  if (EFI_ERROR (Status)) {
+    gBS->CloseEvent (Timer);
+    return FALSE;
+  }
+  Events[0] = Timer;
+  Events[1] = gST->ConIn->WaitForKey;
+  Confirmed = FALSE;
+
   for ( ; ;) {
     if (Items > 0) {
       UnicodeSPrint (Line, sizeof (Line), L"<  %s  >", (Shown + 1 == Items) ? L"Cancel" : Entry->ConfirmTitles[Shown]);
@@ -350,8 +392,14 @@ UniXNUMenuConfirm (
       UniXNUUiDrawStatus (Ui, 1, L"");
     }
 
-    if (EFI_ERROR (gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index))) {
-      return FALSE;
+    Status = gBS->WaitForEvent (ARRAY_SIZE (Events), Events, &Signaled);
+    if (EFI_ERROR (Status)) {
+      break;
+    }
+
+    if (Signaled == 0) {
+      PollPlatformService ();
+      continue;
     }
 
     if (EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
@@ -373,16 +421,23 @@ UniXNUMenuConfirm (
     if ((Key.UnicodeChar == CHAR_CARRIAGE_RETURN) || (Key.UnicodeChar == CHAR_LINEFEED)) {
       if (Items > 0) {
         if (Shown + 1 == Items) {
-          return FALSE;
+          break;
         }
 
         *Choice = Shown;
       }
 
       UniXNULog ("menu: confirmed '%a' choice %u", (Entry->Id != NULL) ? Entry->Id : "?", (UINT32)*Choice);
-      return TRUE;
+      Confirmed = TRUE;
+      break;
     }
 
-    return FALSE;
+    break;
   }
+
+  Status = gBS->SetTimer (Timer, TimerCancel, 0);
+  if (EFI_ERROR (Status)) { Confirmed = FALSE; }
+  Status = gBS->CloseEvent (Timer);
+  if (EFI_ERROR (Status)) { Confirmed = FALSE; }
+  return Confirmed;
 }

@@ -21,6 +21,28 @@ class SourceStorageBuildTests(unittest.TestCase):
         self.assertIn('#include <IOKit/IOBSD.h>', fixture)
         self.assertIn('media->getProperty(kIOBSDNameKey)', fixture)
 
+    def test_qemu_usb_storage_path_requires_a_unique_dali_whole_media(self):
+        fixture = (Path(__file__).resolve().parents[2] / 'scripts/fixtures/source-storage.cpp').read_text()
+        self.assertIn('source_storage_fixture_copy_usb_bsd_path', fixture)
+        self.assertIn('IOService::serviceMatching("DaliUsbStorage")', fixture)
+        self.assertIn('media->isWhole()', fixture)
+        self.assertIn('device_count != 1 || whole_media_count != 1', fixture)
+        self.assertIn('Never fall', fixture)
+
+    def test_storage_test_helper_symbols_use_exact_names_and_resolve(self):
+        defined = '\n'.join('00000000 T ' + name for name in storage.SOURCE_STORAGE_TEST_SYMBOLS)
+        storage.check_storage_test_symbols(defined)
+        for name in storage.SOURCE_STORAGE_TEST_SYMBOLS:
+            with self.subTest(name=name):
+                missing = '\n'.join('00000000 T ' + item for item in storage.SOURCE_STORAGE_TEST_SYMBOLS
+                                    if item != name)
+                with self.assertRaisesRegex(ValueError, 'Missing resolved'):
+                    storage.check_storage_test_symbols(missing)
+                with self.assertRaisesRegex(ValueError, 'Missing resolved'):
+                    storage.check_storage_test_symbols(defined, 'U ' + name)
+        with self.assertRaisesRegex(ValueError, 'Missing resolved'):
+            storage.check_storage_test_symbols('00000000 T _source_storage_fixture_copy_usb_bsd_path_extra')
+
     def test_compile_record_keeps_kernel_flags_without_clobbering_kernel_outputs(self):
         record = {'directory': '/build/xnu', 'file': 'IOService.cpp',
                   'arguments': ['clang++', '-target', 'arm64-apple-ios17.0', '-DKERNEL_PRIVATE=1',

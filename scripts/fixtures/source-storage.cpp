@@ -108,6 +108,62 @@ extern "C" int source_storage_fixture_copy_bsd_path(char *path, size_t capacity)
   return ready ? 1 : 0;
 }
 
+extern "C" int source_storage_fixture_copy_usb_bsd_path(char *path, size_t capacity) {
+  if (!path || !capacity) return 0;
+  path[0] = '\0';
+
+  // The QEMU USB/FAT test must select the real Dali BOT service. Never fall
+  // back to the RAM fixture: that would make the filesystem gate look green
+  // without issuing any USB transfers.
+  OSDictionary *matching = IOService::serviceMatching("DaliUsbStorage");
+  if (!matching) return 0;
+  OSIterator *devices = IOService::getMatchingServices(matching);
+  matching->release();
+  if (!devices) return 0;
+
+  char candidate[64] = {};
+  unsigned device_count = 0;
+  unsigned whole_media_count = 0;
+  while (auto object = devices->getNextObject()) {
+    auto device = OSDynamicCast(IOBlockStorageDevice, object);
+    if (!device) continue;
+    ++device_count;
+    if (device_count != 1) break;
+
+    OSIterator *drivers = device->getChildIterator(gIOServicePlane);
+    if (!drivers) continue;
+    while (auto child = drivers->getNextObject()) {
+      auto driver = OSDynamicCast(IOBlockStorageDriver, child);
+      if (!driver || driver->getProvider() != device) continue;
+      OSIterator *media_children = driver->getChildIterator(gIOServicePlane);
+      if (!media_children) continue;
+      while (auto media_object = media_children->getNextObject()) {
+        auto media = OSDynamicCast(IOMedia, media_object);
+        if (!media || media->getProvider() != driver || !media->isWhole()) continue;
+        ++whole_media_count;
+        if (whole_media_count != 1) break;
+        auto name = OSDynamicCast(OSString, media->getProperty(kIOBSDNameKey));
+        if (!name || !name->getLength() ||
+            name->getLength() >= sizeof(candidate) - 5) continue;
+        int length = snprintf(candidate, sizeof(candidate), "/dev/%s",
+                              name->getCStringNoCopy());
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(candidate))
+          candidate[0] = '\0';
+      }
+      media_children->release();
+      if (whole_media_count > 1) break;
+    }
+    drivers->release();
+  }
+  devices->release();
+
+  size_t length = strlen(candidate) + 1;
+  if (device_count != 1 || whole_media_count != 1 || !candidate[0] ||
+      length > capacity) return 0;
+  strlcpy(path, candidate, capacity);
+  return 1;
+}
+
 extern "C" __attribute__((noinline, used))
 uint64_t source_storage_test_checkpoint(uint64_t result) {
   asm volatile("" : "+r"(result) :: "memory");

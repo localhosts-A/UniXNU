@@ -651,6 +651,22 @@ int usb_host_stop_device(struct usb_host_device *device)
     return result;
 }
 
+int usb_host_confirm_controller_stopped(struct usb_host_device *device)
+{
+    if (!device) return USB_INVALID;
+    if (device->lifecycle_busy) return USB_BUSY;
+    if (device->state == USB_HOST_EMPTY || device->stop_proven) return USB_OK;
+
+    /* A controller-wide stop closes admission even if its proof is refused. */
+    device->state = USB_HOST_FAULTED;
+    if (!device->ops.controller_stopped) return USB_UNSUPPORTED;
+    device->lifecycle_busy = true;
+    int result = device->ops.controller_stopped(device->ops.context);
+    if (!result) device->stop_proven = true;
+    device->lifecycle_busy = false;
+    return result;
+}
+
 int usb_host_release_stopped_device(struct usb_host_device *device,
                                     usb_key_event key_event,
                                     usb_pointer_event pointer_event,

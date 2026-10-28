@@ -24,6 +24,153 @@ def node(name, properties=(), children=()):
     return result + b''.join(children)
 
 
+def qemu_pcie_resource_node(path):
+    """Translate QEMU's real generic PCI host FDT into a bounded Apple-DT nub."""
+    blob = path.read_bytes()
+    if len(blob) < 40:
+        raise SystemExit('QEMU PCI FDT header is truncated')
+    (magic, total, structure, strings, reserve, version, last_compatible,
+     _, string_bytes, structure_bytes) = struct.unpack_from('>10I', blob)
+    if (magic != 0xd00dfeed or total > len(blob) or version < 17 or
+            last_compatible > 17 or reserve + 16 > total or
+            structure + structure_bytes > total or strings + string_bytes > total):
+        raise SystemExit('Unexpected or truncated QEMU PCI FDT')
+
+    roots, stack = [], []
+    cursor, end = structure, structure + structure_bytes
+    saw_end = False
+    while cursor < end:
+        if cursor + 4 > end:
+            raise SystemExit('Truncated QEMU PCI FDT tag')
+        tag = struct.unpack_from('>I', blob, cursor)[0]
+        cursor += 4
+        if tag == 1:  # FDT_BEGIN_NODE
+            name_end = blob.find(b'\0', cursor, end)
+            if name_end < 0:
+                raise SystemExit('Unterminated QEMU PCI FDT node name')
+            item = {'name': blob[cursor:name_end].decode('ascii'), 'properties': {}, 'children': []}
+            cursor = (name_end + 4) & ~3
+            if cursor > end:
+                raise SystemExit('Truncated QEMU PCI FDT node name padding')
+            if stack:
+                stack[-1]['children'].append(item)
+            else:
+                roots.append(item)
+            stack.append(item)
+        elif tag == 2:  # FDT_END_NODE
+            if not stack:
+                raise SystemExit('Unbalanced QEMU PCI FDT node')
+            stack.pop()
+        elif tag == 3:  # FDT_PROP
+            if not stack or cursor + 8 > end:
+                raise SystemExit('Malformed QEMU PCI FDT property')
+            length, name_offset = struct.unpack_from('>II', blob, cursor)
+            cursor += 8
+            value_end = cursor + length
+            string_end = strings + string_bytes
+            if name_offset >= string_bytes or value_end > end:
+                raise SystemExit('QEMU PCI FDT property is out of bounds')
+            name_end = blob.find(b'\0', strings + name_offset, string_end)
+            if name_end < 0:
+                raise SystemExit('Unterminated QEMU PCI FDT property name')
+            name = blob[strings + name_offset:name_end].decode('ascii')
+            properties = stack[-1]['properties']
+            if name in properties:
+                raise SystemExit('Duplicate QEMU PCI FDT property')
+            properties[name] = blob[cursor:value_end]
+            cursor = (value_end + 3) & ~3
+        elif tag == 4:  # FDT_NOP
+            continue
+        elif tag == 9:  # FDT_END
+            if stack:
+                raise SystemExit('Unclosed QEMU PCI FDT node')
+            saw_end = True
+            break
+        else:
+            raise SystemExit('Unknown QEMU PCI FDT tag')
+    if not saw_end or len(roots) != 1:
+        raise SystemExit('Incomplete QEMU PCI FDT tree')
+
+    matches = []
+    pending = [roots[0]]
+    while pending:
+        current = pending.pop()
+        compatible = current['properties'].get('compatible', b'').split(b'\0')
+        if b'pci-host-ecam-generic' in compatible:
+            matches.append(current)
+        pending.extend(current['children'])
+    if len(matches) != 1:
+        raise SystemExit('Expected exactly one QEMU generic PCI host')
+    host = matches[0]['properties']
+
+    def one_cell(name):
+        value = host.get(name, b'')
+        if len(value) != 4:
+            raise SystemExit(f'Invalid QEMU PCI FDT {name}')
+        return struct.unpack('>I', value)[0]
+
+    def read_cells(name, expected=None):
+        value = host.get(name, b'')
+        if len(value) % 4 or (expected is not None and len(value) != expected * 4):
+            raise SystemExit(f'Invalid QEMU PCI FDT {name} cells')
+        return struct.unpack('>' + 'I' * (len(value) // 4), value)
+
+    root_properties = roots[0]['properties']
+    if (len(root_properties.get('#address-cells', b'')) != 4 or
+            len(root_properties.get('#size-cells', b'')) != 4 or
+            struct.unpack('>I', root_properties['#address-cells'])[0] != 2 or
+            struct.unpack('>I', root_properties['#size-cells'])[0] != 2 or
+            one_cell('#address-cells') != 3 or one_cell('#size-cells') != 2 or
+            host.get('device_type') != b'pci\0' or 'dma-coherent' not in host or
+            host['dma-coherent'] or 'iommu-map' in host or 'iommu-map-mask' in host or
+            'iommus' in host or 'dma-ranges' in host):
+        raise SystemExit('QEMU PCI host does not match the supported coherent, untranslated ABI')
+
+    reg = read_cells('reg', 4)
+    ecam_base = (reg[0] << 32) | reg[1]
+    ecam_size = (reg[2] << 32) | reg[3]
+    bus_first, bus_last = read_cells('bus-range', 2)
+    if (bus_first > bus_last or bus_last > 255 or ecam_base & 0xfffff or
+            not ecam_size or (bus_last - bus_first + 1) * 0x100000 > ecam_size or
+            ecam_base > 0xffffffffffffffff - (ecam_size - 1)):
+        raise SystemExit('QEMU PCI ECAM aperture or bus range is invalid')
+
+    ranges = read_cells('ranges')
+    if not ranges or len(ranges) % 7:
+        raise SystemExit('Invalid QEMU PCI host ranges')
+    range_types, cpu_windows = set(), []
+    for offset in range(0, len(ranges), 7):
+        flags, child_hi, child_lo, parent_hi, parent_lo, size_hi, size_lo = ranges[offset:offset + 7]
+        kind = flags & 0x03000000
+        child = (child_hi << 32) | child_lo
+        parent = (parent_hi << 32) | parent_lo
+        size = (size_hi << 32) | size_lo
+        if (kind not in (0x01000000, 0x02000000, 0x03000000) or kind in range_types or
+                not size or child > 0xffffffffffffffff - (size - 1) or
+                parent > 0xffffffffffffffff - (size - 1)):
+            raise SystemExit('Unsupported or invalid QEMU PCI host range encoding')
+        if any(parent <= old_parent + old_size - 1 and
+               old_parent <= parent + size - 1 for old_parent, old_size in cpu_windows):
+            raise SystemExit('Overlapping QEMU PCI host CPU windows')
+        range_types.add(kind)
+        cpu_windows.append((parent, size))
+    if range_types != {0x01000000, 0x02000000, 0x03000000}:
+        raise SystemExit('QEMU PCI host must expose I/O, 32-bit and 64-bit memory windows')
+    if any(ecam_base <= parent + size - 1 and parent <= ecam_base + ecam_size - 1
+           for parent, size in cpu_windows):
+        raise SystemExit('QEMU PCI ECAM overlaps a translated PCI window')
+
+    return node('qemu-pcie-host', [
+        ('compatible', b'qemu,virt-pcie-host\0pci-host-ecam-generic\0'),
+        ('device_type', b'pci\0'),
+        ('#address-cells', struct.pack('<I', 3)),
+        ('#size-cells', struct.pack('<I', 2)),
+        ('reg', struct.pack('<QQ', ecam_base, ecam_size)),
+        ('bus-range', struct.pack('<II', bus_first, bus_last)),
+        ('ranges', struct.pack('<' + 'I' * len(ranges), *ranges)),
+        ('dma-coherent', b'')])
+
+
 def empty_nvram_proxy():
     """A fresh volatile CHRP bank for upstream IODTNVRAM, with no controller."""
     def header(name, size):
@@ -67,8 +214,11 @@ parser.add_argument('--osenvironment', choices=['ramdisk','recoveryos','main'], 
 parser.add_argument('--amfi-platform-only', action='store_true', help='Require platform code in the offline AMFI policy fixture')
 parser.add_argument('--trust-cache', action='store_true', help='Provide a zeroed owned TrustCache sidecar binding')
 parser.add_argument('--virtio-mmio-fdt', type=Path, help='Describe actual VirtIO resource windows from a QEMU-generated FDT')
+parser.add_argument('--qemu-pcie-fdt', type=Path, help='Describe the actual coherent QEMU virt PCI host resources from its generated FDT')
 parser.add_argument('--root-match-volume-uuid', type=uuid.UUID, help='Match an actual IOMedia UUID through the source root-matching mechanism')
 args = parser.parse_args()
+if args.qemu_pcie_fdt and not args.armvirt:
+    parser.error('--qemu-pcie-fdt requires --armvirt')
 if args.owned_memory_size is not None and (not 0x10000000 <= args.owned_memory_size <= 0x100000000 or args.owned_memory_size % 0x200000):
     parser.error('Owned memory must be 256 MiB to 4 GiB, aligned to 2 MiB')
 timebase = 62500000
@@ -151,6 +301,7 @@ if args.virtio_mmio_fdt:
     for index, (address, size) in enumerate(sorted(entries)):
         virtio_nodes.append(node('virtio-mmio-' + str(index), [('compatible', b'virtio,mmio\0'),
             ('reg', struct.pack('<QQ', address - 0x08000000, size)), ('dma-coherent', b'')]))
+pcie_nodes = [qemu_pcie_resource_node(args.qemu_pcie_fdt)] if args.qemu_pcie_fdt else []
 cpu = node('cpu0', [('state', b'running\0'), ('reg', struct.pack('<I', 0)),
                     *([('device_type', b'cpu\0'), ('compatible', b'arm,cortex-a710\0' if args.qemu_accel == 'tcg' else b'arm,armv8\0')] if args.armvirt else []),
                     ('timebase-frequency', struct.pack('<I', timebase)),
@@ -195,7 +346,7 @@ tree = node('device-tree', [('model', b'qemu-entry-fixture\0'),
                           ('reg', struct.pack('<2Q', 0x03ff0000, 0x3000))]),
            node('ufsphy', [('compatible', b'qcom,sm8550-qmp-ufs-phy\0'),
                            ('reg', struct.pack('<2Q', 0x03fe0000, 0x2000))])]
-         if args.armvirt else []) + virtio_nodes)])
+         if args.armvirt else []) + virtio_nodes + pcie_nodes)])
 output = args.output
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_bytes(tree)

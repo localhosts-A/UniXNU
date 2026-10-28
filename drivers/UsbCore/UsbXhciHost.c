@@ -332,6 +332,16 @@ static int adapter_disable_device(void *context, const struct usb_host_route *ro
     return result;
 }
 
+static int adapter_controller_stopped(void *context)
+{
+    struct usb_xhci_host_adapter *adapter = context;
+    int result = adapter_acquire(adapter);
+    if (result) return result;
+    if (adapter->controller->state != USB_XHCI_CONTROLLER_EMPTY) result = USB_BUSY;
+    adapter_unlock(adapter);
+    return result;
+}
+
 static uint32_t adapter_now_ms(void *context)
 {
     struct usb_xhci_host_adapter *adapter = context;
@@ -382,6 +392,7 @@ int usb_xhci_host_adapter_get_ops(struct usb_xhci_host_adapter *adapter,
     candidate.disable_device = adapter_disable_device;
     candidate.prepare_device = adapter_prepare_device;
     candidate.configure_hub = adapter_configure_hub;
+    candidate.controller_stopped = adapter_controller_stopped;
     candidate.now_ms = adapter->now_ms ? adapter_now_ms : NULL;
     *ops = candidate;
     return USB_OK;

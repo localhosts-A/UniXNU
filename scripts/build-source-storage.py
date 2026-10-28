@@ -25,10 +25,26 @@ SOURCES = (
 )
 CLASSES = ('IOBlockStorageDevice', 'IOBlockStorageDriver', 'IOStorage', 'IOMedia',
            'IOMediaBSDClient', 'IOGUIDPartitionScheme', 'IOUserBlockStorageDevice', 'SourceStorageFixture')
+SOURCE_STORAGE_TEST_SYMBOLS = (
+    '_source_storage_fixture_copy_bsd_path',
+    '_source_storage_fixture_copy_usb_bsd_path',
+)
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def symbol_names(output):
+    return {line.split()[-1] for line in output.splitlines() if line.split()}
+
+
+def check_storage_test_symbols(defined, undefined=''):
+    definitions = symbol_names(defined)
+    unresolved = symbol_names(undefined)
+    for name in SOURCE_STORAGE_TEST_SYMBOLS:
+        if name not in definitions or name in unresolved:
+            raise ValueError('Missing resolved source storage test helper: ' + name)
 
 
 def compiler_record(objects):
@@ -195,6 +211,7 @@ def build(root):
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, compiled)], check=True)
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', str(archive)], text=True)
     (out / 'defined-symbols.txt').write_text(defined)
+    check_storage_test_symbols(defined)
     for name in CLASSES:
         if name + '10gMetaClassE' not in defined:
             raise ValueError('Source archive lacks the defined class: ' + name)
@@ -216,6 +233,7 @@ def verify_kernel(root, kernel):
         raise ValueError('Source storage archive/report mismatch')
     defined = subprocess.check_output(['xcrun', 'nm', '-gU', str(kernel)], text=True)
     undefined = subprocess.check_output(['xcrun', 'nm', '-u', str(kernel)], text=True)
+    check_storage_test_symbols(defined, undefined)
     for name in CLASSES:
         if name + '10gMetaClassE' not in defined or name in undefined:
             raise ValueError('Final source kernel lacks a resolved storage class: ' + name)

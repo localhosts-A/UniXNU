@@ -66,6 +66,7 @@
   gEfiSimpleTextInProtocolGuid      ## SOMETIMES_CONSUMES
   gEfiSimplePointerProtocolGuid     ## SOMETIMES_CONSUMES
   gUniXNULoaderProtocolGuid   ## SOMETIMES_CONSUMES
+  gUniXNUPlatformPollProtocolGuid ## SOMETIMES_CONSUMES
 
 [Pcd]
   gUniXNUPkgTokenSpaceGuid.PcdUniXNUDebugLevel

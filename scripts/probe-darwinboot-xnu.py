@@ -160,6 +160,9 @@ root_group.add_argument('--root-volume-uuid', type=uuid.UUID, help='Actual image
 root_group.add_argument('--root-bsd-name', help='Previously observed actual IOMedia BSD name for genuine root selection')
 root_group.add_argument('--root-match-volume-uuid', type=uuid.UUID, help='Select a real volume UUID with standard DT IOMedia root-matching')
 parser.add_argument('--virtio-mmio-fdt', type=Path, help='Actual QEMU-generated FDT describing the corresponding resource windows')
+parser.add_argument('--qemu-pcie-fdt', type=Path, help='Actual QEMU virt PCI-host FDT; generated automatically with --qemu-xhci when omitted')
+parser.add_argument('--qemu-xhci', action='store_true', help='Attach the actual QEMU PCI xHCI controller to this ESP boot')
+parser.add_argument('--usb-storage-image', type=Path, help='Attach this explicit disposable raw image as writable USB BOT storage')
 parser.add_argument('--missing-virtio-device', action='store_true', help='Actual empty-MMIO-window refusal control')
 parser.add_argument('--boot-progress-clock-fixture', type=int, choices=(31,121),
                     help='QEMU-only: advance own diagnostic epoch at its first poll; no OS/timebase/register mutation')
@@ -332,6 +335,19 @@ if cache_fault != bool(args.cache_page_source) or (cache_fault and
     parser.error('Cache page fault requires its exact original source, explicit own process and real offline disk')
 if args.missing_gic and not args.armcpu:
     parser.error('--missing-gic requires --armcpu')
+if args.qemu_pcie_fdt and not args.armvirt:
+    parser.error('--qemu-pcie-fdt requires --armvirt')
+if args.qemu_xhci and (not args.armvirt or not args.armcpu):
+    parser.error('--qemu-xhci requires --armvirt and --armcpu')
+if args.usb_storage_image:
+    image = args.usb_storage_image.resolve()
+    try:
+        image.relative_to(args.output.resolve())
+    except ValueError:
+        parser.error('--usb-storage-image must be a disposable file inside --output')
+    if (not args.qemu_xhci or not image.is_file() or image.stat().st_size == 0 or
+            image.stat().st_size % 512):
+        parser.error('--usb-storage-image requires --qemu-xhci and a nonempty sector-aligned raw file')
 if args.qemu_accel == 'hvf' and not (args.armvirt and args.qemu_vmm_present):
     parser.error('HVF requires the actual QEMU platform and explicit VMM identity')
 output = args.output.resolve()
@@ -348,6 +364,21 @@ if args.trust_cache:
     shutil.copyfile(args.trust_cache, trust_sidecar)
 else:
     trust_sidecar.unlink(missing_ok=True)
+qemu_pcie_fdt = args.qemu_pcie_fdt
+if args.qemu_xhci and qemu_pcie_fdt is None:
+    qemu = shutil.which('qemu-system-aarch64')
+    if not qemu:
+        parser.error('--qemu-xhci requires qemu-system-aarch64 to describe the PCI host')
+    qemu_pcie_fdt = output / 'qemu-pcie-host.dtb'
+    machine = f'virt,virtualization=off,secure=off,gic-version=2,dumpdtb={qemu_pcie_fdt}'
+    dump_command = [qemu, '-M', machine, '-accel', args.qemu_accel,
+                    '-cpu', 'cortex-a710' if args.qemu_accel == 'tcg' else 'host',
+                    '-m', str(args.qemu_memory_mib), '-smp', str(args.smp),
+                    '-display', 'none', '-nodefaults', '-device', 'qemu-xhci,id=xhci,p2=4,p3=0']
+    dumped = subprocess.run(dump_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, timeout=30)
+    if dumped.returncode or not qemu_pcie_fdt.is_file():
+        raise SystemExit('Could not obtain the actual QEMU PCI-host FDT:\n' + dumped.stdout[-4000:])
 dt_command = ['python3', ROOT / 'scripts/qemu-entry/make-dt.py', '--output',
               payloads / 'kernel.macho.adt', '--dram-size', str(args.qemu_memory_mib * 1024**2), '--qemu-accel', args.qemu_accel]
 if args.owned_memory_size is not None:
@@ -397,6 +428,8 @@ if args.trust_cache:
     dt_command.append('--trust-cache')
 if args.virtio_mmio_fdt:
     dt_command += ['--virtio-mmio-fdt', args.virtio_mmio_fdt]
+if qemu_pcie_fdt:
+    dt_command += ['--qemu-pcie-fdt', qemu_pcie_fdt]
 if args.root_match_volume_uuid:
     dt_command += ['--root-match-volume-uuid', str(args.root_match_volume_uuid)]
 subprocess.run(dt_command, check=True)
@@ -582,6 +615,10 @@ gdb_command = ['python3', ROOT / 'scripts/qemu-entry/gdb-stop.py', f'0x{panic[1]
                '--fixture', output, '--esp', esp, '--kernel', args.kernel,
                '--system-registers', '--timeout', str(args.timeout), '--qemu-accel', args.qemu_accel,
                '--qemu-memory-mib', str(args.qemu_memory_mib)]
+if args.qemu_xhci:
+    gdb_command.append('--qemu-xhci')
+if args.usb_storage_image:
+    gdb_command += ['--usb-storage-image', args.usb_storage_image]
 gdb_command += process_list_args
 if args.capture_scratch_data:
     if not args.data_ramdisk:

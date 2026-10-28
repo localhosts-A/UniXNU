@@ -37,7 +37,11 @@ SYMBOLS = ('_msdosfs_module_start', '_msdosfs_vfsops',
 PRIVATE_SYMBOLS = ('_msdosfs_fat_vnodeop_opv_desc',)
 GLOBAL_SYMBOLS = tuple(name for name in SYMBOLS if name not in PRIVATE_SYMBOLS)
 KERNEL_LOCALARGS_SUPPORT_SYMBOLS = ('_vfs_is_kernel_localargs',)
-QEMU_MOUNT_SUPPORT_SYMBOLS = ('_kernel_mount_localargs', '_source_storage_fixture_copy_bsd_path')
+QEMU_MOUNT_SUPPORT_SYMBOLS = (
+    '_kernel_mount_localargs',
+    '_source_storage_fixture_copy_bsd_path',
+    '_source_storage_fixture_copy_usb_bsd_path',
+)
 VFSOPS = 'msdosfs_vfsops.c'
 KERNEL_LOCALARGS_TRANSFORM = 'msdosfs-kernel-localargs-v1'
 

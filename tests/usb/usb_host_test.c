@@ -284,7 +284,7 @@ static void pointer_event(void *context, uint8_t buttons, int16_t x, int16_t y, 
 static struct usb_host_ops ops(struct mock_controller *m)
 {
     return (struct usb_host_ops){m, control, address_device, configure_endpoint,
-        interrupt_transfer, bulk_transfer, reset_endpoint, disable_device, NULL, NULL, NULL};
+        interrupt_transfer, bulk_transfer, reset_endpoint, disable_device, NULL, NULL, NULL, NULL};
 }
 static struct usb_host_route route(void)
 {
@@ -449,6 +449,8 @@ static void test_stop_invalid_preconditions(void)
     device.ops.disable_device = NULL;
     assert(usb_host_stop_device(&device) == USB_IO);
     assert(device.state == USB_HOST_FAULTED && !device.stop_proven && !m.disables);
+    assert(usb_host_confirm_controller_stopped(&device) == USB_UNSUPPORTED);
+    assert(device.state == USB_HOST_FAULTED && !device.stop_proven);
     assert(usb_host_release_stopped_device(&device, NULL, NULL, NULL) == USB_BUSY);
     device.ops.disable_device = disable_device;
     assert(usb_host_stop_device(&device) == USB_OK && m.disables == 1);

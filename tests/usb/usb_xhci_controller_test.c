@@ -65,6 +65,8 @@ static const uint8_t hub_descriptor[9] = {9, 0x29, 1, 0x21, 0, 10, 0, 0, 0};
 
 struct model {
     uint32_t regs[0x1000 / 4];
+    struct usb_mmio platform_mmio;
+    bool platform_mmio_bound;
     uint64_t next_dma;
     unsigned accesses, fail_access, allocations, allocation_attempts, fail_allocate, releases, syncs, fail_sync;
     unsigned resets, starts, guard_calls, fail_guard, noncoherent_at, misalign_at, cnr_waits;
@@ -439,7 +441,17 @@ static int read32(void *context, uint32_t offset, uint32_t *value)
     if (++m->accesses == m->fail_access) return USB_IO;
     if (offset == OP + 4u && (m->regs[offset / 4u] & 0x800u) &&
         !(m->regs[OP / 4u] & CMD_RESET)) ++m->cnr_waits;
-    *value = m->regs[offset / 4u]; return USB_OK;
+    uint32_t modeled = m->regs[offset / 4u];
+    if (m->platform_mmio_bound) {
+        /* Model the controller's hardware-updated register state in the owner's
+         * mapped aperture, then read it back through the production guarded callback. */
+        int status = m->platform_mmio.write32(m->platform_mmio.context, offset, modeled);
+        if (status != USB_OK) return status;
+        status = m->platform_mmio.read32(m->platform_mmio.context, offset, value);
+        if (status != USB_OK) return status;
+        return *value == modeled ? USB_OK : USB_IO;
+    }
+    *value = modeled; return USB_OK;
 }
 static void apply_write(struct model *m, uint32_t offset, uint32_t value)
 {
@@ -619,13 +631,27 @@ static int write32(void *context, uint32_t offset, uint32_t value)
 {
     struct model *m = context; assert(!m->guard_blocked && offset < sizeof(m->regs) && !(offset & 3u));
     bool fail = ++m->accesses == m->fail_access;
-    if (!fail || m->applied_error) apply_write(m, offset, value);
+    if (!fail || m->applied_error) {
+        if (m->platform_mmio_bound) {
+            int status = m->platform_mmio.write32(m->platform_mmio.context, offset, value);
+            if (status != USB_OK) return status;
+        }
+        apply_write(m, offset, value);
+    }
     return fail ? USB_IO : USB_OK;
 }
-static void barrier(void *context) { (void)context; __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+static void barrier(void *context)
+{
+    struct model *m = context;
+    if (m->platform_mmio_bound && m->platform_mmio.barrier)
+        m->platform_mmio.barrier(m->platform_mmio.context);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
 static void delay(void *context, uint32_t us)
 {
     struct model *m = context; assert(us);
+    if (m->platform_mmio_bound && m->platform_mmio.delay_us)
+        m->platform_mmio.delay_us(m->platform_mmio.context, us);
     if (m->reset_remaining && !--m->reset_remaining) m->regs[OP / 4u] &= ~CMD_RESET;
     if (!m->reset_remaining && m->cnr_remaining && !--m->cnr_remaining)
         m->regs[(OP + 4u) / 4u] &= ~0x800u;
@@ -1818,7 +1844,8 @@ static void test_xhci_hub_enumeration_child_bot(void)
 
 static void test_xhci_host_adapter_cleanup_retention(void)
 {
-    struct model m; init_model(&m, 0); m.auto_commands = true;
+    struct model m; init_model(&m, 0);
+    m.auto_commands = true; m.auto_control = true; m.host_stack_enumeration = true;
     struct usb_xhci_controller *c = new_controller();
     assert(start(&m, c) == USB_OK);
     struct usb_xhci_host_device devices[1];
@@ -1829,29 +1856,45 @@ static void test_xhci_host_adapter_cleanup_retention(void)
                                      adapter_test_lock, adapter_test_unlock, &lock_state,
                                      NULL, NULL, 100u) == USB_OK);
     struct usb_host_ops ops = {0};
-    assert(usb_xhci_host_adapter_get_ops(&adapter, &ops) == USB_OK && !ops.now_ms);
+    assert(usb_xhci_host_adapter_get_ops(&adapter, &ops) == USB_OK && !ops.now_ms &&
+           ops.controller_stopped);
     struct usb_host_route route = {.root_port = 1u};
     m.slot = &devices[0].slot;
-    m.fail_allocate = m.allocation_attempts + 1u;
-    bool cleanup = false;
-    assert(ops.prepare_device(ops.context, &route, USB_HOST_HIGH_SPEED, &cleanup) == USB_NO_MEMORY);
-    assert(cleanup && devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_ENABLED);
+    struct usb_host_device host_device = {0};
+    m.allow_live_release = true;
+    assert(usb_host_enumerate(&host_device, &ops, &route,
+                              USB_HOST_HIGH_SPEED, 1u) == USB_OK);
+    assert(host_device.state == USB_HOST_CONFIGURED && devices[0].owned);
 
-    m.fail_allocate = 0;
+    m.allow_live_release = false;
     m.fail_access = m.accesses + 2u; /* Apply the Disable Slot doorbell, then report I/O failure. */
     m.applied_error = true;
-    assert(ops.disable_device(ops.context, &route, 0u) == USB_IO);
-    assert(devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_ENABLED &&
-           c->state == USB_XHCI_CONTROLLER_FAULTED);
+    assert(usb_host_stop_device(&host_device) == USB_IO);
+    assert(devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_ADDRESSED &&
+           c->state == USB_XHCI_CONTROLLER_FAULTED &&
+           host_device.state == USB_HOST_FAULTED && !host_device.stop_proven);
+    assert(usb_host_confirm_controller_stopped(&host_device) == USB_BUSY &&
+           !host_device.stop_proven);
+    assert(usb_host_release_stopped_device(&host_device, NULL, NULL, NULL) == USB_BUSY);
+
     m.fail_access = 0;
     m.applied_error = false;
+    m.stuck_halt = true;
+    assert(usb_xhci_controller_stop(c) == USB_TIMEOUT && !host_device.stop_proven);
+    assert(usb_host_confirm_controller_stopped(&host_device) == USB_BUSY &&
+           usb_host_release_stopped_device(&host_device, NULL, NULL, NULL) == USB_BUSY);
+    m.stuck_halt = false;
     assert(usb_xhci_controller_stop(c) == USB_OK);
+    assert(usb_host_confirm_controller_stopped(&host_device) == USB_OK &&
+           host_device.stop_proven);
+    assert(usb_host_release_stopped_device(&host_device, NULL, NULL, NULL) == USB_OK &&
+           host_device.state == USB_HOST_EMPTY);
     assert(usb_xhci_host_adapter_release_stopped(&adapter) == USB_OK);
     assert(!devices[0].owned && devices[0].slot.state == USB_XHCI_SLOT_EMPTY &&
            m.allocations == m.releases);
     assert(!lock_state.held && lock_state.acquisitions == lock_state.releases);
     free(c);
-    puts("PASS: xHCI host adapter retains applied-error slot ownership through stop");
+    puts("PASS: host state releases only after retryable controller-wide stop proof");
 }
 
 static void test_running_schedule(void)
@@ -2034,17 +2077,24 @@ struct usb_xhci_test_host {
     bool controller_started;
 };
 
-struct usb_xhci_test_host *usb_xhci_test_host_create(
+struct usb_xhci_test_host *usb_xhci_test_host_create_with_mmio(
     uint8_t *media, size_t media_size, const uint8_t keyboard_report[8],
-    const struct usb_dma_ops *dma_ops)
+    const struct usb_dma_ops *dma_ops, const struct usb_mmio *platform_mmio)
 {
     if (!media || media_size < 512u || media_size % 512u ||
         media_size / 512u > UINT32_MAX || !keyboard_report || !dma_ops ||
-        !dma_ops->qualified || !dma_ops->allocate || !dma_ops->release || !dma_ops->sync)
+        !dma_ops->qualified || !dma_ops->allocate || !dma_ops->release || !dma_ops->sync ||
+        (platform_mmio && (!platform_mmio->context || platform_mmio->size < 0x1000u ||
+                           !platform_mmio->read32 || !platform_mmio->write32 ||
+                           !platform_mmio->barrier || !platform_mmio->delay_us)))
         return NULL;
     struct usb_xhci_test_host *host = calloc(1, sizeof(*host));
     if (!host) return NULL;
     init_model(&host->model, 0);
+    if (platform_mmio) {
+        host->model.platform_mmio = *platform_mmio;
+        host->model.platform_mmio_bound = true;
+    }
     host->model.auto_commands = true;
     host->model.auto_control = true;
     host->model.auto_endpoint = true;
@@ -2083,6 +2133,14 @@ struct usb_xhci_test_host *usb_xhci_test_host_create(
     return host;
 }
 
+struct usb_xhci_test_host *usb_xhci_test_host_create(
+    uint8_t *media, size_t media_size, const uint8_t keyboard_report[8],
+    const struct usb_dma_ops *dma_ops)
+{
+    return usb_xhci_test_host_create_with_mmio(media, media_size, keyboard_report,
+                                               dma_ops, NULL);
+}
+
 int usb_xhci_test_host_get_ops(struct usb_xhci_test_host *host,
                                struct usb_host_ops *ops)
 {
@@ -2102,16 +2160,36 @@ int usb_xhci_test_host_get_counters(struct usb_xhci_test_host *host,
         .bot_read_only_commands = host->model.bot_read_only_commands,
         .bot_read_commands = host->model.bot_read_commands,
         .bot_sync_commands = host->model.bot_sync_commands,
-        .bot_write_commands = host->model.bot_write_commands
+        .bot_write_commands = host->model.bot_write_commands,
+        .controller_state = (unsigned)host->controller->state,
+        .owned_slots = host->devices[0].owned ? 1u : 0u
     };
     *out = counters;
+    return USB_OK;
+}
+
+int usb_xhci_test_host_inject_disable_slot_applied_error(struct usb_xhci_test_host *host)
+{
+    if (!host || !host->controller_started || !host->devices[0].owned ||
+        host->controller->state != USB_XHCI_CONTROLLER_RUNNING) return USB_INVALID;
+    host->model.allow_live_release = false;
+    host->model.fail_access = host->model.accesses + 2u;
+    host->model.applied_error = true;
+    return USB_OK;
+}
+
+int usb_xhci_test_host_set_stuck_halt(struct usb_xhci_test_host *host, bool stuck)
+{
+    if (!host || !host->controller_started) return USB_INVALID;
+    host->model.fail_access = 0;
+    host->model.applied_error = false;
+    host->model.stuck_halt = stuck;
     return USB_OK;
 }
 
 int usb_xhci_test_host_stop(struct usb_xhci_test_host *host)
 {
     if (!host || !host->controller_started) return USB_INVALID;
-    if (host->devices[0].owned) return USB_BUSY;
     host->model.allow_live_release = false;
     int result = usb_xhci_controller_stop(host->controller);
     if (result) return result;

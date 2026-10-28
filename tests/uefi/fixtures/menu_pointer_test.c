@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Real EDK2 ABI + production Menu.c/MenuPointer.c. GOP/Boot Services are models.
 #include "Internal.h"
+#include <Protocol/UniXNUPlatformPoll.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 EFI_GUID gEfiSimplePointerProtocolGuid = {.Data1=1}, gEfiDevicePathProtocolGuid = {.Data1=2}, gEfiSimpleTextInProtocolGuid = {.Data1=3};
+EFI_GUID gUniXNUPlatformPollProtocolGuid = {.Data1=4};
 EFI_BOOT_SERVICES *gBS; EFI_SYSTEM_TABLE *gST;
 static EFI_BOOT_SERVICES Services; static EFI_SYSTEM_TABLE System;
 enum { Width = 320, Height = 240 };
@@ -22,6 +24,10 @@ static BOOLEAN Present, Keys, HaveMouse, HaveKey, ApplyError;
 static UINTN Reads, Blts, FailBlt, Step, Steps, EntriesDrawn;
 static EFI_STATUS MouseError;
 static EFI_STATUS CreateError, RegisterError;
+static BOOLEAN ActivityPresent;
+static UINTN ActivityPolls;
+static EFI_STATUS ActivityStatus;
+static UNIXNU_PLATFORM_POLL_PROTOCOL ActivityProtocol;
 static EFI_EVENT_NOTIFY WatchNotify;
 static VOID *WatchContext;
 static BOOLEAN WatchActive, ChangeDuringRead;
@@ -55,6 +61,19 @@ static EFI_STATUS EFIAPI Protocol (EFI_HANDLE Handle, EFI_GUID *Guid, VOID **Out
   if (Guid == &gEfiDevicePathProtocolGuid && (Handle == PTR (3) || (Present && Handle == PTR (2)))) { *Out = &Path; return EFI_SUCCESS; }
   if (Guid == &gEfiSimplePointerProtocolGuid && Present && Handle == PTR (2)) { *Out = &Mouse; return EFI_SUCCESS; }
   return EFI_UNSUPPORTED;
+}
+static EFI_STATUS EFIAPI LocateProtocol (EFI_GUID *Guid, VOID *Registration, VOID **Out) {
+  (VOID)Registration;
+  if (Guid == &gUniXNUPlatformPollProtocolGuid && ActivityPresent) {
+    *Out = &ActivityProtocol;
+    return EFI_SUCCESS;
+  }
+  return EFI_NOT_FOUND;
+}
+static EFI_STATUS EFIAPI PollActivity (UNIXNU_PLATFORM_POLL_PROTOCOL *This) {
+  assert (This == &ActivityProtocol && This->Revision == UNIXNU_PLATFORM_POLL_PROTOCOL_REVISION);
+  ActivityPolls++;
+  return ActivityStatus;
 }
 static EFI_STATUS EFIAPI GetMouse (EFI_SIMPLE_POINTER_PROTOCOL *This, EFI_SIMPLE_POINTER_STATE *Out) {
   assert (This == &Mouse && Present); Reads++;
@@ -94,7 +113,7 @@ static EFI_STATUS EFIAPI Wait (UINTN Count, EFI_EVENT *Events, UINTN *Index) {
   INPUT *Input = &Script[Step++];
   State = (EFI_SIMPLE_POINTER_STATE){Input->X, Input->Y, Input->Z, Input->Down, FALSE}; HaveMouse = Input->Mouse;
   Key = (EFI_INPUT_KEY){Input->Scan, Input->Char}; HaveKey = Input->Scan != 0 || Input->Char != 0;
-  *Index = 0; return EFI_SUCCESS;
+  *Index = (Input->Scan != 0 || Input->Char != 0) ? 1 : 0; return EFI_SUCCESS;
 }
 static EFI_STATUS EFIAPI Blt (EFI_GRAPHICS_OUTPUT_PROTOCOL *This, EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Buffer,
   EFI_GRAPHICS_OUTPUT_BLT_OPERATION Op, UINTN Sx, UINTN Sy, UINTN Dx, UINTN Dy, UINTN W, UINTN H, UINTN Delta) {
@@ -128,12 +147,15 @@ VOID UniXNUUiDrawStatus (UNIXNU_UI *Ui, UINTN Line, CONST CHAR16 *Text) { (VOID)
 static void Reset (UNIXNU_UI *Ui, UNIXNU_CONFIG *Config) {
   memset (&Services, 0, sizeof Services); memset (&System, 0, sizeof System);
   gBS = &Services; gST = &System;
-  Services.LocateHandleBuffer = Locate; Services.HandleProtocol = Protocol; Services.CreateEvent = Create;
+  Services.LocateHandleBuffer = Locate; Services.HandleProtocol = Protocol; Services.LocateProtocol = LocateProtocol; Services.CreateEvent = Create;
   Services.SetTimer = Timer; Services.CloseEvent = Close; Services.WaitForEvent = Wait; Services.Stall = Stall;
   Services.RegisterProtocolNotify = Register;
   Present = Keys = TRUE; HaveMouse = HaveKey = ApplyError = FALSE; MouseError = EFI_SUCCESS;
   Reads = Blts = FailBlt = Step = Steps = EntriesDrawn = 0;
   CreateError = RegisterError = EFI_SUCCESS; WatchActive = ChangeDuringRead = FALSE; WatchNotify = NULL; WatchContext = NULL;
+  ActivityPresent = FALSE; ActivityPolls = 0; ActivityStatus = EFI_NOT_READY;
+  ActivityProtocol = (UNIXNU_PLATFORM_POLL_PROTOCOL){UNIXNU_PLATFORM_POLL_PROTOCOL_REVISION,
+    sizeof(ActivityProtocol), PollActivity};
   Mouse = (EFI_SIMPLE_POINTER_PROTOCOL){0}; Mouse.GetState = GetMouse; Mouse.Mode = &MouseMode;
   MouseMode = (EFI_SIMPLE_POINTER_MODE){8, 8, 0, TRUE, FALSE};
   Keyboard = (EFI_SIMPLE_TEXT_INPUT_PROTOCOL){0}; Keyboard.ReadKeyStroke = GetKey; Keyboard.WaitForKey = PTR (5); System.ConIn = &Keyboard;
@@ -210,11 +232,21 @@ static void PointerCases (void) {
 }
 static void MenuCases (void) {
   UNIXNU_UI Ui; UNIXNU_CONFIG Config; Reset (&Ui, &Config);
+  ActivityPresent = TRUE;
+  Queue (FALSE, FALSE, 0, 0, 0, 0, 0); Queue (FALSE, FALSE, 0, 0, 0, 0, CHAR_CARRIAGE_RETURN);
+  assert (UniXNUMenuRun (&Ui, &Config, TRUE) == 0 && ActivityPolls == 1);
+  Reset (&Ui, &Config);
   Queue (FALSE, FALSE, 0, 0, 0, SCAN_DOWN, 0); Queue (FALSE, FALSE, 0, 0, 0, 0, CHAR_CARRIAGE_RETURN);
   assert (UniXNUMenuRun (&Ui, &Config, TRUE) == 1 && Step == Steps);
   assert (!WatchActive);
   if (!FixedPcdGetBool (PcdUniXNUPointerInputEnabled)) {
-    UNIXNU_MENU_POINTER P; assert (!UniXNUMenuPointerInit (&Ui, &P) && !P.Enabled); return;
+    UNIXNU_MENU_POINTER P; assert (!UniXNUMenuPointerInit (&Ui, &P) && !P.Enabled);
+    UNIXNU_ENTRY TextEntry = {0}; TextEntry.Confirm = L"confirm?"; UINTN TextChoice = 0;
+    Reset (&Ui, &Config); ActivityPresent = TRUE;
+    Queue (FALSE, FALSE, 0, 0, 0, 0, 0);
+    Queue (FALSE, FALSE, 0, 0, 0, 0, CHAR_CARRIAGE_RETURN);
+    assert (UniXNUMenuConfirm (&Ui, &TextEntry, &TextChoice) && TextChoice == 0 && ActivityPolls == 1);
+    return;
   }
   Reset (&Ui, &Config); Queue (TRUE, FALSE, 0, -16, 0, 0, 0);
   for (UINTN I = 0; I < 20; I++) { Queue (FALSE, FALSE, 0, 0, 0, 0, 0); }

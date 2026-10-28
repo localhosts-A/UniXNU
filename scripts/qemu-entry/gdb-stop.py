@@ -29,6 +29,9 @@ parser.add_argument('--exercise-ufs-allocation', action='store_true',
                     help='Offline only: invoke actual XNU UFS-sized allocation APIs after the checkpoint; never maps UFS hardware')
 parser.add_argument('--esp', type=Path, help='Boot a read-only ESP through real QEMU UEFI instead of the raw fixture')
 parser.add_argument('--kernel', type=Path, help='Kernel whose SHA-256 identifies an ESP test')
+parser.add_argument('--qemu-xhci', action='store_true', help='Attach QEMU PCI qemu-xhci to the offline ESP boot')
+parser.add_argument('--usb-storage-image', type=Path,
+                    help='Attach this explicit disposable raw image as writable USB BOT storage')
 block_group = parser.add_mutually_exclusive_group()
 block_group.add_argument('--virtio-block-image', type=Path, help='Attach an existing sector-aligned raw file as a strictly read-only modern MMIO disk')
 block_group.add_argument('--virtio-udif-image', type=Path, help='Read an already attached read-only UDIF image through its verified host virtual media')
@@ -113,6 +116,24 @@ parser.add_argument('--gic-version', choices=['2', '3'], default='2')
 parser.add_argument('--smp', type=int, default=1, help='QEMU CPU count (offline secondary-CPU start check)')
 parser.add_argument('--boot-progress-clock-fixture', help='Own diagnostic-only clock epoch: ENTRY:EPOCH:FREQUENCY:SECONDS')
 args = parser.parse_args()
+if args.qemu_xhci and (not args.esp or not args.kernel):
+    parser.error('--qemu-xhci requires the identified ESP/kernel path')
+usb_storage_image_sha256 = None
+if args.usb_storage_image:
+    if not args.qemu_xhci:
+        parser.error('--usb-storage-image requires --qemu-xhci')
+    image = args.usb_storage_image.resolve()
+    try:
+        image.relative_to(args.fixture.resolve())
+    except ValueError:
+        parser.error('USB storage must be a disposable file inside the QEMU fixture directory')
+    if not image.is_file() or image.stat().st_size == 0 or image.stat().st_size % 512:
+        parser.error('USB storage must be a nonempty sector-aligned raw image file')
+    digest = hashlib.sha256()
+    with image.open('rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(block)
+    usb_storage_image_sha256 = digest.hexdigest()
 progress_clock=None
 if args.boot_progress_clock_fixture:
     parts=args.boot_progress_clock_fixture.split(':')
@@ -350,6 +371,14 @@ command = ['qemu-system-aarch64', '-M', f'virt,virtualization=off,secure=off,gic
            '-display', 'none', '-monitor', 'none', '-nic', 'none', '-no-reboot',
            '-serial', f'file:{fixture}/gdb-uart.log',
            '-gdb', f'tcp:127.0.0.1:{port}', '-S']
+if args.qemu_xhci:
+    command += ['-device', 'qemu-xhci,id=xhci,p2=4,p3=0']
+if args.usb_storage_image:
+    command += ['-blockdev', json.dumps({
+        'driver': 'raw', 'node-name': 'dali-usb-storage', 'read-only': False,
+        'file': {'driver': 'file', 'filename': str(args.usb_storage_image.resolve()),
+                 'read-only': False, 'locking': 'off'}}),
+        '-device', 'usb-storage,id=dali-usb-disk,bus=xhci.0,drive=dali-usb-storage']
 if args.qemu_ramfb:
     if not args.esp:
         parser.error('Actual ramfb qualification requires UEFI ESP entry')
@@ -1248,6 +1277,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                           cstring_start_event=cstring_start_event, cstring_events=cstring_events, cstring_log_exhausted=(len(cstring_events) == 128),
                           registry_string_events=registry_string_events,
                           registry_string_log_exhausted=(len(registry_string_events) == 128),
+                          qemu_xhci_attached=args.qemu_xhci,
+                          usb_storage_image_sha256=usb_storage_image_sha256,
                           boot_path='uefi-unixnu-darwinboot' if args.esp else 'raw-entry-fixture')
             if block_input:
                 report['virtio_block_input'] = block_input

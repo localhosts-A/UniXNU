@@ -113,11 +113,17 @@ class SourceMsdosfsTests(unittest.TestCase):
         self.assertEqual(FAT.kernel_localargs_support('', 'U ' + symbol), {symbol: False})
 
     def test_qemu_mount_test_requires_localargs_and_ram_provider_symbols(self):
-        helper, provider = FAT.QEMU_MOUNT_SUPPORT_SYMBOLS
-        self.assertEqual(FAT.qemu_mount_test_support('00000000 T ' + provider,
-            '00000000 private external ' + helper), {helper: True, provider: True})
-        self.assertEqual(FAT.qemu_mount_test_support('00000000 T ' + provider,
-            '00000000 private external ' + helper, 'U ' + provider), {helper: True, provider: False})
+        global_names = [name for name in FAT.QEMU_MOUNT_SUPPORT_SYMBOLS
+                        if name != '_kernel_mount_localargs']
+        defined = '\n'.join('00000000 T ' + name for name in global_names)
+        private = '00000000 private external _kernel_mount_localargs'
+        self.assertEqual(FAT.qemu_mount_test_support(defined, private),
+                         {name: True for name in FAT.QEMU_MOUNT_SUPPORT_SYMBOLS})
+        for name in FAT.QEMU_MOUNT_SUPPORT_SYMBOLS:
+            with self.subTest(missing=name):
+                missing_global = '\n'.join('00000000 T ' + item for item in global_names if item != name)
+                missing_private = '' if name == '_kernel_mount_localargs' else private
+                self.assertFalse(FAT.qemu_mount_test_support(missing_global, missing_private)[name])
 
     def test_kernel_mount_test_patch_is_gated_before_launchd(self):
         patch_path = ROOT / 'patches/xnu/zzzz-source-msdosfs-vfs-test.patch'
@@ -131,8 +137,17 @@ class SourceMsdosfsTests(unittest.TestCase):
         self.assertLess(fixture.index('#include "bpb.h"'), fixture.index('#include <msdosfsmount.h>'))
         self.assertIn('kernel_mount_localargs("msdos", mountpoint, device_path', fixture)
         self.assertIn('source_storage_fixture_copy_bsd_path', fixture)
+        self.assertIn('source_storage_fixture_copy_usb_bsd_path', fixture)
         self.assertIn('PE_parse_boot_argn("source-msdosfs-test"', fixture)
-        self.assertIn('if (mode != 1)', fixture)
+        self.assertIn('if (mode < 1 || mode > 3)', fixture)
+        self.assertIn('if (mode >= 2) checks |= 64', fixture)
+        self.assertIn('if (mode == 3)', fixture)
+        self.assertIn('vfs_unmountbyfsid(&fsid, 0, context)', fixture)
+        self.assertIn('VNOP_FSYNC(write_file, MNT_WAIT, context)', fixture)
+        self.assertIn('vn_rdwr(UIO_WRITE, write_file', fixture)
+        self.assertIn('checks |= 512', fixture)
+        self.assertIn('checks |= 32768', fixture)
+        self.assertIn('Dali USB BOT FAT32 QEMU read-only', fixture)
         self.assertIn('MSDOSFS_ARGSMAGIC', fixture)
         self.assertIn('MNT_RDONLY', fixture)
         self.assertIn('VNOP_READ(file, auio', fixture)

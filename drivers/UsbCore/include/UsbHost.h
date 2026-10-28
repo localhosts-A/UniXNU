@@ -81,6 +81,10 @@ struct usb_host_ops {
     int (*configure_hub)(void *, const struct usb_host_route *, uint8_t address,
                          enum usb_host_speed, uint8_t port_count,
                          uint16_t tt_think_time_ns, bool multi_tt);
+    /* Returns USB_OK only when the backend has a successful controller-wide
+     * stop proof. Used after per-device cleanup failed and the owner stopped
+     * the whole controller while retaining all device records. */
+    int (*controller_stopped)(void *);
 };
 
 struct usb_host_hid_interface {
@@ -211,7 +215,12 @@ int usb_host_poll_input(struct usb_host_device *, usb_key_event, usb_pointer_eve
  * The owner retains exclusive backend ownership and must not restart or reuse
  * this device while the stop proof is held. */
 int usb_host_stop_device(struct usb_host_device *);
-/* Requires a successful usb_host_stop_device(). Call after child services have
+/* Closes admission and asks the backend to verify a controller-wide stop proof.
+ * The owner calls this only after stopping the controller; failure retains all
+ * device state so stop can be retried. */
+int usb_host_confirm_controller_stopped(struct usb_host_device *);
+/* Requires a successful usb_host_stop_device() or
+ * usb_host_confirm_controller_stopped(). Call after child services have
  * detached; legacy translated-HID releases and BOT cleanup happen before host
  * state clears. The raw-report XNU HID child sends its own neutral report
  * during its earlier quiesce. */
