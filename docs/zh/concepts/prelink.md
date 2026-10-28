@@ -36,6 +36,7 @@ kernelcache 是 `KernelCache` IM4P 的 LZFSE 负载。选出 arm64 切片，并�
 7. 重写模块头和 kmod 条目。
 8. 构建稀疏预链接索引。
 9. 写出 `kernel.macho`。
+10. 使用 `scripts/verify_prelink.py`，以原生内核、原始 kernelcache、候选镜像和报告为输入执行独立复核。它会重新计算选中组件闭包和指针表目标，并检查组件 Mach-O 头、文件支持字节、kmod 地址和稀疏索引。
 
 输出保留原始组件代码不变。原生内核提供平台、CPU、存储和 defconfig 选中的设备驱动。
 
@@ -68,6 +69,8 @@ kernelcache 是 `KernelCache` IM4P 的 LZFSE 负载。选出 arm64 切片，并�
 ```
 
 报告写在输出旁边，包含组件列表、指令清单和模块入口。
+
+独立复核器会写出 `kernel.verification.json`。复核通过只证明该文件明确列出的结构检查；指令重定位完整性、源码 ABI、运行时资格和 `loadable` 仍保持 false。指针表和头结构一致本身不足以生成可刷设备镜像。
 
 ## 早期安全初始化
 
@@ -103,6 +106,8 @@ kernelcache_sha256 = "..."
 | `instruction_inventory` | PC 相对编码和内联数据 |
 | `module_entrypoints` | slide 后的模块加载地址 |
 | `early_security_initializers` | 选中的早期初始化器地址 |
+
+`verify_prelink.py` 会另写 sidecar，记录三个精确输入的哈希、闭包和指针表检查，并明确将指令、ABI、运行时及可加载资格设为 false。
 
 ## 下一步
 

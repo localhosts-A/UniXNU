@@ -310,10 +310,19 @@ class PrelinkProfileTests(unittest.TestCase):
                 logs=root / "logs",
                 option=lambda name, env: cache if name == "kernelcache" else None,
             )
+            output = root / "out/kernel/kernel.macho"
+            output.parent.mkdir(parents=True)
+            for stale in (output, output.with_suffix(".json"), output.with_suffix(".verification.json")):
+                stale.write_text("stale")
             with patch("unixnu.kernel.run") as run, patch("unixnu.kernel.log"), \
                     patch("unixnu.kernel.sha256_file", return_value="0" * 64):
                 kernel.prelink(ctx)
-            command = run.call_args.args[0]
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_suffix(".json").exists())
+            self.assertFalse(output.with_suffix(".verification.json").exists())
+            self.assertEqual(run.call_count, 2)
+            command = run.call_args_list[0].args[0]
+            verification = run.call_args_list[1].args[0]
             self.assertIn("--root", command)
             self.assertIn("com.apple.filesystems.apfs", command)
             self.assertIn("--source-interface", command)
@@ -322,6 +331,13 @@ class PrelinkProfileTests(unittest.TestCase):
             self.assertIn("com.apple.iokit.IOStorageFamily=0xfffffff0059762a8=" + STORAGE_SYMBOL + "=code", command)
             self.assertIn("--kernelcache-sha256", command)
             self.assertIn("0" * 64, command)
+            self.assertIn("scripts/verify_prelink.py", str(verification[1]))
+            self.assertIn("--native", verification)
+            self.assertIn("--original", verification)
+            self.assertIn("--candidate", verification)
+            self.assertIn("--report", verification)
+            self.assertIn("--source-interface-binding", verification)
+            self.assertIn("--output", verification)
 
     def test_source_interface_requires_a_pinned_kernelcache(self):
         with TemporaryDirectory() as temp:

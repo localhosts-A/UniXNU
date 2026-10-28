@@ -162,7 +162,7 @@ def prelink(ctx):
     output = ctx.work / 'kernel/kernel.macho'
     output.parent.mkdir(parents=True, exist_ok=True)
     # emit_prelink refuses to overwrite; a rebuild replaces the previous candidate and its record.
-    for stale in (output, output.with_suffix('.json')):
+    for stale in (output, output.with_suffix('.json'), output.with_suffix('.verification.json')):
         stale.unlink(missing_ok=True)
     command = ['python3', ctx.tree / spec['tool'], '--kernel', kernel, '--prelinked', cache,
                f'--slide={spec["slide"]}', '--output', output]
@@ -180,5 +180,19 @@ def prelink(ctx):
         command += ['--early-security-init', spec['early_security_init']]
     command += spec.get('extra_args', [])
     run(command, cwd=ctx.tree, log_file=ctx.logs / 'prelink.log')
+    verifier = ctx.tree / 'scripts/verify_prelink.py'
+    verification = output.with_suffix('.verification.json')
+    verify_command = ['python3', verifier, '--native', kernel, '--original', cache,
+                      '--candidate', output, '--report', output.with_suffix('.json'),
+                      f'--slide={spec["slide"]}', '--output', verification]
+    for root in spec.get('roots', []):
+        verify_command += ['--root', root]
+    for interface in spec.get('source_interfaces', []):
+        verify_command += ['--source-interface', interface]
+    for binding in spec.get('source_interface_bindings', []):
+        verify_command += ['--source-interface-binding',
+                           f"{binding['bundle']}={binding['donor_va']}={binding['symbol']}="
+                           f"{binding.get('target_kind', 'code')}"]
+    run(verify_command, cwd=ctx.tree, log_file=ctx.logs / 'prelink-verification.log')
     log(f'kernel: {output} sha256 {sha256_file(output)}')
     return output

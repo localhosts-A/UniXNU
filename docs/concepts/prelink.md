@@ -38,6 +38,7 @@ The kernelcache is the LZFSE payload of the `KernelCache` IM4P. The arm64 slice 
 7. Rewrite the module headers and kmod entries.
 8. Build a sparse prelink index.
 9. Write `kernel.macho`.
+10. Run `scripts/verify_prelink.py` against the native kernel, original kernelcache, emitted candidate, and report. It independently recomputes the selected closure and pointer-table targets, then checks component Mach-O headers, file-backed bytes, kmod addresses, and the sparse index.
 
 The output keeps the original component code unchanged. The native kernel supplies the platform code, the CPU code, the storage code and the device drivers selected in the defconfig.
 
@@ -69,6 +70,8 @@ The plan records every binding:
 ```
 
 The report is written next to the output. It also records the component list, the instruction inventory and the module entry points.
+
+The independent verifier writes `kernel.verification.json`. A successful structural audit proves only the checks listed in that file. It deliberately leaves instruction-relocation completeness, source ABI, runtime qualification, and `loadable` false; pointer-table and header consistency alone do not qualify a device image.
 
 ## Early security initialization
 
@@ -104,6 +107,8 @@ The prelink emits a sparse index. The kernel patch `native-4k-bootstrap-capacity
 | `instruction_inventory` | PC-relative encodings and inline data |
 | `module_entrypoints` | Module load addresses after the slide |
 | `early_security_initializers` | Selected early initializer addresses |
+
+`verify_prelink.py` writes a separate sidecar with hashes for all three exact inputs, closure and pointer-table checks, and explicit false values for instruction, ABI, runtime, and loadability qualification.
 
 ## Next steps
 
