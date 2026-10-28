@@ -57,5 +57,11 @@ class TraceRegisterMemoryRequestTests(unittest.TestCase):
                 parse_indirect_memory_request(request)
 
 
+class TraceRegisterSnapshotTests(unittest.TestCase):
+    def test_trace_events_capture_x8_for_branch_diagnostics(self):
+        source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
+        self.assertIn("'x8': hex(current[8])", source)
+
+
 if __name__ == '__main__':
     unittest.main()

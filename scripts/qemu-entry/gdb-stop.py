@@ -705,7 +705,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                 if address not in trace_remaining:
                     return False
                 event = {'pc': hex(address), 'x0': hex(current[0]),
-                         'x1': hex(current[1]), 'lr': hex(current[30]),
+                         'x1': hex(current[1]), 'x8': hex(current[8]),
+                         'lr': hex(current[30]),
                          'elapsed_seconds': round(time.monotonic() - started, 3)}
                 reads = {}
                 for request, register_index, offset, length in trace_register_reads.get(address, []):
