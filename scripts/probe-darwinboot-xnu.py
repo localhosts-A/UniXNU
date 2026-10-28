@@ -14,7 +14,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
 from unixnu.artifacts import package_efi
+from gdb_stop_support import parse_indirect_memory_request
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernel', type=Path, default=ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf')
@@ -96,6 +98,9 @@ parser.add_argument('--read-kernel-symbol', action='append', default=[], metavar
                     help='Read 1..512 bytes at an exact symbol in the current kernel artifact')
 parser.add_argument('--read-memory', action='append', default=[], metavar='HEX_ADDRESS:HEX_LENGTH',
                     help='Read 1..4096 bytes at an exact numeric kernel virtual address')
+parser.add_argument('--read-indirect-optional', action='append', default=[],
+                    metavar='HEX_POINTER_ADDRESS:HEX_OFFSET:HEX_LENGTH',
+                    help='Best-effort read through one kernel pointer field; record unreadable targets without failing the stop')
 parser.add_argument('--read-user-symbol', action='append', default=[], metavar='SYMBOL:BYTES',
                     help='Read 1..512 bytes at an exact symbol in the owned native-user image')
 parser.add_argument('--native-data-user-image',type=Path,help='Observe a fixed-address own static instrument staged through the signed original-root/Data init path; no mockfs boot')
@@ -190,6 +195,13 @@ for value in args.read_memory:
     if not 0 <= address < 1 << 64 or not 1 <= length <= 4096 or address + length > 1 << 64:
         parser.error('Numeric memory reads require a 64-bit address and 1..4096 bytes')
     requested_memory.append(f'{address:x}:{length:x}')
+requested_indirect_memory = []
+for value in args.read_indirect:
+    try:
+        address, offset, length = parse_indirect_memory_request(value)
+    except ValueError as error:
+        parser.error(str(error))
+    requested_indirect_memory.append(f'{address:x}:{offset:x}:{length:x}')
 if args.qemu_ramfb_high_resolution:
     if not args.qemu_ramfb:
         parser.error('High-resolution fixture requires the actual QEMU ramfb')
@@ -602,6 +614,8 @@ if args.qemu_firmware:
 gdb_command += process_list_args
 for request in requested_memory:
     gdb_command += ['--read-memory', request]
+for request in requested_indirect_memory:
+    gdb_command += ['--read-indirect-optional', request]
 if args.capture_scratch_data:
     if not args.data_ramdisk:
         parser.error('Scratch Data capture requires an actual Data RAM disk input')
@@ -1667,6 +1681,11 @@ if args.check_commpage:
 report['requested_kernel_symbols'] = {name: report['memory'][page_globals[name]]
                                       for name, _ in requested_kernel_symbols}
 report['requested_memory'] = {request: report['memory'][request] for request in requested_memory}
+report['requested_indirect_memory'] = {
+    request: report.get('indirect_memory', {}).get(
+        request, {'unavailable': 'GDB observer did not return this request'})
+    for request in requested_indirect_memory
+}
 (output / 'gdb-stop.json').write_text(json.dumps(report, indent=2) + '\n')
 print('PASS: real UEFI -> UniXNU -> DarwinBoot -> active native 4K XNU translation')
 print(json.dumps(report['kernel_page_globals'], indent=2))

@@ -13,7 +13,7 @@ import subprocess
 import time
 import tempfile
 import xml.etree.ElementTree as ET
-from gdb_stop_support import finish_stop_action
+from gdb_stop_support import finish_stop_action, parse_indirect_memory_request
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('address', type=lambda value: int(value, 0))
@@ -23,6 +23,9 @@ parser.add_argument('--qemu-memory-mib', type=int, choices=[512, 1024, 2048, 409
 parser.add_argument('--fixture', type=Path, default=Path('build/xnu-entry'))
 parser.add_argument('--read-memory', action='append', default=[], metavar='HEX_ADDRESS:HEX_LENGTH')
 parser.add_argument('--read-indirect', action='append', default=[], metavar='HEX_POINTER_ADDRESS:HEX_OFFSET:HEX_LENGTH')
+parser.add_argument('--read-indirect-optional', action='append', default=[],
+                    metavar='HEX_POINTER_ADDRESS:HEX_OFFSET:HEX_LENGTH',
+                    help='Best-effort bounded pointer-field read; report an unreadable target without failing the stop')
 parser.add_argument('--mac-policy-layout',type=Path,help='Compiler-derived bounded read-only registered policy observer')
 parser.add_argument('--system-registers', action='store_true')
 parser.add_argument('--live-hid-dir',type=Path,help='QEMU-only own HID mailbox at actual timer callbacks; bounded by timeout')
@@ -1523,24 +1526,46 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                         address=mac_word(ops+offset,8);row['hooks'][hook]=dict(address=hex(address),instructions=mac_read(address,64).hex() if address else '')
                     policies.append(row)
                 report['registered_mac_policies']=dict(count=count,maximum_index=maximum,entries=hex(entries),policies=policies,layout=plan,read_only=True)
-            for request in args.read_indirect:
-                address, offset, length = (int(part, 16) for part in request.split(':'))
-                if not 0 < length <= 4096:
-                    raise ValueError('Inspect at most 4096 indirect bytes per request')
+            def capture_indirect_memory(request, optional):
+                address, offset, length = parse_indirect_memory_request(request)
                 pointer = packet(f'm{address:x},8')
                 if len(pointer) != 16 or pointer.startswith('E'):
-                    raise RuntimeError(f'Cannot read pointer at {address:x}')
+                    if not optional:
+                        raise RuntimeError(f'Cannot read pointer at {address:x}')
+                    report['indirect_memory'][request] = {
+                        'unavailable': f'cannot read pointer field at {address:x}'}
+                    return
                 base = int.from_bytes(bytes.fromhex(pointer), 'little')
                 if not base:
                     # Early panics legitimately precede optional subsystem
                     # initialization. Preserve registers and other evidence.
                     report['indirect_memory'][request] = {'pointer': '0x0',
                         'unavailable': 'subsystem pointer is not initialized'}
-                    continue
-                if base + offset >= 1 << 64:
-                    raise RuntimeError('Invalid indirect memory pointer: ' + request)
-                report['indirect_memory'][request] = {'pointer': hex(base),
-                    'address': hex(base + offset), 'bytes': packet(f'm{base + offset:x},{length:x}')}
+                    return
+                target = base + offset
+                if target >= 1 << 64 or target + length > 1 << 64:
+                    if not optional:
+                        raise RuntimeError('Invalid indirect memory pointer: ' + request)
+                    report['indirect_memory'][request] = {
+                        'pointer': hex(base), 'unavailable': 'indirect target range overflows 64 bits',
+                    }
+                    return
+                contents = packet(f'm{target:x},{length:x}')
+                if contents.startswith('E') or len(contents) != length * 2:
+                    if not optional:
+                        raise RuntimeError('Cannot read indirect target: ' + request)
+                    report['indirect_memory'][request] = {
+                        'pointer': hex(base), 'address': hex(target),
+                        'unavailable': 'GDB could not read the bounded indirect target',
+                    }
+                    return
+                report['indirect_memory'][request] = {
+                    'pointer': hex(base), 'address': hex(target), 'bytes': contents,
+                }
+            for request in args.read_indirect:
+                capture_indirect_memory(request, optional=False)
+            for request in args.read_indirect_optional:
+                capture_indirect_memory(request, optional=True)
             if args.system_registers:
                 target = feature('target.xml')
                 report['system_registers'] = {}
