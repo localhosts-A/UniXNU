@@ -39,6 +39,7 @@ class VerifyPrelinkTests(unittest.TestCase):
         self.assertEqual(audit['component_headers_and_bytes_verified'], 1)
         self.assertTrue(audit['kmod_and_sparse_index_verified'])
         self.assertFalse(audit['instruction_relocation_complete'])
+        self.assertFalse(audit['register_dataflow_qualified'])
         self.assertFalse(audit['abi_qualified'])
         self.assertFalse(audit['loadable'])
 
@@ -54,12 +55,17 @@ class VerifyPrelinkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Candidate pointer'):
             verify(native, original, bytes(changed), forged, ['test.component'], 0x4000)
 
-    def test_refuses_report_claiming_unverified_loadability(self):
+    def test_refuses_report_claiming_unverified_relocation_or_loadability(self):
         native, original, candidate, report, _audit = self.candidate()
-        forged = copy.deepcopy(report)
-        forged['loadable'] = True
-        with self.assertRaisesRegex(ValueError, 'claims unverified loadability'):
-            verify(native, original, candidate, forged, ['test.component'], 0x4000)
+        for field in ('register_dataflow_qualified', 'loadable'):
+            forged = copy.deepcopy(report)
+            forged[field] = True
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'unsupported relocation'):
+                verify(native, original, candidate, forged, ['test.component'], 0x4000)
+        omitted_dataflow = copy.deepcopy(report)
+        del omitted_dataflow['register_dataflow_qualified']
+        with self.assertRaisesRegex(ValueError, 'unsupported relocation'):
+            verify(native, original, candidate, omitted_dataflow, ['test.component'], 0x4000)
 
     def test_refuses_kernelcache_or_candidate_hash_mismatch(self):
         native, original, candidate, report, _audit = self.candidate()

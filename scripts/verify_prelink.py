@@ -266,8 +266,9 @@ def verify(native_data, original_data, candidate_data, report, roots, slide,
             report.get('candidate_sha256') != candidate_digest or report.get('slide') != slide:
         raise ValueError('Prelink report hashes or slide do not identify these exact input images')
     if any(report.get(field) is not False for field in
-           ('instruction_relocation_complete', 'abi_qualified', 'runtime_qualified', 'loadable')):
-        raise ValueError('Audit verifier refuses a report that claims unverified loadability')
+           ('instruction_relocation_complete', 'register_dataflow_qualified',
+            'abi_qualified', 'runtime_qualified', 'loadable')):
+        raise ValueError('Audit verifier refuses unsupported relocation, dataflow, ABI, runtime, or loadability claims')
 
     original_metadata = _metadata(original_data, original_image)
     candidate_metadata = _metadata(candidate_data, candidate_image)
@@ -461,6 +462,7 @@ def verify(native_data, original_data, candidate_data, report, roots, slide,
         'component_headers_and_bytes_verified': len(components),
         'kmod_and_sparse_index_verified': True,
         'instruction_relocation_complete': False,
+        'register_dataflow_qualified': False,
         'abi_qualified': False,
         'runtime_qualified': False,
         'loadable': False,
