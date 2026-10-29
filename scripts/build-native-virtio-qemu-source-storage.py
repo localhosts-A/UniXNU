@@ -46,6 +46,8 @@ MULTI_SELECT_END = (
     '  uint64_t manifestBytes = verified_root_manifest_bytes;\n'
     '#endif\n'
 )
+SINGLE_UFS_AUTH = 'int native_ufs_block_authenticates(IOService *, const char *, uint8_t *) __attribute__((weak));'
+MULTI_UFS_AUTH = 'int native_ufs_block_authenticates(IOService *, const char *, uint8_t *) __attribute__((weak_import));'
 
 
 def sha256(path):
@@ -54,11 +56,13 @@ def sha256(path):
 
 def source_variant(source):
     text = Path(source).read_text()
-    if text.count(SINGLE_EXTERN) != 1 or text.count(SINGLE_SELECT) != 1 or text.count(SINGLE_SELECT_END) != 1:
+    if (text.count(SINGLE_EXTERN) != 1 or text.count(SINGLE_SELECT) != 1 or
+            text.count(SINGLE_SELECT_END) != 1 or text.count(SINGLE_UFS_AUTH) != 1):
         raise ValueError('pinned NativeVirtioBlock multi-policy source anchors changed')
     text = text.replace(SINGLE_EXTERN, MULTI_EXTERN, 1)
     text = text.replace(SINGLE_SELECT, MULTI_SELECT, 1)
     text = text.replace(SINGLE_SELECT_END, MULTI_SELECT_END, 1)
+    text = text.replace(SINGLE_UFS_AUTH, MULTI_UFS_AUTH, 1)
     if (text.count('extern const uint8_t verified_root_manifest[];') != 1 or
             text.count('extern const uint64_t verified_root_manifest_bytes;') != 1):
         raise ValueError('multi-policy source variant declaration contract changed')
@@ -152,6 +156,7 @@ def build(root=ROOT, env=None, runner=subprocess.run, check_output=subprocess.ch
         'xnu_compile_record_sha256': sha256(record_path),
         'object_sha256': sha256(obj), 'archive_sha256': sha256(archive),
         'multi_policy': True, 'source_storage_base_class': True,
+        'optional_native_ufs_auth_weak_import': True,
         'original_donor_binding_map': False, 'dali_ufs_linked': False,
         'hardware_qualified': False, 'qemu_root_profile_only': True,
     }

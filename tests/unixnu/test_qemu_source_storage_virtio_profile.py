@@ -60,6 +60,7 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
         self.assertIn('verified_root_policies[index]', text)
         self.assertIn('manifestBytes = 0;', text)
         self.assertIn('NATIVE_VERIFIED_BLOCK_MULTI_POLICY', text)
+        self.assertIn('native_ufs_block_authenticates(IOService *, const char *, uint8_t *) __attribute__((weak_import))', text)
         single_declaration = text.index('extern const uint8_t verified_root_manifest[];')
         guard = text.rfind('#if !defined(NATIVE_VERIFIED_BLOCK_MULTI_POLICY)', 0, single_declaration)
         self.assertGreaterEqual(guard, 0)
@@ -124,6 +125,7 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
                     result = builder.build(tree, self.profile(), runner=run, check_output=symbols)
                     self.assertTrue(result['multi_policy'])
                     self.assertTrue(result['source_storage_base_class'])
+                    self.assertTrue(result['optional_native_ufs_auth_weak_import'])
                     self.assertFalse(result['hardware_qualified'])
                     self.assertFalse(result['dali_ufs_linked'])
                     self.assertEqual(len(commands), 2)
@@ -137,12 +139,17 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
 
     def test_variant_rejects_unrecognized_source_drift(self):
         source = ROOT / 'drivers/NativeVirtioBlock/NativeVirtioBlock.cpp'
-        text = source.read_text().replace('verified_root_manifest_bytes;', 'verified_root_manifest_length;', 1)
+        original = source.read_text()
+        variants = [
+            original.replace('verified_root_manifest_bytes;', 'verified_root_manifest_length;', 1),
+            original.replace('__attribute__((weak));', '__attribute__((weak_import));', 1),
+        ]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'driver.cpp'
-            path.write_text(text)
-            with self.assertRaisesRegex(ValueError, 'anchors changed'):
-                source_variant(path)
+            for text in variants:
+                path.write_text(text)
+                with self.assertRaisesRegex(ValueError, 'anchors changed'):
+                    source_variant(path)
 
 
 if __name__ == '__main__':
