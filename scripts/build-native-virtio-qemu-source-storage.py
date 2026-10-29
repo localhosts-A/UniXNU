@@ -46,8 +46,28 @@ MULTI_SELECT_END = (
     '  uint64_t manifestBytes = verified_root_manifest_bytes;\n'
     '#endif\n'
 )
-SINGLE_UFS_AUTH = 'int native_ufs_block_authenticates(IOService *, const char *, uint8_t *) __attribute__((weak));'
-MULTI_UFS_AUTH = 'int native_ufs_block_authenticates(IOService *, const char *, uint8_t *) __attribute__((weak_import));'
+SINGLE_UFS_AUTH_DECL = 'int native_ufs_block_authenticates(IOService *, const char *, uint8_t *) __attribute__((weak));'
+QEMU_UFS_AUTH_DECL = (
+    '#if !defined(NATIVE_VERIFIED_BLOCK_QEMU_NO_UFS) || !NATIVE_VERIFIED_BLOCK_QEMU_NO_UFS\n'
+    + SINGLE_UFS_AUTH_DECL + '\n'
+    '#endif'
+)
+SINGLE_UFS_AUTH_CALL = (
+    '        if (native_ufs_block_authenticates) {\n'
+    '          int ufs = native_ufs_block_authenticates(provider, uuid->getCStringNoCopy(), manifestDigest);\n'
+    '          if (ufs >= 0) {\n'
+    '            authenticated = ufs == 1;\n'
+    '            native_verified_block_root_uuid_match = authenticated;\n'
+    '            native_verified_block_wrong_uuid_refused = 1;\n'
+    '            break;\n'
+    '          }\n'
+    '        }\n'
+)
+QEMU_UFS_AUTH_CALL = (
+    '#if !defined(NATIVE_VERIFIED_BLOCK_QEMU_NO_UFS) || !NATIVE_VERIFIED_BLOCK_QEMU_NO_UFS\n'
+    + SINGLE_UFS_AUTH_CALL +
+    '#endif\n'
+)
 
 
 def sha256(path):
@@ -57,12 +77,14 @@ def sha256(path):
 def source_variant(source):
     text = Path(source).read_text()
     if (text.count(SINGLE_EXTERN) != 1 or text.count(SINGLE_SELECT) != 1 or
-            text.count(SINGLE_SELECT_END) != 1 or text.count(SINGLE_UFS_AUTH) != 1):
+            text.count(SINGLE_SELECT_END) != 1 or text.count(SINGLE_UFS_AUTH_DECL) != 1 or
+            text.count(SINGLE_UFS_AUTH_CALL) != 1):
         raise ValueError('pinned NativeVirtioBlock multi-policy source anchors changed')
     text = text.replace(SINGLE_EXTERN, MULTI_EXTERN, 1)
     text = text.replace(SINGLE_SELECT, MULTI_SELECT, 1)
     text = text.replace(SINGLE_SELECT_END, MULTI_SELECT_END, 1)
-    text = text.replace(SINGLE_UFS_AUTH, MULTI_UFS_AUTH, 1)
+    text = text.replace(SINGLE_UFS_AUTH_DECL, QEMU_UFS_AUTH_DECL, 1)
+    text = text.replace(SINGLE_UFS_AUTH_CALL, QEMU_UFS_AUTH_CALL, 1)
     if (text.count('extern const uint8_t verified_root_manifest[];') != 1 or
             text.count('extern const uint64_t verified_root_manifest_bytes;') != 1):
         raise ValueError('multi-policy source variant declaration contract changed')
@@ -118,7 +140,8 @@ def build(root=ROOT, env=None, runner=subprocess.run, check_output=subprocess.ch
         record, temporary_source, obj,
         [driver, root / 'build/storage-abi/include', root / 'refer/IOStorageFamily',
          root / 'kits/VerifiedRoot/include'])
-    command.extend(['-DNATIVE_VERIFIED_BLOCK=1', '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1'])
+    command.extend(['-DNATIVE_VERIFIED_BLOCK=1', '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1',
+                    '-DNATIVE_VERIFIED_BLOCK_QEMU_NO_UFS=1'])
     result = runner(command, cwd=Path(record['directory']).resolve(),
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, timeout=180)
@@ -130,6 +153,8 @@ def build(root=ROOT, env=None, runner=subprocess.run, check_output=subprocess.ch
     undefined = check_output(['xcrun', 'nm', '-u', str(obj)], text=True)
     if any(name in undefined for name in ('_verified_root_manifest', '_verified_root_manifest_bytes')):
         raise RuntimeError('multi-policy source object imports single-policy manifest symbols')
+    if '_native_ufs_block_authenticates' in undefined:
+        raise RuntimeError('QEMU-only source object imports the disabled NativeUfs auth delegate')
     archive = output / 'libNativeVirtioBlock.a'
     archive.unlink(missing_ok=True)
     runner(['xcrun', 'ar', 'rcs', str(archive), str(obj)], check=True, timeout=60)
@@ -156,7 +181,7 @@ def build(root=ROOT, env=None, runner=subprocess.run, check_output=subprocess.ch
         'xnu_compile_record_sha256': sha256(record_path),
         'object_sha256': sha256(obj), 'archive_sha256': sha256(archive),
         'multi_policy': True, 'source_storage_base_class': True,
-        'optional_native_ufs_auth_weak_import': True,
+        'native_ufs_auth_delegate_compiled': False,
         'original_donor_binding_map': False, 'dali_ufs_linked': False,
         'hardware_qualified': False, 'qemu_root_profile_only': True,
     }

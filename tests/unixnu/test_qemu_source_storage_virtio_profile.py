@@ -60,7 +60,7 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
         self.assertIn('verified_root_policies[index]', text)
         self.assertIn('manifestBytes = 0;', text)
         self.assertIn('NATIVE_VERIFIED_BLOCK_MULTI_POLICY', text)
-        self.assertIn('native_ufs_block_authenticates(IOService *, const char *, uint8_t *) __attribute__((weak_import))', text)
+        self.assertIn('NATIVE_VERIFIED_BLOCK_QEMU_NO_UFS', text)
         single_declaration = text.index('extern const uint8_t verified_root_manifest[];')
         guard = text.rfind('#if !defined(NATIVE_VERIFIED_BLOCK_MULTI_POLICY)', 0, single_declaration)
         self.assertGreaterEqual(guard, 0)
@@ -68,8 +68,8 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
 
     def test_builder_keeps_record_cwd_and_rejects_single_policy_imports(self):
         # Synthetic compiler/nm outputs test orchestration, never an XNU build.
-        for single_policy in (False, True):
-            with self.subTest(single_policy=single_policy), tempfile.TemporaryDirectory() as directory:
+        for single_policy, ufs_import in ((False, False), (True, False), (False, True)):
+            with self.subTest(single_policy=single_policy, ufs_import=ufs_import), tempfile.TemporaryDirectory() as directory:
                 tree = Path(directory)
                 driver = tree / 'drivers/NativeVirtioBlock'
                 driver.mkdir(parents=True)
@@ -102,6 +102,7 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
                         self.assertIn('-Irelative/include', command)
                         self.assertIn('-DNATIVE_VERIFIED_BLOCK=1', command)
                         self.assertIn('-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1', command)
+                        self.assertIn('-DNATIVE_VERIFIED_BLOCK_QEMU_NO_UFS=1', command)
                         obj = Path(command[command.index('-o') + 1])
                         obj.write_bytes(struct.pack('<8I', 0xfeedfacf, 0x100000c, 0, 1, 1, 24, 0, 0) +
                                         struct.pack('<6I', 0x32, 24, 2, 0x110000, 0, 0))
@@ -114,18 +115,24 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
 
                 def symbols(command, **options):
                     if '-u' in command:
-                        return '                 U _verified_root_manifest\n' if single_policy else ' U _vr_open\n'
+                        values = [' U _vr_open']
+                        if single_policy:
+                            values.append(' U _verified_root_manifest')
+                        if ufs_import:
+                            values.append(' U _native_ufs_block_authenticates')
+                        return '\n'.join(values) + '\n'
                     return '00000000 S __ZN17NativeVirtioBlock10gMetaClassE\n'
 
-                if single_policy:
-                    with self.assertRaisesRegex(RuntimeError, 'single-policy manifest'):
+                if single_policy or ufs_import:
+                    expected = 'single-policy manifest' if single_policy else 'disabled NativeUfs'
+                    with self.assertRaisesRegex(RuntimeError, expected):
                         builder.build(tree, self.profile(), runner=run, check_output=symbols)
                     self.assertEqual(len(commands), 1)
                 else:
                     result = builder.build(tree, self.profile(), runner=run, check_output=symbols)
                     self.assertTrue(result['multi_policy'])
                     self.assertTrue(result['source_storage_base_class'])
-                    self.assertTrue(result['optional_native_ufs_auth_weak_import'])
+                    self.assertFalse(result['native_ufs_auth_delegate_compiled'])
                     self.assertFalse(result['hardware_qualified'])
                     self.assertFalse(result['dali_ufs_linked'])
                     self.assertEqual(len(commands), 2)
