@@ -35,8 +35,10 @@ parser.add_argument('--follow-display-query', action='store_true', help='After o
 parser.add_argument('--follow-original-user-plan',type=Path,help='Read-only original user-function observation with an exact cache/native-kernel-bound plan')
 parser.add_argument('--follow-display-discovery', action='store_true', help='After original launchd main, observe original IOMobileFramebuffer discovery and actual registry-derived counts')
 parser.add_argument('--inspect-current-process', action='store_true', help='Read the actual current process through compiler-qualified kernel thread/process fields')
+parser.add_argument('--process-layout-object-dir', type=Path,
+                    help='Exact XNU ios-obj directory used for compiler-qualified process/thread layout')
 parser.add_argument('--inspect-process-list', action='store_true', help='Read the actual kernel allproc list once at the final stop')
-parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved thread states for original SpringBoard/backboardd at the final stop')
+parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved thread states for original launchd, SpringBoard and backboardd at the final stop')
 parser.add_argument('--capture-scratch-data', action='store_true', help='Export the actual paused mutable Data RAM disk for offline read-only inspection')
 parser.add_argument('--inspect-mac-policies',action='store_true',help='Read real registered MAC policy names and exec/fork hooks using actual compiler layouts')
 parser.add_argument('--follow-cache-leaf', action='store_true', help='Observe the original public getuid cache entry, real SVC and genuine return')
@@ -268,12 +270,17 @@ if args.follow_original_user_plan:
     selected_plan=json.loads(display_plan.read_text())
     if selected_plan.get('mode') not in ('user-return','user-trace') or selected_plan.get('original_files_modified') is not False:
         parser.error('Require a read-only original user-return or user-trace plan')
+if args.process_layout_object_dir and not args.inspect_current_process:
+    parser.error('--process-layout-object-dir requires process inspection')
 if args.entry_process_name and not args.inspect_current_process:parser.error('Process-name selection requires --inspect-current-process')
 if args.inspect_current_process:
     if not args.prelink_report:
         parser.error('Process inspection requires the exact original-component candidate')
-    subprocess.run(['python3', ROOT / 'scripts/audit-target-display-query.py'], check=True)
-    process_plan = ROOT / 'build/display-analysis/query-plan.json'
+    layout_command = ['python3', ROOT / 'scripts/audit-target-process-layout.py']
+    if args.process_layout_object_dir:
+        layout_command += ['--objects-dir', args.process_layout_object_dir.resolve()]
+    subprocess.run(layout_command, check=True)
+    process_plan = ROOT / 'build/process-analysis/process-layout-plan.json'
 if args.follow_display_mode or args.follow_metal_device:
     if not args.follow_target_main or args.follow_display_query or args.follow_display_discovery or (args.follow_display_mode and args.follow_metal_device):parser.error('Mode return requires original main and no other display observer')
     subprocess.run(['python3',ROOT/'scripts/prepare-original-display-mode-observer.py',*(['--metal-device'] if args.follow_metal_device else [])],check=True)

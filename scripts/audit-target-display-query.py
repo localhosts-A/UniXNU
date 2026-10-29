@@ -10,6 +10,8 @@ import plistlib
 import struct
 import subprocess
 
+from process_layout import build_process_layout
+
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--discovery', action='store_true')
@@ -184,68 +186,7 @@ plan = dict(mode='query', expected_process='SpringBoard', launchd_sha256=hashlib
     query=query, query_prefix=read(query, 16).hex(), port_checkpoint=0x38, reply_checkpoint=0x54, return_checkpoint=0x460,
     main_display=0x1f491b488, displays=0x1f491b498, cas_request_id=request,
     original_files_modified=False, static_only=True)
-objects = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
-thread_object = objects / 'osfmk/DEVELOPMENT/thread.o'
-proc_object = objects / 'bsd/DEVELOPMENT/kern_proc.o'
-
-
-def member(obj, structure, name):
-    text = subprocess.check_output(['xcrun', 'dwarfdump', '--name=' + structure, '--show-children', obj], text=True)
-    match = re.search(r'DW_AT_name\s+\("' + name + r'"\)[\s\S]*?DW_AT_data_member_location\s+\((0x[0-9a-f]+)\)', text)
-    if not match:
-        raise SystemExit('Cannot derive compiler layout: ' + structure + '.' + name)
-    return int(match[1], 16)
-
-
-disassembly = subprocess.check_output(['xcrun', 'llvm-objdump', '--disassemble',
-    '--disassemble-symbols=_proc_name_address', proc_object], text=True)
-comm = re.search(r'add\s+x0, x0, #(0x[0-9a-f]+)', disassembly)
-if not comm:
-    raise SystemExit('Cannot derive actual process-name address from compiled accessor')
-plan['process_layout'] = dict(thread_ro=member(thread_object, 'thread', 't_tro'),
-    thread_user_state=member(thread_object, 'thread', 'machine')+member(thread_object, 'machine_thread', 'upcb'),
-    ro_owner=member(thread_object, 'thread_ro', 'tro_owner'), ro_proc=member(thread_object, 'thread_ro', 'tro_proc'),
-    pid=member(proc_object, 'proc', 'p_pid'), comm=int(comm[1], 16),
-    thread_object_sha256=hashlib.sha256(thread_object.read_bytes()).hexdigest(),
-    proc_object_sha256=hashlib.sha256(proc_object.read_bytes()).hexdigest())
-task_object = objects / 'osfmk/DEVELOPMENT/task.o'
-region_object = objects / 'osfmk/DEVELOPMENT/vm_shared_region.o'
-plan['process_layout'].update(ro_task=member(thread_object, 'thread_ro', 'tro_task'),
-    task_region=member(task_object, 'task', 'shared_region'), region_slide=member(region_object, 'vm_shared_region', 'sr_slide'),
-    task_object_sha256=hashlib.sha256(task_object.read_bytes()).hexdigest(),
-    region_object_sha256=hashlib.sha256(region_object.read_bytes()).hexdigest())
-plan['thread_snapshot_layout'] = dict(
-    proc_ro=member(proc_object, 'proc', 'p_proc_ro'),
-    proc_ro_owner=member(proc_object, 'proc_ro', 'pr_proc'),
-    proc_ro_task=member(proc_object, 'proc_ro', 'pr_task'),
-    task_threads=member(task_object, 'task', 'threads'),
-    task_thread_count=member(task_object, 'task', 'thread_count'),
-    thread_link=member(thread_object, 'thread', 'task_threads'),
-    thread_id=member(thread_object, 'thread', 'thread_id'),
-    continuation=member(thread_object, 'thread', 'continuation'),
-    wait_event=member(thread_object, 'thread', 'wait_event'),
-    thread_state=member(thread_object, 'thread', 'state'),
-    task_map=member(task_object, 'task', 'map'),
-    map_pmap=member(task_object, '_vm_map', 'pmap'),
-    pmap_ttep=member(objects / 'osfmk/DEVELOPMENT/pmap.o', 'pmap', 'ttep'),
-    attr_root=member(objects / 'osfmk/DEVELOPMENT/pmap.o', 'page_table_attr', 'pta_root_level'),
-    attr_shift=member(objects / 'osfmk/DEVELOPMENT/pmap.o', 'page_table_attr', 'pta_page_shift'))
-plan['process_layout']['pmap_object_sha256'] = hashlib.sha256(
-    (objects / 'osfmk/DEVELOPMENT/pmap.o').read_bytes()).hexdigest()
-native_path = objects / 'mach.development.bcm2837.unstripped.noctf'
-native_symbols = subprocess.check_output(['xcrun', 'nm', '-U', native_path], text=True)
-if '"pmap_pt_attr"' in subprocess.check_output(['xcrun', 'dwarfdump', '--name=pmap', '--show-children',
-        objects / 'osfmk/DEVELOPMENT/pmap.o'], text=True):
-    raise SystemExit('Thread stack observer requires the qualified non-parameterized pmap build')
-plan['thread_snapshot_native_pt_attr'] = int(re.search(
-    r'^([0-9a-f]+)\s+\S\s+_native_pt_attr$', native_symbols, re.M)[1], 16)
-plan['native_sha256'] = hashlib.sha256(native_path.read_bytes()).hexdigest()
-plan['process_activation'] = []
-for name in ('_shared_region_check_np', '_shared_region_map_and_slide_2_np'):
-    match = re.search(r'^([0-9a-f]+)\s+\S\s+' + name + '$', native_symbols, re.M)
-    if not match:
-        raise SystemExit('Cannot resolve actual shared-region activation function')
-    plan['process_activation'].append(int(match[1], 16))
+plan.update(build_process_layout(ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'))
 if args.discovery:
     if branch(discovery + 0x64) != 0x1ba64c6c8 or read(0x1b63dd589, len(b'IODeviceTree:/arm-io\0')) != b'IODeviceTree:/arm-io\0':
         raise SystemExit('Original discovery must look up its actual arm-io registry path')

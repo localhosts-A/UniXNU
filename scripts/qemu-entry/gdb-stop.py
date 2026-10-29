@@ -1809,7 +1809,11 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                 report['process_list'] = entries
                 if args.inspect_ui_threads:
                     from thread_snapshot import capture
-                    report['ui_thread_snapshots'] = capture(packet, entries, process_plan, report['system_registers'])
+                    try:
+                        report['ui_thread_snapshots'] = capture(
+                            packet, entries, process_plan, report['system_registers'])
+                    except (OSError, RuntimeError, ValueError) as error:
+                        report['ui_thread_snapshots'] = dict(read_only=True, error=str(error))
             if args.capture_scratch_data:
                 base_symbol, size_symbol, expected = data_capture
                 def data_word(address):
