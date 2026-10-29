@@ -1,6 +1,19 @@
 """Pure state helpers for the QEMU GDB stop observer."""
 
 
+def parse_syscall_return_mib_request(request):
+    """Parse 1..16 little-endian sysctl MIB integers as bounded hex bytes."""
+    if (not isinstance(request, str) or not 8 <= len(request) <= 128 or len(request) % 8 or
+            any(character not in '0123456789abcdefABCDEF' for character in request)):
+        raise ValueError('Syscall return MIB uses 8..128 hex characters in whole 32-bit integers')
+    return request.lower()
+
+
+def matches_sysctl_return_mib(number, mib_bytes, expected_mib):
+    """Match one exact Darwin sysctl syscall/MIB without interpreting its result."""
+    return number == 202 and isinstance(mib_bytes, str) and mib_bytes.lower() == expected_mib
+
+
 def parse_indirect_memory_request(request):
     """Parse one bounded pointer-field read, returning address, offset, length."""
     try:

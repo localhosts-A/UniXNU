@@ -13,7 +13,9 @@ import subprocess
 import time
 import tempfile
 import xml.etree.ElementTree as ET
-from gdb_stop_support import (finish_stop_action, parse_indirect_memory_request,
+from gdb_stop_support import (finish_stop_action, matches_sysctl_return_mib,
+                              parse_indirect_memory_request,
+                              parse_syscall_return_mib_request,
                               parse_trace_register_memory_request)
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -50,6 +52,8 @@ parser.add_argument('--trace-read-register-offset', action='append', default=[],
                     metavar='HEX_PC:x0-x30:HEX_OFFSET:HEX_LENGTH',
                     help='Read a bounded kernel field relative to a register at a selected trace PC')
 parser.add_argument('--syscall-number', type=int, action='append', default=[], help='Capture only these genuine syscall numbers, preserving the bounded event budget')
+parser.add_argument('--syscall-return-mib', type=parse_syscall_return_mib_request,
+                    help='Capture only the return from one exact sysctl MIB; records status and output length, never output bytes')
 parser.add_argument('--syscall-start-address', type=lambda value: int(value, 0), help='Arm syscall saved-state observation only after this actual kernel entry')
 parser.add_argument('--kext-log-address', type=lambda value: int(value, 0), help='Capture up to 256 real OSKextLog calls within the same guest deadline')
 parser.add_argument('--syscall-log-address', type=lambda value: int(value, 0), action='append', default=[],
@@ -160,6 +164,8 @@ if args.primary_start_address is not None and (not args.esp or args.primary_star
     parser.error('Primary activation requires a distinct actual ESP kernel entry')
 if args.syscall_start_address is not None and (not args.syscall_log_address or args.syscall_start_address in [args.address, *args.also_stop, *args.syscall_log_address, *args.trace_address] or args.syscall_start_address == args.cstring_start_address):
     parser.error('Delayed syscall logging requires a distinct activation entrypoint and logger')
+if args.syscall_return_mib is not None and not args.syscall_log_address:
+    parser.error('A syscall return MIB requires bounded syscall logging')
 if args.cstring_start_address is not None and (not args.cstring_log_address or args.cstring_start_address in [args.address, *args.also_stop, *args.cstring_log_address, *args.trace_address]):
     parser.error('Delayed C-string logging requires a distinct activation entrypoint and logger')
 if not 0 <= args.skip_target_hits <= 16:
@@ -520,6 +526,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
             deadline = started + args.timeout
             syscall_events = []
             syscall_start_event = None
+            syscall_return_event = None
+            syscall_return_target = None
             primary_start_event = None
             cstring_events = []
             cstring_start_event = None
@@ -572,7 +580,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                 return True
 
             def continue_observing():
-                global cstring_start_event, syscall_start_event, primary_start_event
+                global cstring_start_event, syscall_start_event, syscall_return_event
+                global syscall_return_target, primary_start_event
                 while True:
                     connection.settimeout(max(0.001, deadline - time.monotonic()))
                     timed_out = False
@@ -582,6 +591,23 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                         stopped = packet(None)
                         timed_out = True
                     current = struct.unpack_from('<33Q', bytes.fromhex(packet('g')))
+                    if not timed_out and syscall_return_target is not None and current[32] == syscall_return_target:
+                        registers = bytes.fromhex(packet('g'))
+                        pstate = struct.unpack_from('<I', registers, 264)[0]
+                        syscall_return_event.update(observed=True, pc=hex(current[32]),
+                            x0=hex(current[0]), pstate=hex(pstate), el0=(pstate & 15) == 0,
+                            syscall_error_flag=bool(pstate & (1 << 29)),
+                            elapsed_seconds=round(time.monotonic() - started, 3))
+                        oldlen_pointer = syscall_return_event.get('old_length_pointer')
+                        if oldlen_pointer:
+                            raw_length = packet(f'm{int(oldlen_pointer, 16):x},8')
+                            if len(raw_length) == 16 and not raw_length.startswith('E'):
+                                syscall_return_event['old_length_after'] = int.from_bytes(bytes.fromhex(raw_length), 'little')
+                            else:
+                                syscall_return_event['old_length_after_unavailable'] = True
+                        syscall_return_event['breakpoint_retired'] = packet(f'z1,{syscall_return_target:x},4') == 'OK'
+                        syscall_return_target = None
+                        return stopped, current, False
                     if not timed_out and live_hid and current[32]==live_hid.address:
                         connection.settimeout(3)
                         if live_hid.checkpoint(packet,time.monotonic()-started):return stopped,current,False
@@ -672,6 +698,25 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                         event['sysctl_mib_bytes'] = packet(f'm{regs[0]:x},{regs[1] * 4:x}')
                         if regs[4] and 0 < regs[5] <= 256:
                             event['sysctl_new_bytes'] = packet(f'm{regs[4]:x},{regs[5]:x}')
+                    if (args.syscall_return_mib is not None and syscall_return_event is None and
+                            matches_sysctl_return_mib(event['number'], event.get('sysctl_mib_bytes'),
+                                                      args.syscall_return_mib)):
+                        oldlen_pointer = regs[3] if 0 < regs[3] < 0xfffffff000000000 - 8 else None
+                        oldlen_before = None
+                        if oldlen_pointer is not None:
+                            raw_length = packet(f'm{oldlen_pointer:x},8')
+                            if len(raw_length) == 16 and not raw_length.startswith('E'):
+                                oldlen_before = int.from_bytes(bytes.fromhex(raw_length), 'little')
+                        syscall_return_event = {
+                            'observed': False, 'armed': False, 'arm_attempted': False,
+                            'syscall_number': event['number'], 'sysctl_mib_bytes': event['sysctl_mib_bytes'],
+                            'target': hex(regs[32]),
+                            'old_length_pointer': hex(oldlen_pointer) if oldlen_pointer is not None else None,
+                            'old_length_before': oldlen_before,
+                            'scope': 'one exact sysctl return; output bytes are never read',
+                        }
+                        if not 0 < regs[32] < 0xfffffff000000000 or regs[32] & 3:
+                            syscall_return_event['arm_error'] = 'syscall return PC is not an aligned user address'
                     if event['number'] in (4, 397) and regs[2] > 0:
                         event['write_bytes'] = packet(f'm{regs[1]:x},{min(256, regs[2]):x}')
                         event['write_truncated'] = regs[2] > 256
@@ -694,6 +739,15 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                     packet('s')
                     if len(syscall_events) < 512 and packet(f'Z1,{current[32]:x},4') != 'OK':
                         raise RuntimeError('Cannot restore syscall observation breakpoint')
+                    if (syscall_return_event is not None and not syscall_return_event['arm_attempted'] and
+                            'arm_error' not in syscall_return_event):
+                        syscall_return_event['arm_attempted'] = True
+                        target = int(syscall_return_event['target'], 16)
+                        if packet(f'Z1,{target:x},4') == 'OK':
+                            syscall_return_event['armed'] = True
+                            syscall_return_target = target
+                        else:
+                            syscall_return_event['arm_error'] = 'QEMU rejected the bounded user return breakpoint'
                     if len(syscall_events) == 512:
                         for address in set(args.syscall_log_address) - {current[32]}:
                             if packet(f'z1,{address:x},4') != 'OK':
@@ -1310,7 +1364,9 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                           entry_kernel_bytes_match=entry_kernel_bytes_match, entry_selection_limit=args.entry_max_skips, primary_start_event=primary_start_event,
                           kext_log_events=kext_log_events, kext_log_hits=kext_log_hits,
                           kext_log_capture_exhausted=(kext_log_hits == 256),
-                          syscall_number_filter=args.syscall_number, syscall_start_event=syscall_start_event, syscall_events=syscall_events, syscall_log_exhausted=(len(syscall_events) == 512),
+                          syscall_number_filter=args.syscall_number, syscall_start_event=syscall_start_event,
+                          syscall_events=syscall_events, syscall_log_exhausted=(len(syscall_events) == 512),
+                          syscall_return_checkpoint=syscall_return_event,
                           cstring_start_event=cstring_start_event, cstring_events=cstring_events, cstring_log_exhausted=(len(cstring_events) == 128),
                           registry_string_events=registry_string_events,
                           registry_string_log_exhausted=(len(registry_string_events) == 128),

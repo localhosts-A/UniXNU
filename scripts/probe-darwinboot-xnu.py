@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
 from unixnu.artifacts import package_efi
 from gdb_stop_support import (parse_indirect_memory_request,
+                              parse_syscall_return_mib_request,
                               parse_trace_register_memory_request)
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -40,6 +41,8 @@ parser.add_argument('--inspect-mac-policies',action='store_true',help='Read real
 parser.add_argument('--follow-cache-leaf', action='store_true', help='Observe the original public getuid cache entry, real SVC and genuine return')
 parser.add_argument('--log-kernel-strings-after', help='Observe bounded genuine printf format strings and stack arguments after this kernel function entry')
 parser.add_argument('--log-syscall-number', type=int, action='append', default=[], help='Keep only these actual syscall events in the bounded capture')
+parser.add_argument('--log-syscall-return-mib', type=parse_syscall_return_mib_request,
+                    help='Observe the bounded return from one exact sysctl MIB; never read its output bytes')
 parser.add_argument('--log-syscalls-after', help='Arm bounded genuine saved-syscall observation only after this actual kernel entry')
 parser.add_argument('--log-syscalls', action='store_true', help='Capture bounded real Darwin saved syscall states')
 parser.add_argument('--entry-after', help='Arm the primary observation only after this actual kernel function entry')
@@ -178,6 +181,8 @@ parser.add_argument('--missing-virtio-device', action='store_true', help='Actual
 parser.add_argument('--boot-progress-clock-fixture', type=int, choices=(31,121),
                     help='QEMU-only: advance own diagnostic epoch at its first poll; no OS/timebase/register mutation')
 args = parser.parse_args()
+if args.log_syscall_return_mib is not None and not (args.log_syscalls or args.log_syscalls_after):
+    parser.error('--log-syscall-return-mib requires bounded syscall logging')
 if args.read_user_symbol and not args.native_user:
     parser.error('--read-user-symbol requires an owned native-user image')
 def symbol_read(value):
@@ -761,6 +766,8 @@ if args.follow_cache_leaf:
                     str(leaf_record['cache_leaf_input']['success_return_offset']), '--finish-followed-checkpoint']
 for number in args.log_syscall_number:
     gdb_command += ['--syscall-number', str(number)]
+if args.log_syscall_return_mib is not None:
+    gdb_command += ['--syscall-return-mib', args.log_syscall_return_mib]
 if args.log_syscalls_after:
     match = re.search(r'^([0-9a-fA-F]+)\s+\S\s+' + re.escape(args.log_syscalls_after) + '$', symbols, re.M)
     if not match:
@@ -1507,6 +1514,8 @@ if args.follow_target_main:
             args.break_symbol = 'original-default-metal-device-return' if args.follow_metal_device else 'original-display-mode-return' if args.follow_display_mode else 'original-mobile-display-discovery-epilogue' if args.follow_display_discovery else 'original-display-query-return'
 report['stop_symbol'] = (args.break_symbol if actual_target else 'timeout-interrupt'
                          if report.get('bounded_timeout_interrupted') else fallback_symbols.get(int(report['pc'], 16), 'unexpected-stop'))
+if not actual_target and (report.get('syscall_return_checkpoint') or {}).get('observed'):
+    report['stop_symbol'] = 'syscall-return'
 if has_provider:
     report['crypto14_globals'] = {name: int.from_bytes(bytes.fromhex(report['memory'][page_globals[name]]), 'little')
                                  for name in ('_source_corecrypto14_status', '_g_crypto_funcs', '_prng_ready')}
@@ -1741,6 +1750,8 @@ else:
 if report.get('native_file_probe'):
     print('Own file syscall probe:', json.dumps(report['native_file_probe']))
 if not actual_target:
+    if report['stop_symbol'] == 'syscall-return':
+        raise SystemExit('Observed the targeted sysctl return before original launchd LC_MAIN; inspect captured state')
     raise SystemExit(f'Unexpected {report["stop_symbol"]} before {args.break_symbol}; inspect captured state')
 
 if args.native_user and args.break_symbol == '_native_user_checkpoint' and not report.get('native_user_4k_abi_observed'):

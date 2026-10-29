@@ -4,8 +4,25 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
-from gdb_stop_support import (finish_stop_action, parse_indirect_memory_request,
+from gdb_stop_support import (finish_stop_action, matches_sysctl_return_mib,
+                              parse_indirect_memory_request,
+                              parse_syscall_return_mib_request,
                               parse_trace_register_memory_request)
+
+
+class SyscallReturnMibTests(unittest.TestCase):
+    def test_parses_bounded_mib_bytes_and_matches_only_exact_sysctl(self):
+        mib = parse_syscall_return_mib_request('65000000650000007600000064000000')
+        self.assertEqual(mib, '65000000650000007600000064000000')
+        self.assertTrue(matches_sysctl_return_mib(202, mib, mib))
+        self.assertFalse(matches_sysctl_return_mib(5, mib, mib))
+        self.assertFalse(matches_sysctl_return_mib(202, '0000000003000000', mib))
+
+    def test_normalizes_case_and_rejects_partial_or_non_hex_integers(self):
+        self.assertEqual(parse_syscall_return_mib_request('65000000'), '65000000')
+        for value in ('', '6500000', '650000000', 'gg000000', '00000000' * 17):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_syscall_return_mib_request(value)
 
 
 class FinishStopActionTests(unittest.TestCase):
@@ -61,6 +78,15 @@ class TraceRegisterSnapshotTests(unittest.TestCase):
     def test_trace_events_capture_x8_for_branch_diagnostics(self):
         source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
         self.assertIn("'x8': hex(current[8])", source)
+
+    def test_syscall_return_observer_is_narrow_and_does_not_read_output_bytes(self):
+        stop_source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
+        probe_source = (ROOT / 'scripts/probe-darwinboot-xnu.py').read_text()
+        self.assertIn("gdb_command += ['--syscall-return-mib', args.log_syscall_return_mib]", probe_source)
+        self.assertIn('syscall_return_checkpoint=syscall_return_event', stop_source)
+        self.assertIn("'old_length_after'", stop_source)
+        self.assertIn('syscall_error_flag=', stop_source)
+        self.assertNotIn('sysctl_output_bytes', stop_source)
 
 
 if __name__ == '__main__':
