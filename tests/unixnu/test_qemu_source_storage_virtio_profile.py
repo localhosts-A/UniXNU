@@ -97,7 +97,7 @@ class QemuSourceStorageVirtioProfileTests(unittest.TestCase):
                 def run(command, **options):
                     commands.append(command)
                     if command[:4] == ['xcrun', '--sdk', 'iphoneos', 'clang++']:
-                        self.assertEqual(options['cwd'], compile_dir)
+                        self.assertEqual(options['cwd'], compile_dir.resolve())
                         self.assertIn('-Irelative/include', command)
                         self.assertIn('-DNATIVE_VERIFIED_BLOCK=1', command)
                         self.assertIn('-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1', command)
