@@ -153,12 +153,31 @@ if [ "${XNU_NATIVE_AES:-0}" = 1 ]; then
 else
   PERSONALITY_CFLAGS=
 fi
-if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
-  if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then
-    echo 'NativeVirtioBlock currently requires the qualified NativeAES/original-storage prelink baseline' >&2
+QEMU_SOURCE_STORAGE_VIRTIO=${XNU_NATIVE_VIRTIO_QEMU_SOURCE_STORAGE:-0}
+if [ "$QEMU_SOURCE_STORAGE_VIRTIO" != 0 ] && [ "$QEMU_SOURCE_STORAGE_VIRTIO" != 1 ]; then
+  echo 'XNU_NATIVE_VIRTIO_QEMU_SOURCE_STORAGE must be 0 or 1' >&2
+  exit 1
+fi
+if [ "$QEMU_SOURCE_STORAGE_VIRTIO" = 1 ]; then
+  if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" != 1 ] || [ "${XNU_NATIVE_AES:-0}" != 0 ] || \
+     [ "${XNU_SOURCE_STORAGE_FAMILY:-0}" != 1 ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ] || \
+     [ "$CRYPTO_BOOTSTRAP_MODE" != source ] || [ "${XNU_NATIVE_UFS:-0}" != 0 ] || \
+     [ "${XNU_NATIVE_RAM_BLOCK:-0}" != 0 ] || [ "${XNU_VERIFIED_ROOT_PROVIDER:-0}" != 1 ] || \
+     [ "${XNU_OWNER_ROOT_AUDIT:-0}" != 1 ] || [ "${XNU_OWNER_ROOT_TRUST:-0}" != 1 ] || \
+     [ "${XNU_TRUST_CACHE_RUNTIME:-0}" != 1 ] || [ "${XNU_SOURCE_MOCKFS:-0}" != 0 ] || \
+     [ "${XNU_SOURCE_ENTITLEMENT_FREE:-0}" != 0 ]; then
+    echo 'QEMU source-storage Virtio requires source IOStorage/crypto, signed owner-root/trust-cache, and no physical UFS, RAM/mockfs, entitlement-free fixture or NativeAES' >&2
     exit 1
   fi
+elif [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ] && [ "${XNU_NATIVE_AES:-0}" != 1 ]; then
+  echo 'NativeVirtioBlock requires the qualified NativeAES/original-storage prelink baseline' >&2
+  exit 1
+fi
+if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
   PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_NATIVE_VIRTIO_BLOCK=1"
+  if [ "$QEMU_SOURCE_STORAGE_VIRTIO" = 1 ]; then
+    PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_NATIVE_VIRTIO_QEMU_SOURCE_STORAGE=1"
+  fi
 fi
 NATIVE_RAM_BLOCK=${XNU_NATIVE_RAM_BLOCK:-0}
 if [ "$NATIVE_RAM_BLOCK" != 0 ] && [ "$NATIVE_RAM_BLOCK" != 1 ]; then
@@ -768,6 +787,7 @@ PY_BINDINGS
 fi
 python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-aes/libNativeAES.a}" \
   "${XNU_NATIVE_VIRTIO_BLOCK:-0}" "${XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE:-$ROOT/build/native-virtio-block/libNativeVirtioBlock.a}" \
+  "$QEMU_SOURCE_STORAGE_VIRTIO" "${XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE:-$ROOT/build/native-virtio-block/libNativeVirtioBlock.a}" \
   "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:-$ROOT/build/verified-root-xnu/libVerifiedRootProbe.a}" \
   "$NATIVE_RAM_BLOCK" "$ROOT/build/native-ram-block/libNativeRamBlock.a" \
   "$ADRENO_FIRMWARE_PROBE" "$ROOT/build/adreno-firmware-probe/libAdrenoFirmwareProbe.a" \
