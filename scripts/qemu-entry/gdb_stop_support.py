@@ -14,6 +14,21 @@ def matches_sysctl_return_mib(number, mib_bytes, expected_mib):
     return number == 202 and isinstance(mib_bytes, str) and mib_bytes.lower() == expected_mib
 
 
+def validate_commpage_user64_shifts(indirect_memory, requests):
+    """Require both captured 64-bit commpage page shifts to match native 4K."""
+    shifts = {}
+    for name, request in requests.items():
+        capture = indirect_memory.get(request)
+        raw = capture.get('bytes') if isinstance(capture, dict) else None
+        if not isinstance(raw, str) or len(raw) != 2 or any(c not in '0123456789abcdefABCDEF' for c in raw):
+            shifts[name] = None
+        else:
+            shifts[name] = int(raw, 16)
+    if len(shifts) != 2 or any(shift != 12 for shift in shifts.values()):
+        raise ValueError(f'Incorrect native user ABI: {shifts}')
+    return shifts
+
+
 def parse_indirect_memory_request(request):
     """Parse one bounded pointer-field read, returning address, offset, length."""
     try:

@@ -18,7 +18,8 @@ sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
 from unixnu.artifacts import package_efi
 from gdb_stop_support import (parse_indirect_memory_request,
                               parse_syscall_return_mib_request,
-                              parse_trace_register_memory_request)
+                              parse_trace_register_memory_request,
+                              validate_commpage_user64_shifts)
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernel', type=Path, default=ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf')
@@ -1277,7 +1278,7 @@ if args.check_commpage:
             raise SystemExit(f'Cannot resolve {name}')
         request = f'{match[1]}:25:1'
         commpage_requests[name] = request
-        gdb_command.extend(['--read-indirect', request])
+        gdb_command.extend(['--read-indirect-optional', request])
 if args.live_hid_dir:gdb_command.extend(['--live-hid-dir',str(args.live_hid_dir.resolve())])
 subprocess.run(gdb_command, check=True)
 report = json.loads((output / 'gdb-stop.json').read_text())
@@ -1714,10 +1715,11 @@ if args.native_user:
             values = struct.unpack('<5Q', bytes.fromhex(report['native_user_memory']['_apfs_mount_results']))
             report['native_apfs_data_mount'] = dict(zip(('mkdir_result', 'mkdir_nzcv', 'mount_result', 'mount_nzcv', 'stage'), values))
 if args.check_commpage:
-    report['commpage_user64_shifts'] = {name: int(report['indirect_memory'][request]['bytes'], 16)
-                                        for name, request in commpage_requests.items()}
-    if any(shift != 12 for shift in report['commpage_user64_shifts'].values()):
-        raise SystemExit(f"Incorrect native user ABI: {report['commpage_user64_shifts']}")
+    try:
+        report['commpage_user64_shifts'] = validate_commpage_user64_shifts(
+            report.get('indirect_memory', {}), commpage_requests)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 report['requested_kernel_symbols'] = {name: report['memory'][page_globals[name]]
                                       for name, _ in requested_kernel_symbols}
 report['requested_memory'] = {request: report['memory'][request] for request in requested_memory}

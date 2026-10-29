@@ -7,7 +7,8 @@ sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
 from gdb_stop_support import (finish_stop_action, matches_sysctl_return_mib,
                               parse_indirect_memory_request,
                               parse_syscall_return_mib_request,
-                              parse_trace_register_memory_request)
+                              parse_trace_register_memory_request,
+                              validate_commpage_user64_shifts)
 
 
 class SyscallReturnMibTests(unittest.TestCase):
@@ -23,6 +24,29 @@ class SyscallReturnMibTests(unittest.TestCase):
         for value in ('', '6500000', '650000000', 'gg000000', '00000000' * 17):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_syscall_return_mib_request(value)
+
+
+class CommpageShiftTests(unittest.TestCase):
+    def test_requires_both_actual_4k_commpage_shifts(self):
+        requests = {'rw': 'rw', 'ro': 'ro'}
+        capture = {'rw': {'bytes': '0c'}, 'ro': {'bytes': '0c'}}
+        self.assertEqual(validate_commpage_user64_shifts(capture, requests), {'rw': 12, 'ro': 12})
+
+    def test_unavailable_or_wrong_shifts_remain_a_strict_failure(self):
+        requests = {'rw': 'rw', 'ro': 'ro'}
+        cases = (
+            {'rw': {'unavailable': 'cannot read pointer field'}, 'ro': {'bytes': '0c'}},
+            {'rw': {'bytes': '10'}, 'ro': {'bytes': '0c'}},
+            {'rw': {'bytes': '0c'}},
+        )
+        for capture in cases:
+            with self.subTest(capture=capture), self.assertRaisesRegex(ValueError, 'Incorrect native user ABI'):
+                validate_commpage_user64_shifts(capture, requests)
+
+    def test_probe_uses_optional_gdb_reads_but_keeps_the_shift_gate(self):
+        source = (ROOT / 'scripts/probe-darwinboot-xnu.py').read_text()
+        self.assertIn("gdb_command.extend(['--read-indirect-optional', request])", source)
+        self.assertIn('validate_commpage_user64_shifts(', source)
 
 
 class FinishStopActionTests(unittest.TestCase):
