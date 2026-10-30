@@ -14,7 +14,7 @@ class ProcessLayoutTests(unittest.TestCase):
     def test_member_uses_compiler_record_and_rejects_missing_fields(self):
         objects = Path('/tmp/process-layout-fixture')
         output = ('0x0001: DW_TAG_structure_type\n  DW_AT_name ("proc")\n'
-                  '0x0002: DW_TAG_member\n  DW_AT_name ("p_pid")\n'
+                  '0x0002:   DW_TAG_member\n  DW_AT_name ("p_pid")\n'
                   '  DW_AT_data_member_location (0x60)')
         with patch('process_layout.subprocess.check_output', return_value=output) as run:
             self.assertEqual(member(objects, 'proc', 'p_pid'), 0x60)
@@ -23,12 +23,12 @@ class ProcessLayoutTests(unittest.TestCase):
                 self.assertRaisesRegex(SystemExit, 'Cannot derive compiler layout: proc.p_pid'):
             member(objects, 'proc', 'p_pid')
         first_member = ('0x0001: DW_TAG_structure_type\n  DW_AT_name ("thread_kernel_state")\n'
-                        '0x0002: DW_TAG_member\n  DW_AT_name ("machine")')
+                        '0x0002:   DW_TAG_member\n  DW_AT_name ("machine")')
         with patch('process_layout.subprocess.check_output', return_value=first_member):
             self.assertEqual(member(objects, 'thread_kernel_state', 'machine'), 0)
-        nonfirst_member = (first_member.replace('0x0002: DW_TAG_member\n  DW_AT_name ("machine")',
-                          '0x0002: DW_TAG_member\n  DW_AT_name ("padding")\n  DW_AT_data_member_location (0x8)\n'
-                          '0x0003: DW_TAG_member\n  DW_AT_name ("machine")'))
+        nonfirst_member = (first_member.replace('0x0002:   DW_TAG_member\n  DW_AT_name ("machine")',
+                          '0x0002:   DW_TAG_member\n  DW_AT_name ("padding")\n  DW_AT_data_member_location (0x8)\n'
+                          '0x0003:   DW_TAG_member\n  DW_AT_name ("machine")'))
         with patch('process_layout.subprocess.check_output', return_value=nonfirst_member), \
                 self.assertRaisesRegex(SystemExit, 'Cannot derive compiler member location: thread_kernel_state.machine'):
             member(objects, 'thread_kernel_state', 'machine')
@@ -81,7 +81,7 @@ class ProcessLayoutTests(unittest.TestCase):
                     if size:
                         lines.append(f'  DW_AT_byte_size (0x{size:x})')
                     for index, (name, offset) in enumerate(fields[type_name].items(), 2):
-                        lines += [f'0x{index:04x}: DW_TAG_member', f'  DW_AT_name ("{name}")']
+                        lines += [f'0x{index:04x}:   DW_TAG_member', f'  DW_AT_name ("{name}")']
                         if not (type_name == 'thread_kernel_state' and name == 'machine'):
                             lines.append(f'  DW_AT_data_member_location (0x{offset:x})')
                     return '\n'.join(lines)

@@ -6,9 +6,11 @@ import subprocess
 
 
 def dwarf_blocks(output):
-    headers = list(re.finditer(r'(?m)^[ \t]*0x[0-9a-fA-F]+:[ \t]*(DW_TAG_[A-Za-z_]+)', output))
-    return [(match[1], output[match.start():headers[index + 1].start() if index + 1 < len(headers)
-             else len(output)]) for index, match in enumerate(headers)]
+    headers = list(re.finditer(
+        r'(?m)^[ \t]*0x[0-9a-fA-F]+:([ \t]*)(DW_TAG_[A-Za-z_]+)', output))
+    return [(match[2], len(match[1]), output[match.start():headers[index + 1].start()
+             if index + 1 < len(headers) else len(output)])
+            for index, match in enumerate(headers)]
 
 
 def has_name(block, name):
@@ -37,22 +39,29 @@ def member(objects, structure, name):
     output = subprocess.check_output(
         ['xcrun', 'dwarfdump', '--name=' + structure, '--show-children', obj], text=True)
     blocks = dwarf_blocks(output)
-    targets = [(index, block) for index, (tag, block) in enumerate(blocks)
-               if tag == 'DW_TAG_member' and has_name(block, name)]
+    targets = []
+    for index, (tag, depth, block) in enumerate(blocks):
+        if tag != 'DW_TAG_member' or not has_name(block, name):
+            continue
+        parent = next((parent for parent in range(index - 1, -1, -1)
+                       if blocks[parent][0] in ('DW_TAG_structure_type', 'DW_TAG_union_type') and
+                       blocks[parent][1] < depth), None)
+        if parent is not None and has_name(blocks[parent][2], structure):
+            targets.append((index, parent, block))
     if not targets:
         raise SystemExit('Cannot derive compiler layout: ' + structure + '.' + name)
+
     offsets = []
-    for index, block in targets:
+    for index, parent, block in targets:
         match = re.search(r'DW_AT_data_member_location\s+\((0x[0-9a-fA-F]+|[0-9]+)\)', block)
         if match:
             offsets.append(int(match[1], 0))
             continue
         if structure == 'thread_kernel_state' and name == 'machine':
-            roots = [root for root, (tag, body) in enumerate(blocks[:index])
-                     if tag == 'DW_TAG_structure_type' and has_name(body, structure)]
-            root = roots[-1] if roots else None
-            first_member = next((child for child in range(root + 1, index + 1)
-                                 if blocks[child][0] == 'DW_TAG_member'), None) if root is not None else None
+            parent_depth = blocks[parent][1]
+            first_member = next((child for child in range(parent + 1, len(blocks))
+                                 if blocks[child][1] <= parent_depth or
+                                 (blocks[child][0] == 'DW_TAG_member' and blocks[child][1] == depth)), None)
             if first_member == index:
                 offsets.append(0)
                 continue
@@ -70,7 +79,7 @@ def type_size(objects, structure):
     output = subprocess.check_output(
         ['xcrun', 'dwarfdump', '--name=' + structure, '--show-children', obj], text=True)
     sizes = []
-    for tag, block in dwarf_blocks(output):
+    for tag, _, block in dwarf_blocks(output):
         if tag not in ('DW_TAG_structure_type', 'DW_TAG_union_type') or not has_name(block, structure):
             continue
         match = re.search(r'DW_AT_byte_size\s+\((0x[0-9a-fA-F]+|[0-9]+)\)', block)
