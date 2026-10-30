@@ -98,7 +98,19 @@ def select_processes(processes, include_kernel_task=False):
     return selected[:16]
 
 
-def capture(packet, processes, plan, registers, include_kernel_task=False):
+def should_capture_kernel_context(process, thread_index, include_kernel_task_first_context=False):
+    if process.get('pid') == 1 and process.get('name') == 'launchd':
+        return True
+    return (include_kernel_task_first_context and thread_index == 0 and
+            process.get('pid') == 0 and process.get('name') == 'kernel_task')
+
+
+def capture(packet, processes, plan, registers, include_kernel_task=False,
+            include_kernel_task_first_context=False):
+    if not isinstance(include_kernel_task_first_context, bool):
+        raise ValueError('Kernel-task context inclusion must be explicit')
+    if include_kernel_task_first_context and not include_kernel_task:
+        raise ValueError('Kernel-task context capture requires kernel-task thread enumeration')
     layout = plan['thread_snapshot_layout']
     common = plan['process_layout']
     if any(not isinstance(v, int) or not 0 <= v < 65536 for v in layout.values()):
@@ -129,7 +141,9 @@ def capture(packet, processes, plan, registers, include_kernel_task=False):
     selected = select_processes(processes, include_kernel_task)
     kernel_stack_size = None
     kernel_stack_size_error = None
-    if any(p.get('pid') == 1 and p.get('name') == 'launchd' for p in selected):
+    if (any(p.get('pid') == 1 and p.get('name') == 'launchd' for p in selected) or
+            (include_kernel_task_first_context and any(
+                p.get('pid') == 0 and p.get('name') == 'kernel_task' for p in selected))):
         try:
             kernel_stack_size = word(stack_size_address)
             if (kernel_stack_size < KERNEL_PAGE_BYTES or kernel_stack_size > KERNEL_STACK_MAX_BYTES or
@@ -173,7 +187,8 @@ def capture(packet, processes, plan, registers, include_kernel_task=False):
                             continuation=hex(word(thread + layout['continuation'])),
                             wait_event=hex(word(thread + layout['wait_event'])), saved_state=hex(state))
                 row['threads'].append(item)
-                if proc.get('pid') == 1 and proc.get('name') == 'launchd':
+                if should_capture_kernel_context(
+                        proc, len(row['threads']) - 1, include_kernel_task_first_context):
                     if kernel_stack_size_error:
                         item['saved_kernel_context_error'] = kernel_stack_size_error
                     else:
@@ -274,9 +289,12 @@ def capture(packet, processes, plan, registers, include_kernel_task=False):
                 },
                 kernel_stack_size_symbol=hex(stack_size_address),
                 kernel_stack_size_bytes=kernel_stack_size, kernel_stack_size_error=kernel_stack_size_error,
-                kernel_context_process_limit=1, kernel_context_frames_per_thread_limit=KERNEL_FRAME_LIMIT,
-                kernel_context_scope='candidate launchd saved Switch_context registers; not a wait-cause proof',
+                kernel_context_process_limit=1 + int(include_kernel_task_first_context),
+                kernel_context_frames_per_thread_limit=KERNEL_FRAME_LIMIT,
+                kernel_context_scope=('candidate launchd context plus at most the first task-owned PID 0 '
+                                      'kernel_task thread when explicitly opted in; LR/FP do not establish a wait cause'),
                 kernel_task_threads_included=include_kernel_task,
+                kernel_task_first_context_included=include_kernel_task_first_context,
                 process_limit=16, threads_per_process_limit=64, frames_per_thread_limit=32,
                 stack_window_bytes=65536, stack_source='actual-native-4k-task-tables',
                 selected_processes=len(selected), processes=results)

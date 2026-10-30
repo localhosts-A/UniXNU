@@ -81,6 +81,8 @@ parser.add_argument('--proc-list-max', type=int, default=128, help='Bounded numb
 parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved user state and launchd kernel switch context through compiler-qualified fields')
 parser.add_argument('--include-kernel-task-threads', action='store_true',
                     help='Include at most 64 PID 0 task-owned thread records in the bounded snapshot')
+parser.add_argument('--include-kernel-task-first-context', action='store_true',
+                    help='Capture a bounded context only for the first validated PID 0 thread')
 parser.add_argument('--capture-scratch-data', metavar='BASE_SYMBOL:SIZE_SYMBOL:EXPECTED_BYTES',
                     help='Read the exact native mutable Data RAM range into an offline snapshot; never flush or modify guest state')
 
@@ -158,6 +160,10 @@ if args.inspect_ui_threads and (not process_plan or not process_plan.get('thread
     parser.error('UI thread snapshots require compiler-qualified layouts and the process list')
 if args.include_kernel_task_threads and not args.inspect_ui_threads:
     parser.error('Kernel-task thread enumeration requires --inspect-ui-threads')
+if args.include_kernel_task_first_context and not args.include_kernel_task_threads:
+    parser.error('--include-kernel-task-first-context requires --include-kernel-task-threads')
+if args.include_kernel_task_first_context and not args.inspect_ui_threads:
+    parser.error('--include-kernel-task-first-context requires --inspect-ui-threads')
 if process_plan and not args.system_registers:
     parser.error('Actual process inspection requires real system-register observation')
 if args.qemu_accel == 'hvf' and (platform.system() != 'Darwin' or platform.machine() != 'arm64' or not args.esp):
@@ -1822,7 +1828,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                     try:
                         report['ui_thread_snapshots'] = capture(
                             packet, entries, process_plan, report['system_registers'],
-                            include_kernel_task=args.include_kernel_task_threads)
+                            include_kernel_task=args.include_kernel_task_threads,
+                            include_kernel_task_first_context=args.include_kernel_task_first_context)
                     except (OSError, RuntimeError, ValueError) as error:
                         report['ui_thread_snapshots'] = dict(read_only=True, error=str(error))
             if args.capture_scratch_data:

@@ -41,6 +41,8 @@ parser.add_argument('--inspect-process-list', action='store_true', help='Read th
 parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved user state and a compiler-qualified launchd kernel switch context at the final stop')
 parser.add_argument('--include-kernel-task-threads', action='store_true',
                     help='Include at most 64 PID 0 task-owned thread records in the final snapshot')
+parser.add_argument('--include-kernel-task-first-context', action='store_true',
+                    help='Capture a bounded context only for the first validated PID 0 thread')
 parser.add_argument('--capture-scratch-data', action='store_true', help='Export the actual paused mutable Data RAM disk for offline read-only inspection')
 parser.add_argument('--inspect-mac-policies',action='store_true',help='Read real registered MAC policy names and exec/fork hooks using actual compiler layouts')
 parser.add_argument('--follow-cache-leaf', action='store_true', help='Observe the original public getuid cache entry, real SVC and genuine return')
@@ -241,6 +243,10 @@ if args.inspect_ui_threads:
     args.inspect_process_list = True
 if args.include_kernel_task_threads and not args.inspect_ui_threads:
     parser.error('--include-kernel-task-threads requires --inspect-ui-threads')
+if args.include_kernel_task_first_context and not args.include_kernel_task_threads:
+    parser.error('--include-kernel-task-first-context requires --include-kernel-task-threads')
+if args.include_kernel_task_first_context and not args.inspect_ui_threads:
+    parser.error('--include-kernel-task-first-context requires --inspect-ui-threads')
 if args.boot_progress_clock_fixture:
     if args.break_symbol != '_boot_progress_stop_checkpoint' or args.qemu_accel != 'tcg':
         parser.error('Clock fixture requires TCG and the diagnostic stop checkpoint')
@@ -718,6 +724,8 @@ if args.inspect_ui_threads:
     gdb_command.append('--inspect-ui-threads')
     if args.include_kernel_task_threads:
         gdb_command.append('--include-kernel-task-threads')
+        if args.include_kernel_task_first_context:
+            gdb_command.append('--include-kernel-task-first-context')
 iogpu_component = None
 if args.load_iogpu and 'com.apple.iokit.IOGPUFamily' in prelink_report['components']:
     sys.path.insert(0, str(ROOT / 'kits/NativePrelink'))

@@ -5,7 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
-from thread_snapshot import capture_kernel_context, select_processes
+from thread_snapshot import (capture, capture_kernel_context, select_processes,
+                             should_capture_kernel_context)
 
 
 class Memory:
@@ -45,6 +46,22 @@ class ThreadSnapshotTests(unittest.TestCase):
         bounded = select_processes(many, True)
         self.assertEqual(len(bounded), 16)
         self.assertEqual((bounded[0]['pid'], bounded[0]['name']), (0, 'kernel_task'))
+
+    def test_kernel_task_context_capture_is_explicit_and_first_thread_bounded(self):
+        kernel_task = {'pid': 0, 'name': 'kernel_task'}
+        launchd = {'pid': 1, 'name': 'launchd'}
+        other = {'pid': 4, 'name': 'backboardd'}
+        self.assertTrue(should_capture_kernel_context(launchd, 5))
+        self.assertFalse(should_capture_kernel_context(kernel_task, 0))
+        self.assertTrue(should_capture_kernel_context(kernel_task, 0, True))
+        self.assertFalse(should_capture_kernel_context(kernel_task, 1, True))
+        self.assertFalse(should_capture_kernel_context(other, 0, True))
+
+    def test_kernel_task_context_requires_explicit_thread_enumeration(self):
+        with self.assertRaisesRegex(ValueError, 'must be explicit'):
+            capture(None, [], {}, {}, include_kernel_task_first_context=1)
+        with self.assertRaisesRegex(ValueError, 'requires kernel-task thread enumeration'):
+            capture(None, [], {}, {}, include_kernel_task_first_context=True)
 
     base = 0xfffffff100000000
     thread = 0xfffffff200000000

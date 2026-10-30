@@ -120,10 +120,18 @@ class TraceRegisterSnapshotTests(unittest.TestCase):
         stop_source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
         probe_source = (ROOT / 'scripts/probe-darwinboot-xnu.py').read_text()
         self.assertIn("parser.add_argument('--include-kernel-task-threads'", stop_source)
+        self.assertIn("parser.add_argument('--include-kernel-task-first-context'", stop_source)
         self.assertIn('include_kernel_task=args.include_kernel_task_threads', stop_source)
+        self.assertIn('include_kernel_task_first_context=args.include_kernel_task_first_context', stop_source)
+        self.assertIn('args.include_kernel_task_first_context and not args.include_kernel_task_threads',
+                      stop_source)
         self.assertIn("parser.add_argument('--include-kernel-task-threads'", probe_source)
+        self.assertIn("parser.add_argument('--include-kernel-task-first-context'", probe_source)
         self.assertIn('args.include_kernel_task_threads and not args.inspect_ui_threads', probe_source)
+        self.assertIn('args.include_kernel_task_first_context and not args.include_kernel_task_threads',
+                      probe_source)
         self.assertIn("gdb_command.append('--include-kernel-task-threads')", probe_source)
+        self.assertIn("gdb_command.append('--include-kernel-task-first-context')", probe_source)
 
     def test_syscall_return_observer_is_narrow_and_does_not_read_output_bytes(self):
         stop_source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
