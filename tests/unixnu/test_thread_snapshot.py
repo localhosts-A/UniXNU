@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts/qemu-entry'))
-from thread_snapshot import capture_kernel_context
+from thread_snapshot import capture_kernel_context, select_processes
 
 
 class Memory:
@@ -29,6 +29,23 @@ class Memory:
 
 
 class ThreadSnapshotTests(unittest.TestCase):
+    def test_kernel_task_thread_enumeration_is_explicit_and_pid_bound(self):
+        processes = [
+            {'pid': 1, 'name': 'launchd'},
+            {'pid': 0, 'name': 'kernel_task'},
+            {'pid': 9, 'name': 'kernel_task'},
+            {'pid': 2, 'name': 'SpringBoard'},
+        ]
+        self.assertEqual([p['name'] for p in select_processes(processes)],
+                         ['launchd', 'SpringBoard'])
+        self.assertEqual([(p['pid'], p['name']) for p in select_processes(processes, True)],
+                         [(0, 'kernel_task'), (1, 'launchd'), (2, 'SpringBoard')])
+        many = [{'pid': pid, 'name': 'SpringBoard'} for pid in range(2, 20)]
+        many.append({'pid': 0, 'name': 'kernel_task'})
+        bounded = select_processes(many, True)
+        self.assertEqual(len(bounded), 16)
+        self.assertEqual((bounded[0]['pid'], bounded[0]['name']), (0, 'kernel_task'))
+
     base = 0xfffffff100000000
     thread = 0xfffffff200000000
     stack_size = 0x4000

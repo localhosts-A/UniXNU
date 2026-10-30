@@ -79,6 +79,8 @@ parser.add_argument('--proc-comm-offset', type=int, default=1468, help='Byte off
 parser.add_argument('--proc-stat-offset', type=int, default=100, help='Byte offset of p_stat')
 parser.add_argument('--proc-list-max', type=int, default=128, help='Bounded number of actual process entries')
 parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved user state and launchd kernel switch context through compiler-qualified fields')
+parser.add_argument('--include-kernel-task-threads', action='store_true',
+                    help='Include at most 64 PID 0 task-owned thread records in the bounded snapshot')
 parser.add_argument('--capture-scratch-data', metavar='BASE_SYMBOL:SIZE_SYMBOL:EXPECTED_BYTES',
                     help='Read the exact native mutable Data RAM range into an offline snapshot; never flush or modify guest state')
 
@@ -154,6 +156,8 @@ if args.main_cache_query_plan:
 process_plan = json.loads(args.process_layout_plan.read_text()) if args.process_layout_plan else cache_query_plan
 if args.inspect_ui_threads and (not process_plan or not process_plan.get('thread_snapshot_layout') or args.allproc_address is None):
     parser.error('UI thread snapshots require compiler-qualified layouts and the process list')
+if args.include_kernel_task_threads and not args.inspect_ui_threads:
+    parser.error('Kernel-task thread enumeration requires --inspect-ui-threads')
 if process_plan and not args.system_registers:
     parser.error('Actual process inspection requires real system-register observation')
 if args.qemu_accel == 'hvf' and (platform.system() != 'Darwin' or platform.machine() != 'arm64' or not args.esp):
@@ -1817,7 +1821,8 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                     from thread_snapshot import capture
                     try:
                         report['ui_thread_snapshots'] = capture(
-                            packet, entries, process_plan, report['system_registers'])
+                            packet, entries, process_plan, report['system_registers'],
+                            include_kernel_task=args.include_kernel_task_threads)
                     except (OSError, RuntimeError, ValueError) as error:
                         report['ui_thread_snapshots'] = dict(read_only=True, error=str(error))
             if args.capture_scratch_data:

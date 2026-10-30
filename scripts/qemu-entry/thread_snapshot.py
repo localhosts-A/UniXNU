@@ -78,7 +78,27 @@ def capture_kernel_context(read, thread, layout, stack_size):
     return result
 
 
-def capture(packet, processes, plan, registers):
+SNAPSHOT_PROCESS_NAMES = (
+    'PreBoard', 'Setup', 'SpringBoard', 'backboardd', 'lsd', 'runningboardd', 'datamigrator',
+    'com.apple.datami', 'keybagd', 'containermanager', 'installd', 'cfprefsd', 'launchd',
+    'chronod', 'liveactivitiesd',
+)
+
+
+def select_processes(processes, include_kernel_task=False):
+    if not isinstance(include_kernel_task, bool):
+        raise ValueError('Kernel-task thread inclusion must be explicit')
+    kernel_task = next((process for process in processes
+                        if include_kernel_task and process.get('pid') == 0 and
+                        process.get('name') == 'kernel_task'), None)
+    selected = [process for process in processes
+                if process.get('name') in SNAPSHOT_PROCESS_NAMES]
+    if kernel_task is not None:
+        selected.insert(0, kernel_task)
+    return selected[:16]
+
+
+def capture(packet, processes, plan, registers, include_kernel_task=False):
     layout = plan['thread_snapshot_layout']
     common = plan['process_layout']
     if any(not isinstance(v, int) or not 0 <= v < 65536 for v in layout.values()):
@@ -106,10 +126,7 @@ def capture(packet, processes, plan, registers):
         return int.from_bytes(read(address, size), 'little')
 
     results = []
-    names = ('PreBoard', 'Setup', 'SpringBoard', 'backboardd', 'lsd', 'runningboardd', 'datamigrator',
-             'com.apple.datami', 'keybagd', 'containermanager', 'installd', 'cfprefsd', 'launchd',
-             'chronod', 'liveactivitiesd')
-    selected = [p for p in processes if p['name'] in names]
+    selected = select_processes(processes, include_kernel_task)
     kernel_stack_size = None
     kernel_stack_size_error = None
     if any(p.get('pid') == 1 and p.get('name') == 'launchd' for p in selected):
@@ -259,6 +276,7 @@ def capture(packet, processes, plan, registers):
                 kernel_stack_size_bytes=kernel_stack_size, kernel_stack_size_error=kernel_stack_size_error,
                 kernel_context_process_limit=1, kernel_context_frames_per_thread_limit=KERNEL_FRAME_LIMIT,
                 kernel_context_scope='candidate launchd saved Switch_context registers; not a wait-cause proof',
+                kernel_task_threads_included=include_kernel_task,
                 process_limit=16, threads_per_process_limit=64, frames_per_thread_limit=32,
                 stack_window_bytes=65536, stack_source='actual-native-4k-task-tables',
                 selected_processes=len(selected), processes=results)
