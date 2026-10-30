@@ -105,6 +105,17 @@ class TraceRegisterSnapshotTests(unittest.TestCase):
             self.assertIn(f"'x{index}': hex(current[{index}])", source)
         self.assertIn("'x8': hex(current[8])", source)
 
+    def test_nested_follow_waits_record_one_shot_tracepoints(self):
+        source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
+        observer = source.split('def continue_observing():', 1)[1].split('def observe_tracepoint', 1)[0]
+        trace_guard = observer.index('current[32] in trace_remaining')
+        trace_dispatch = observer.index('observe_tracepoint(current)')
+        stop_return = observer.index('return stopped, current, timed_out')
+        self.assertLess(trace_guard, trace_dispatch)
+        self.assertLess(trace_dispatch, stop_return)
+        self.assertIn('current[32] not in args.syscall_log_address', observer[trace_guard:trace_dispatch])
+        self.assertIn('continue', observer[trace_dispatch:stop_return])
+
     def test_syscall_return_observer_is_narrow_and_does_not_read_output_bytes(self):
         stop_source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
         probe_source = (ROOT / 'scripts/probe-darwinboot-xnu.py').read_text()

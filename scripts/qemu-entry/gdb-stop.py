@@ -679,6 +679,11 @@ with (fixture / 'gdb-stderr.log').open('w') as errors:
                                 if packet(f'z1,{address:x},4') != 'OK':
                                     raise RuntimeError('Cannot retire exhausted string observation breakpoint')
                         continue
+                    # Nested main-entry waits do not return through the outer tracepoint dispatch.
+                    if (not timed_out and current[32] in trace_remaining and
+                            current[32] not in args.syscall_log_address):
+                        observe_tracepoint(current)
+                        continue
                     if timed_out or current[32] not in args.syscall_log_address:
                         return stopped, current, timed_out
                     raw = packet(f'm{current[0]:x},128')
