@@ -38,7 +38,7 @@ parser.add_argument('--inspect-current-process', action='store_true', help='Read
 parser.add_argument('--process-layout-object-dir', type=Path,
                     help='Exact XNU ios-obj directory used for compiler-qualified process/thread layout')
 parser.add_argument('--inspect-process-list', action='store_true', help='Read the actual kernel allproc list once at the final stop')
-parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved thread states for original launchd, SpringBoard and backboardd at the final stop')
+parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved user state and a compiler-qualified launchd kernel switch context at the final stop')
 parser.add_argument('--capture-scratch-data', action='store_true', help='Export the actual paused mutable Data RAM disk for offline read-only inspection')
 parser.add_argument('--inspect-mac-policies',action='store_true',help='Read real registered MAC policy names and exec/fork hooks using actual compiler layouts')
 parser.add_argument('--follow-cache-leaf', action='store_true', help='Observe the original public getuid cache entry, real SVC and genuine return')

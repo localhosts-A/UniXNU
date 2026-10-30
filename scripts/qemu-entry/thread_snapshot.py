@@ -1,11 +1,80 @@
 """Bounded read-only UI thread snapshots using the exact compiler layout.
 
-Saved registers and bounded user frame records are read. User stacks are read
-through the task's actual native 4K tables using QEMU physical debugger reads;
-no guest registers, memory or translations are changed. A saved PC observes
-the most recent user/kernel boundary, not proof of a thread's current wait cause.
+Saved user/kernel registers and bounded user/kernel frame records are read.
+User stacks are read through the task's actual native 4K tables; no guest
+registers, memory or translations are changed. A saved kernel LR/FP chain is a
+candidate switch context, not proof of a thread's current wait cause.
 """
 import struct
+
+
+KERNEL_VA_MIN = 0xfffffff000000000
+KERNEL_PAGE_BYTES = 4096
+KERNEL_STACK_MAX_BYTES = 1024 * 1024
+KERNEL_FRAME_LIMIT = 16
+
+
+def capture_kernel_context(read, thread, layout, stack_size):
+    def word(address):
+        return int.from_bytes(read(address, 8), 'little')
+
+    if (not isinstance(stack_size, int) or stack_size < KERNEL_PAGE_BYTES or
+            stack_size > KERNEL_STACK_MAX_BYTES or stack_size % KERNEL_PAGE_BYTES):
+        raise ValueError('Invalid runtime kernel stack size')
+    base = word(thread + layout['thread_kernel_stack'])
+    kstackptr = word(thread + layout['thread_kstackptr'])
+    state_size = layout['thread_kernel_state_size']
+    if (not isinstance(state_size, int) or state_size <= 0 or state_size > stack_size or
+            base < KERNEL_VA_MIN or base >= (1 << 64) - stack_size or base % KERNEL_PAGE_BYTES):
+        raise ValueError('Invalid bounded kernel stack base or state size')
+    top = base + stack_size
+    state_address = top - state_size
+    if kstackptr != state_address:
+        raise ValueError('Signed or out-of-range machine.kstackptr does not match stack attachment')
+
+    machine = layout['thread_kernel_state_machine']
+    values = {}
+    for name in ('fp', 'lr', 'sp'):
+        offset = machine + layout['kernel_context_' + name]
+        if not isinstance(offset, int) or offset < 0 or offset + 8 > state_size:
+            raise ValueError('Kernel context member exceeds compiler-qualified state size')
+        values[name] = word(state_address + offset)
+    if values['sp'] < base or values['sp'] > state_address or values['sp'] & 15:
+        raise ValueError('Saved kernel SP is outside the usable stack')
+    if values['fp'] and (values['fp'] < base or values['fp'] > state_address - 16 or values['fp'] & 15):
+        raise ValueError('Saved kernel FP is outside the usable stack')
+
+    frames = []
+    frame_error = None
+    frames_complete = not values['fp']
+    fp = values['fp']
+    for _ in range(KERNEL_FRAME_LIMIT):
+        if not fp:
+            frames_complete = True
+            break
+        if fp < base or fp > state_address - 16 or fp & 15:
+            frame_error = 'Kernel frame exceeds bounded usable stack'
+            break
+        next_fp, lr = struct.unpack('<2Q', read(fp, 16))
+        frames.append(dict(fp=hex(fp), next_fp=hex(next_fp), lr=hex(lr)))
+        if not next_fp:
+            frames_complete = True
+            break
+        if next_fp <= fp or next_fp > state_address - 16 or next_fp & 15:
+            frame_error = 'Kernel frame chain is not increasing within stack bounds'
+            break
+        fp = next_fp
+    else:
+        frame_error = 'Kernel frame chain exceeds bounded frame count'
+
+    result = dict(read_only=True, stack_base=hex(base), stack_top=hex(top),
+                  stack_size=stack_size, state_address=hex(state_address), state_size=state_size,
+                  saved_pc_available=False, saved_fp=hex(values['fp']), saved_lr=hex(values['lr']),
+                  saved_sp=hex(values['sp']), frames=frames, frames_complete=frames_complete,
+                  scope='candidate saved Switch_context register image; LR/FP do not establish a wait cause')
+    if frame_error:
+        result['frames_error'] = frame_error
+    return result
 
 
 def capture(packet, processes, plan, registers):
@@ -13,6 +82,15 @@ def capture(packet, processes, plan, registers):
     common = plan['process_layout']
     if any(not isinstance(v, int) or not 0 <= v < 65536 for v in layout.values()):
         raise ValueError('Unbounded compiler thread layout')
+    required_kernel_layout = {
+        'thread_kernel_stack', 'thread_kstackptr', 'thread_kernel_state_machine',
+        'thread_kernel_state_size', 'kernel_context_fp', 'kernel_context_lr', 'kernel_context_sp',
+    }
+    if not required_kernel_layout <= layout.keys():
+        raise ValueError('Missing compiler-qualified kernel context layout')
+    stack_size_address = plan.get('thread_snapshot_kernel_stack_size')
+    if not isinstance(stack_size_address, int) or not KERNEL_VA_MIN <= stack_size_address < 1 << 64:
+        raise ValueError('Missing compiler-qualified kernel_stack_size symbol')
 
     def read(address, size):
         if not 0xfffffff000000000 <= address <= (1 << 64) - size or not 0 < size <= 304:
@@ -30,6 +108,17 @@ def capture(packet, processes, plan, registers):
              'com.apple.datami', 'keybagd', 'containermanager', 'installd', 'cfprefsd', 'launchd',
              'chronod', 'liveactivitiesd')
     selected = [p for p in processes if p['name'] in names]
+    kernel_stack_size = None
+    kernel_stack_size_error = None
+    if any(p.get('pid') == 1 and p.get('name') == 'launchd' for p in selected):
+        try:
+            kernel_stack_size = word(stack_size_address)
+            if (kernel_stack_size < KERNEL_PAGE_BYTES or kernel_stack_size > KERNEL_STACK_MAX_BYTES or
+                    kernel_stack_size % KERNEL_PAGE_BYTES):
+                raise ValueError('Invalid runtime kernel stack size')
+        except (OSError, RuntimeError, ValueError) as error:
+            kernel_stack_size = None
+            kernel_stack_size_error = str(error)
     for proc in selected[:16]:
         row = dict(process=proc, threads=[], complete=False)
         results.append(row)
@@ -65,6 +154,15 @@ def capture(packet, processes, plan, registers):
                             continuation=hex(word(thread + layout['continuation'])),
                             wait_event=hex(word(thread + layout['wait_event'])), saved_state=hex(state))
                 row['threads'].append(item)
+                if proc.get('pid') == 1 and proc.get('name') == 'launchd':
+                    if kernel_stack_size_error:
+                        item['saved_kernel_context_error'] = kernel_stack_size_error
+                    else:
+                        try:
+                            item['saved_kernel_context'] = capture_kernel_context(
+                                read, thread, layout, kernel_stack_size)
+                        except (OSError, RuntimeError, ValueError) as error:
+                            item['saved_kernel_context_error'] = str(error)
                 if state:
                     raw = read(state, 304)
                     if struct.unpack_from('<2I', raw) == (21, 72):
@@ -150,6 +248,15 @@ def capture(packet, processes, plan, registers):
         if packet('Qqemu.PhyMemMode:' + old_mode) != 'OK':
             raise RuntimeError('Cannot restore debugger virtual-memory mode')
     return dict(native_sha256=plan['native_sha256'], read_only=True,
+                thread_snapshot_layout=dict(layout),
+                thread_snapshot_layout_objects_sha256={
+                    'thread.o': common.get('thread_object_sha256'),
+                    'machine_routines.o': common.get('machine_routines_object_sha256'),
+                },
+                kernel_stack_size_symbol=hex(stack_size_address),
+                kernel_stack_size_bytes=kernel_stack_size, kernel_stack_size_error=kernel_stack_size_error,
+                kernel_context_process_limit=1, kernel_context_frames_per_thread_limit=KERNEL_FRAME_LIMIT,
+                kernel_context_scope='candidate launchd saved Switch_context registers; not a wait-cause proof',
                 process_limit=16, threads_per_process_limit=64, frames_per_thread_limit=32,
                 stack_window_bytes=65536, stack_source='actual-native-4k-task-tables',
                 selected_processes=len(selected), processes=results)

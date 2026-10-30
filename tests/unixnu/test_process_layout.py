@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from process_layout import build_process_layout, member, symbol_address
+from process_layout import build_process_layout, member, symbol_address, type_size
 
 
 class ProcessLayoutTests(unittest.TestCase):
@@ -20,12 +20,20 @@ class ProcessLayoutTests(unittest.TestCase):
         with patch('process_layout.subprocess.check_output', return_value=''), \
                 self.assertRaisesRegex(SystemExit, 'Cannot derive compiler layout: proc.p_pid'):
             member(objects, 'proc', 'p_pid')
+        with patch('process_layout.subprocess.check_output', return_value='DW_AT_byte_size (0x80)') as run:
+            self.assertEqual(type_size(objects, 'thread_kernel_state'), 0x80)
+        self.assertTrue(str(run.call_args.args[0][-1]).endswith('osfmk/DEVELOPMENT/machine_routines.o'))
+        with patch('process_layout.subprocess.check_output', return_value=''), \
+                self.assertRaisesRegex(SystemExit, 'Cannot derive compiler layout size: thread_kernel_state'):
+            type_size(objects, 'thread_kernel_state')
 
     def test_builds_native_hash_bound_thread_layout_from_exact_objects(self):
         fields = {
             'thread': {'t_tro': 0x10, 'machine': 0x20, 'task_threads': 0x30, 'thread_id': 0x40,
-                       'continuation': 0x50, 'wait_event': 0x60, 'state': 0x70},
-            'machine_thread': {'upcb': 0x80},
+                       'continuation': 0x50, 'wait_event': 0x60, 'state': 0x70, 'kernel_stack': 0x90},
+            'machine_thread': {'upcb': 0x80, 'kstackptr': 0x98},
+            'thread_kernel_state': {'machine': 0x0},
+            'arm_kernel_context': {'fp': 0x50, 'lr': 0x58, 'sp': 0x60},
             'thread_ro': {'tro_owner': 0x8, 'tro_proc': 0x10, 'tro_task': 0x18},
             'proc': {'p_pid': 0x60, 'p_proc_ro': 0x70},
             'proc_ro': {'pr_proc': 0x8, 'pr_task': 0x10},
@@ -38,7 +46,8 @@ class ProcessLayoutTests(unittest.TestCase):
         relatives = (
             'osfmk/DEVELOPMENT/thread.o', 'bsd/DEVELOPMENT/kern_proc.o',
             'osfmk/DEVELOPMENT/task.o', 'osfmk/DEVELOPMENT/vm_shared_region.o',
-            'osfmk/DEVELOPMENT/pmap.o', 'mach.development.bcm2837.unstripped.noctf',
+            'osfmk/DEVELOPMENT/pmap.o', 'osfmk/DEVELOPMENT/machine_routines.o',
+            'mach.development.bcm2837.unstripped.noctf',
         )
         with tempfile.TemporaryDirectory() as directory:
             objects = Path(directory) / 'ios-obj' / 'DEVELOPMENT_ARM64_BCM2837'
@@ -54,13 +63,16 @@ class ProcessLayoutTests(unittest.TestCase):
                 calls.append(parts)
                 if parts[1] == 'dwarfdump':
                     type_name = parts[2].split('=', 1)[1]
-                    return '\n'.join(
+                    size = {'thread_kernel_state': 0x90, 'arm_kernel_context': 0x80}.get(type_name)
+                    entries = [
                         f'DW_AT_name ("{name}")\nDW_AT_data_member_location (0x{offset:x})'
-                        for name, offset in fields[type_name].items())
+                        for name, offset in fields[type_name].items()]
+                    return ('DW_AT_byte_size (0x%x)\n' % size if size else '') + '\n'.join(entries)
                 if parts[1] == 'llvm-objdump':
                     return 'add x0, x0, #0x5bc\n'
                 if parts[1] == 'nm':
                     return ('fffffff007001000 S _native_pt_attr\n'
+                            'fffffff007001800 S _kernel_stack_size\n'
                             'fffffff007002000 T _shared_region_check_np\n'
                             'fffffff007003000 T _shared_region_map_and_slide_2_np\n')
                 raise AssertionError(parts)
@@ -73,10 +85,21 @@ class ProcessLayoutTests(unittest.TestCase):
         self.assertEqual(plan['process_layout']['thread_user_state'], 0xa0)
         self.assertEqual(plan['process_layout']['comm'], 0x5bc)
         self.assertEqual(plan['thread_snapshot_layout']['thread_state'], 0x70)
+        self.assertEqual(plan['thread_snapshot_layout']['thread_kernel_stack'], 0x90)
+        self.assertEqual(plan['thread_snapshot_layout']['thread_kstackptr'], 0xb8)
+        self.assertEqual(plan['thread_snapshot_layout']['thread_kernel_state_machine'], 0x0)
+        self.assertEqual(plan['thread_snapshot_layout']['thread_kernel_state_size'], 0x90)
+        self.assertEqual(plan['thread_snapshot_layout']['kernel_context_fp'], 0x50)
+        self.assertEqual(plan['thread_snapshot_layout']['kernel_context_lr'], 0x58)
+        self.assertEqual(plan['thread_snapshot_layout']['kernel_context_sp'], 0x60)
         self.assertEqual(plan['thread_snapshot_native_pt_attr'], 0xfffffff007001000)
+        self.assertEqual(plan['thread_snapshot_kernel_stack_size'], 0xfffffff007001800)
         self.assertEqual(plan['process_activation'], [0xfffffff007002000, 0xfffffff007003000])
         vm_map_call = next(call for call in calls if call[1] == 'dwarfdump' and call[2] == '--name=_vm_map')
         self.assertTrue(vm_map_call[-1].endswith('/osfmk/DEVELOPMENT/task.o'))
+        kernel_state_call = next(call for call in calls
+                                 if call[1] == 'dwarfdump' and call[2] == '--name=thread_kernel_state')
+        self.assertTrue(kernel_state_call[-1].endswith('/osfmk/DEVELOPMENT/machine_routines.o'))
 
     def test_probe_uses_compiler_only_layout_plan_and_preserves_stop_on_snapshot_error(self):
         probe = (ROOT / 'scripts/probe-darwinboot-xnu.py').read_text()
@@ -85,6 +108,10 @@ class ProcessLayoutTests(unittest.TestCase):
         display = (ROOT / 'scripts/audit-target-display-query.py').read_text()
         self.assertIn('scripts/audit-target-process-layout.py', probe)
         self.assertIn("process_plan = ROOT / 'build/process-analysis/process-layout-plan.json'", probe)
+        self.assertIn('thread_kernel_state_size', layout)
+        self.assertIn("symbol_address(native_symbols, '_kernel_stack_size')", layout)
+        snapshot = (ROOT / 'scripts/qemu-entry/thread_snapshot.py').read_text()
+        self.assertIn('capture_kernel_context', snapshot)
         self.assertIn('"pmap_pt_attr"', layout)
         self.assertIn('plan.update(build_process_layout(', display)
         self.assertIn("report['ui_thread_snapshots'] = dict(read_only=True, error=str(error))", stop)

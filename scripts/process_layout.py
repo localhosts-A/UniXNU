@@ -19,6 +19,8 @@ def member(objects, structure, name):
         relative = 'osfmk/DEVELOPMENT/pmap.o'
     elif structure == '_vm_map':
         relative = 'osfmk/DEVELOPMENT/task.o'
+    elif structure in ('thread_kernel_state', 'arm_kernel_context'):
+        relative = 'osfmk/DEVELOPMENT/machine_routines.o'
     else:
         raise SystemExit('Unsupported compiler process layout type: ' + structure)
     obj = objects / relative
@@ -29,6 +31,22 @@ def member(objects, structure, name):
     if not match:
         raise SystemExit('Cannot derive compiler layout: ' + structure + '.' + name)
     return int(match[1], 16)
+
+
+def type_size(objects, structure):
+    objects = Path(objects)
+    if structure not in ('thread_kernel_state', 'arm_kernel_context'):
+        raise SystemExit('Unsupported compiler process layout type size: ' + structure)
+    obj = objects / 'osfmk/DEVELOPMENT/machine_routines.o'
+    output = subprocess.check_output(
+        ['xcrun', 'dwarfdump', '--name=' + structure, '--show-children', obj], text=True)
+    match = re.search(r'DW_AT_byte_size\s+\((0x[0-9a-fA-F]+|[0-9]+)\)', output)
+    if not match:
+        raise SystemExit('Cannot derive compiler layout size: ' + structure)
+    size = int(match[1], 0)
+    if not 0 < size < 65536:
+        raise SystemExit('Invalid compiler layout size: ' + structure)
+    return size
 
 
 def symbol_address(symbols, name):
@@ -45,6 +63,7 @@ def build_process_layout(objects):
     task_object = objects / 'osfmk/DEVELOPMENT/task.o'
     region_object = objects / 'osfmk/DEVELOPMENT/vm_shared_region.o'
     pmap_object = objects / 'osfmk/DEVELOPMENT/pmap.o'
+    machine_routines_object = objects / 'osfmk/DEVELOPMENT/machine_routines.o'
     native_path = objects / 'mach.development.bcm2837.unstripped.noctf'
     process = {
         'thread_ro': member(objects, 'thread', 't_tro'),
@@ -68,7 +87,8 @@ def build_process_layout(objects):
     if not comm:
         raise SystemExit('Cannot derive actual process-name address from compiled accessor')
     process['comm'] = int(comm[1], 16)
-    process.update(pmap_object_sha256=hashlib.sha256(pmap_object.read_bytes()).hexdigest())
+    process.update(pmap_object_sha256=hashlib.sha256(pmap_object.read_bytes()).hexdigest(),
+                   machine_routines_object_sha256=hashlib.sha256(machine_routines_object.read_bytes()).hexdigest())
 
     thread = {
         'proc_ro': member(objects, 'proc', 'p_proc_ro'),
@@ -80,6 +100,14 @@ def build_process_layout(objects):
         'thread_id': member(objects, 'thread', 'thread_id'),
         'continuation': member(objects, 'thread', 'continuation'),
         'wait_event': member(objects, 'thread', 'wait_event'),
+        'thread_kernel_stack': member(objects, 'thread', 'kernel_stack'),
+        'thread_kstackptr': member(objects, 'thread', 'machine') +
+                            member(objects, 'machine_thread', 'kstackptr'),
+        'thread_kernel_state_machine': member(objects, 'thread_kernel_state', 'machine'),
+        'thread_kernel_state_size': type_size(objects, 'thread_kernel_state'),
+        'kernel_context_fp': member(objects, 'arm_kernel_context', 'fp'),
+        'kernel_context_lr': member(objects, 'arm_kernel_context', 'lr'),
+        'kernel_context_sp': member(objects, 'arm_kernel_context', 'sp'),
         'thread_state': member(objects, 'thread', 'state'),
         'task_map': member(objects, 'task', 'map'),
         'map_pmap': member(objects, '_vm_map', 'pmap'),
@@ -100,5 +128,6 @@ def build_process_layout(objects):
         'process_layout': process,
         'thread_snapshot_layout': thread,
         'thread_snapshot_native_pt_attr': symbol_address(native_symbols, '_native_pt_attr'),
+        'thread_snapshot_kernel_stack_size': symbol_address(native_symbols, '_kernel_stack_size'),
         'process_activation': process_activation,
     }

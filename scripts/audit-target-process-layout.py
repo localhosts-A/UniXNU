@@ -16,4 +16,5 @@ args = parser.parse_args()
 plan = build_process_layout(args.objects_dir)
 args.output.parent.mkdir(parents=True, exist_ok=True)
 args.output.write_text(json.dumps(plan, indent=2) + '\n')
-print('PASS: compiler-qualified process/thread layout bound to native SHA-256', plan['native_sha256'])
+print('PASS: compiler-qualified process/thread/kernel-stack layout bound to native SHA-256',
+      plan['native_sha256'])

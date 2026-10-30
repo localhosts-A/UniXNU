@@ -78,7 +78,7 @@ parser.add_argument('--proc-pid-offset', type=int, default=96, help='Byte offset
 parser.add_argument('--proc-comm-offset', type=int, default=1468, help='Byte offset of p_comm')
 parser.add_argument('--proc-stat-offset', type=int, default=100, help='Byte offset of p_stat')
 parser.add_argument('--proc-list-max', type=int, default=128, help='Bounded number of actual process entries')
-parser.add_argument('--inspect-ui-threads', action='store_true', help='Read original UI task thread lists and kernel-owned saved user registers, without changing address spaces')
+parser.add_argument('--inspect-ui-threads', action='store_true', help='Read bounded saved user state and launchd kernel switch context through compiler-qualified fields')
 parser.add_argument('--capture-scratch-data', metavar='BASE_SYMBOL:SIZE_SYMBOL:EXPECTED_BYTES',
                     help='Read the exact native mutable Data RAM range into an offline snapshot; never flush or modify guest state')
 
