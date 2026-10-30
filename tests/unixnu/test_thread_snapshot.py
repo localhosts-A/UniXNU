@@ -51,7 +51,8 @@ class ThreadSnapshotTests(unittest.TestCase):
         layout = {
             'thread_kernel_stack': 0x10, 'thread_kstackptr': 0x20,
             'thread_kernel_state_machine': 0, 'thread_kernel_state_size': cls.state_size,
-            'kernel_context_fp': 0x50, 'kernel_context_lr': 0x58, 'kernel_context_sp': 0x60,
+            'kernel_context_ss': 0,
+            'kernel_saved_state_fp': 0x50, 'kernel_saved_state_lr': 0x58, 'kernel_saved_state_sp': 0x60,
         }
         return memory, layout, state, fp
 

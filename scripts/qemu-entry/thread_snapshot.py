@@ -35,7 +35,8 @@ def capture_kernel_context(read, thread, layout, stack_size):
     machine = layout['thread_kernel_state_machine']
     values = {}
     for name in ('fp', 'lr', 'sp'):
-        offset = machine + layout['kernel_context_' + name]
+        offset = (machine + layout['kernel_context_ss'] +
+                  layout['kernel_saved_state_' + name])
         if not isinstance(offset, int) or offset < 0 or offset + 8 > state_size:
             raise ValueError('Kernel context member exceeds compiler-qualified state size')
         values[name] = word(state_address + offset)
@@ -84,7 +85,8 @@ def capture(packet, processes, plan, registers):
         raise ValueError('Unbounded compiler thread layout')
     required_kernel_layout = {
         'thread_kernel_stack', 'thread_kstackptr', 'thread_kernel_state_machine',
-        'thread_kernel_state_size', 'kernel_context_fp', 'kernel_context_lr', 'kernel_context_sp',
+        'thread_kernel_state_size', 'kernel_context_ss',
+        'kernel_saved_state_fp', 'kernel_saved_state_lr', 'kernel_saved_state_sp',
     }
     if not required_kernel_layout <= layout.keys():
         raise ValueError('Missing compiler-qualified kernel context layout')

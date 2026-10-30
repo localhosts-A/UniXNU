@@ -31,7 +31,7 @@ def member(objects, structure, name):
         relative = 'osfmk/DEVELOPMENT/pmap.o'
     elif structure == '_vm_map':
         relative = 'osfmk/DEVELOPMENT/task.o'
-    elif structure in ('thread_kernel_state', 'arm_kernel_context'):
+    elif structure in ('thread_kernel_state', 'arm_kernel_context', 'arm_kernel_saved_state'):
         relative = 'osfmk/DEVELOPMENT/pcb.o'
     else:
         raise SystemExit('Unsupported compiler process layout type: ' + structure)
@@ -57,7 +57,7 @@ def member(objects, structure, name):
         if match:
             offsets.append(int(match[1], 0))
             continue
-        if structure == 'thread_kernel_state' and name == 'machine':
+        if (structure, name) in {('thread_kernel_state', 'machine'), ('arm_kernel_context', 'ss')}:
             parent_depth = blocks[parent][1]
             first_member = next((child for child in range(parent + 1, len(blocks))
                                  if blocks[child][1] <= parent_depth or
@@ -149,9 +149,10 @@ def build_process_layout(objects):
                             member(objects, 'machine_thread', 'kstackptr'),
         'thread_kernel_state_machine': member(objects, 'thread_kernel_state', 'machine'),
         'thread_kernel_state_size': type_size(objects, 'thread_kernel_state'),
-        'kernel_context_fp': member(objects, 'arm_kernel_context', 'fp'),
-        'kernel_context_lr': member(objects, 'arm_kernel_context', 'lr'),
-        'kernel_context_sp': member(objects, 'arm_kernel_context', 'sp'),
+        'kernel_context_ss': member(objects, 'arm_kernel_context', 'ss'),
+        'kernel_saved_state_fp': member(objects, 'arm_kernel_saved_state', 'fp'),
+        'kernel_saved_state_lr': member(objects, 'arm_kernel_saved_state', 'lr'),
+        'kernel_saved_state_sp': member(objects, 'arm_kernel_saved_state', 'sp'),
         'thread_state': member(objects, 'thread', 'state'),
         'task_map': member(objects, 'task', 'map'),
         'map_pmap': member(objects, '_vm_map', 'pmap'),

@@ -26,6 +26,10 @@ class ProcessLayoutTests(unittest.TestCase):
                         '0x0002:   DW_TAG_member\n  DW_AT_name ("machine")')
         with patch('process_layout.subprocess.check_output', return_value=first_member):
             self.assertEqual(member(objects, 'thread_kernel_state', 'machine'), 0)
+        context_first = ('0x0001: DW_TAG_structure_type\n  DW_AT_name ("arm_kernel_context")\n'
+                         '0x0002:   DW_TAG_member\n  DW_AT_name ("ss")')
+        with patch('process_layout.subprocess.check_output', return_value=context_first):
+            self.assertEqual(member(objects, 'arm_kernel_context', 'ss'), 0)
         nonfirst_member = (first_member.replace('0x0002:   DW_TAG_member\n  DW_AT_name ("machine")',
                           '0x0002:   DW_TAG_member\n  DW_AT_name ("padding")\n  DW_AT_data_member_location (0x8)\n'
                           '0x0003:   DW_TAG_member\n  DW_AT_name ("machine")'))
@@ -57,7 +61,8 @@ class ProcessLayoutTests(unittest.TestCase):
                        'continuation': 0x50, 'wait_event': 0x60, 'state': 0x70, 'kernel_stack': 0x90},
             'machine_thread': {'upcb': 0x80, 'kstackptr': 0x98},
             'thread_kernel_state': {'machine': 0x0},
-            'arm_kernel_context': {'fp': 0x50, 'lr': 0x58, 'sp': 0x60},
+            'arm_kernel_context': {'ss': 0x0, 'ns': 0x70},
+            'arm_kernel_saved_state': {'fp': 0x50, 'lr': 0x58, 'sp': 0x60},
             'thread_ro': {'tro_owner': 0x8, 'tro_proc': 0x10, 'tro_task': 0x18},
             'proc': {'p_pid': 0x60, 'p_proc_ro': 0x70},
             'proc_ro': {'pr_proc': 0x8, 'pr_task': 0x10},
@@ -87,13 +92,14 @@ class ProcessLayoutTests(unittest.TestCase):
                 calls.append(parts)
                 if parts[1] == 'dwarfdump':
                     type_name = parts[2].split('=', 1)[1]
-                    size = {'thread_kernel_state': 0x90, 'arm_kernel_context': 0x80}.get(type_name)
+                    size = {'thread_kernel_state': 0x90, 'arm_kernel_context': 0xb8}.get(type_name)
                     lines = [f'0x0001: DW_TAG_structure_type', f'  DW_AT_name ("{type_name}")']
                     if size:
                         lines.append(f'  DW_AT_byte_size (0x{size:x})')
                     for index, (name, offset) in enumerate(fields[type_name].items(), 2):
                         lines += [f'0x{index:04x}:   DW_TAG_member', f'  DW_AT_name ("{name}")']
-                        if not (type_name == 'thread_kernel_state' and name == 'machine'):
+                        if (type_name, name) not in {('thread_kernel_state', 'machine'),
+                                                      ('arm_kernel_context', 'ss')}:
                             lines.append(f'  DW_AT_data_member_location (0x{offset:x})')
                     return '\n'.join(lines)
                 if parts[1] == 'llvm-objdump':
@@ -117,9 +123,10 @@ class ProcessLayoutTests(unittest.TestCase):
         self.assertEqual(plan['thread_snapshot_layout']['thread_kstackptr'], 0xb8)
         self.assertEqual(plan['thread_snapshot_layout']['thread_kernel_state_machine'], 0x0)
         self.assertEqual(plan['thread_snapshot_layout']['thread_kernel_state_size'], 0x90)
-        self.assertEqual(plan['thread_snapshot_layout']['kernel_context_fp'], 0x50)
-        self.assertEqual(plan['thread_snapshot_layout']['kernel_context_lr'], 0x58)
-        self.assertEqual(plan['thread_snapshot_layout']['kernel_context_sp'], 0x60)
+        self.assertEqual(plan['thread_snapshot_layout']['kernel_context_ss'], 0x0)
+        self.assertEqual(plan['thread_snapshot_layout']['kernel_saved_state_fp'], 0x50)
+        self.assertEqual(plan['thread_snapshot_layout']['kernel_saved_state_lr'], 0x58)
+        self.assertEqual(plan['thread_snapshot_layout']['kernel_saved_state_sp'], 0x60)
         self.assertEqual(plan['thread_snapshot_native_pt_attr'], 0xfffffff007001000)
         self.assertEqual(plan['thread_snapshot_kernel_stack_size'], 0xfffffff007001800)
         self.assertEqual(plan['process_activation'], [0xfffffff007002000, 0xfffffff007003000])
@@ -128,6 +135,9 @@ class ProcessLayoutTests(unittest.TestCase):
         kernel_state_call = next(call for call in calls
                                  if call[1] == 'dwarfdump' and call[2] == '--name=thread_kernel_state')
         self.assertTrue(kernel_state_call[-1].endswith('/osfmk/DEVELOPMENT/pcb.o'))
+        saved_state_call = next(call for call in calls
+                                if call[1] == 'dwarfdump' and call[2] == '--name=arm_kernel_saved_state')
+        self.assertTrue(saved_state_call[-1].endswith('/osfmk/DEVELOPMENT/pcb.o'))
 
     def test_probe_uses_compiler_only_layout_plan_and_preserves_stop_on_snapshot_error(self):
         probe = (ROOT / 'scripts/probe-darwinboot-xnu.py').read_text()
@@ -137,6 +147,7 @@ class ProcessLayoutTests(unittest.TestCase):
         self.assertIn('scripts/audit-target-process-layout.py', probe)
         self.assertIn("process_plan = ROOT / 'build/process-analysis/process-layout-plan.json'", probe)
         self.assertIn('thread_kernel_state_size', layout)
+        self.assertIn('kernel_saved_state_fp', layout)
         self.assertIn("symbol_address(native_symbols, '_kernel_stack_size')", layout)
         snapshot = (ROOT / 'scripts/qemu-entry/thread_snapshot.py').read_text()
         self.assertIn('capture_kernel_context', snapshot)
