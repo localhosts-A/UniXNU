@@ -40,6 +40,17 @@ class ProcessLayoutTests(unittest.TestCase):
                 self.assertRaisesRegex(SystemExit, 'Cannot uniquely derive compiler layout size: thread_kernel_state'):
             type_size(objects, 'thread_kernel_state')
 
+    def test_member_scopes_duplicate_names_to_the_requested_structure(self):
+        output = (
+            '0x0001: DW_TAG_structure_type\n  DW_AT_name ("thread")\n'
+            '0x0002:   DW_TAG_member\n  DW_AT_name ("continuation")\n'
+            '  DW_AT_data_member_location (0x50)\n'
+            '0x0003: DW_TAG_structure_type\n  DW_AT_name ("thread_ro")\n'
+            '0x0004:   DW_TAG_member\n  DW_AT_name ("continuation")\n'
+            '  DW_AT_data_member_location (0x10)')
+        with patch('process_layout.subprocess.check_output', return_value=output):
+            self.assertEqual(member(Path('/tmp/process-layout-fixture'), 'thread', 'continuation'), 0x50)
+
     def test_builds_native_hash_bound_thread_layout_from_exact_objects(self):
         fields = {
             'thread': {'t_tro': 0x10, 'machine': 0x20, 'task_threads': 0x30, 'thread_id': 0x40,
