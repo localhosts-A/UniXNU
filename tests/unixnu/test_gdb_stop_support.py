@@ -99,8 +99,10 @@ class TraceRegisterMemoryRequestTests(unittest.TestCase):
 
 
 class TraceRegisterSnapshotTests(unittest.TestCase):
-    def test_trace_events_capture_x8_for_branch_diagnostics(self):
+    def test_trace_events_capture_register_arguments_for_bounded_callsite_diagnostics(self):
         source = (ROOT / 'scripts/qemu-entry/gdb-stop.py').read_text()
+        for index in range(5):
+            self.assertIn(f"'x{index}': hex(current[{index}])", source)
         self.assertIn("'x8': hex(current[8])", source)
 
     def test_syscall_return_observer_is_narrow_and_does_not_read_output_bytes(self):
