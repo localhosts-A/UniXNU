@@ -5,6 +5,16 @@ import re
 import subprocess
 
 
+def dwarf_blocks(output):
+    headers = list(re.finditer(r'(?m)^[ \t]*0x[0-9a-fA-F]+:[ \t]*(DW_TAG_[A-Za-z_]+)', output))
+    return [(match[1], output[match.start():headers[index + 1].start() if index + 1 < len(headers)
+             else len(output)]) for index, match in enumerate(headers)]
+
+
+def has_name(block, name):
+    return re.search(r'DW_AT_name\s+\("' + re.escape(name) + r'"\)', block) is not None
+
+
 def member(objects, structure, name):
     objects = Path(objects)
     if structure in ('thread', 'thread_ro', 'machine_thread'):
@@ -20,30 +30,55 @@ def member(objects, structure, name):
     elif structure == '_vm_map':
         relative = 'osfmk/DEVELOPMENT/task.o'
     elif structure in ('thread_kernel_state', 'arm_kernel_context'):
-        relative = 'osfmk/DEVELOPMENT/machine_routines.o'
+        relative = 'osfmk/DEVELOPMENT/pcb.o'
     else:
         raise SystemExit('Unsupported compiler process layout type: ' + structure)
     obj = objects / relative
     output = subprocess.check_output(
         ['xcrun', 'dwarfdump', '--name=' + structure, '--show-children', obj], text=True)
-    match = re.search(r'DW_AT_name\s+\("' + re.escape(name) +
-                      r'"\)[\s\S]*?DW_AT_data_member_location\s+\((0x[0-9a-f]+)\)', output)
-    if not match:
+    blocks = dwarf_blocks(output)
+    targets = [(index, block) for index, (tag, block) in enumerate(blocks)
+               if tag == 'DW_TAG_member' and has_name(block, name)]
+    if not targets:
         raise SystemExit('Cannot derive compiler layout: ' + structure + '.' + name)
-    return int(match[1], 16)
+    offsets = []
+    for index, block in targets:
+        match = re.search(r'DW_AT_data_member_location\s+\((0x[0-9a-fA-F]+|[0-9]+)\)', block)
+        if match:
+            offsets.append(int(match[1], 0))
+            continue
+        if structure == 'thread_kernel_state' and name == 'machine':
+            roots = [root for root, (tag, body) in enumerate(blocks[:index])
+                     if tag == 'DW_TAG_structure_type' and has_name(body, structure)]
+            root = roots[-1] if roots else None
+            first_member = next((child for child in range(root + 1, index + 1)
+                                 if blocks[child][0] == 'DW_TAG_member'), None) if root is not None else None
+            if first_member == index:
+                offsets.append(0)
+                continue
+        raise SystemExit('Cannot derive compiler member location: ' + structure + '.' + name)
+    if len(set(offsets)) != 1:
+        raise SystemExit('Ambiguous compiler layout: ' + structure + '.' + name)
+    return offsets[0]
 
 
 def type_size(objects, structure):
     objects = Path(objects)
     if structure not in ('thread_kernel_state', 'arm_kernel_context'):
         raise SystemExit('Unsupported compiler process layout type size: ' + structure)
-    obj = objects / 'osfmk/DEVELOPMENT/machine_routines.o'
+    obj = objects / 'osfmk/DEVELOPMENT/pcb.o'
     output = subprocess.check_output(
         ['xcrun', 'dwarfdump', '--name=' + structure, '--show-children', obj], text=True)
-    match = re.search(r'DW_AT_byte_size\s+\((0x[0-9a-fA-F]+|[0-9]+)\)', output)
-    if not match:
-        raise SystemExit('Cannot derive compiler layout size: ' + structure)
-    size = int(match[1], 0)
+    sizes = []
+    for tag, block in dwarf_blocks(output):
+        if tag not in ('DW_TAG_structure_type', 'DW_TAG_union_type') or not has_name(block, structure):
+            continue
+        match = re.search(r'DW_AT_byte_size\s+\((0x[0-9a-fA-F]+|[0-9]+)\)', block)
+        if match:
+            sizes.append(int(match[1], 0))
+    if not sizes or len(set(sizes)) != 1:
+        raise SystemExit('Cannot uniquely derive compiler layout size: ' + structure)
+    size = sizes[0]
     if not 0 < size < 65536:
         raise SystemExit('Invalid compiler layout size: ' + structure)
     return size
@@ -63,7 +98,7 @@ def build_process_layout(objects):
     task_object = objects / 'osfmk/DEVELOPMENT/task.o'
     region_object = objects / 'osfmk/DEVELOPMENT/vm_shared_region.o'
     pmap_object = objects / 'osfmk/DEVELOPMENT/pmap.o'
-    machine_routines_object = objects / 'osfmk/DEVELOPMENT/machine_routines.o'
+    pcb_object = objects / 'osfmk/DEVELOPMENT/pcb.o'
     native_path = objects / 'mach.development.bcm2837.unstripped.noctf'
     process = {
         'thread_ro': member(objects, 'thread', 't_tro'),
@@ -88,7 +123,7 @@ def build_process_layout(objects):
         raise SystemExit('Cannot derive actual process-name address from compiled accessor')
     process['comm'] = int(comm[1], 16)
     process.update(pmap_object_sha256=hashlib.sha256(pmap_object.read_bytes()).hexdigest(),
-                   machine_routines_object_sha256=hashlib.sha256(machine_routines_object.read_bytes()).hexdigest())
+                   pcb_object_sha256=hashlib.sha256(pcb_object.read_bytes()).hexdigest())
 
     thread = {
         'proc_ro': member(objects, 'proc', 'p_proc_ro'),

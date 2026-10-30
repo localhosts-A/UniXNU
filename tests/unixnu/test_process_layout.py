@@ -13,18 +13,31 @@ from process_layout import build_process_layout, member, symbol_address, type_si
 class ProcessLayoutTests(unittest.TestCase):
     def test_member_uses_compiler_record_and_rejects_missing_fields(self):
         objects = Path('/tmp/process-layout-fixture')
-        output = 'DW_AT_name ("p_pid")\nDW_AT_data_member_location (0x60)'
+        output = ('0x0001: DW_TAG_structure_type\n  DW_AT_name ("proc")\n'
+                  '0x0002: DW_TAG_member\n  DW_AT_name ("p_pid")\n'
+                  '  DW_AT_data_member_location (0x60)')
         with patch('process_layout.subprocess.check_output', return_value=output) as run:
             self.assertEqual(member(objects, 'proc', 'p_pid'), 0x60)
         self.assertTrue(str(run.call_args.args[0][-1]).endswith('bsd/DEVELOPMENT/kern_proc.o'))
         with patch('process_layout.subprocess.check_output', return_value=''), \
                 self.assertRaisesRegex(SystemExit, 'Cannot derive compiler layout: proc.p_pid'):
             member(objects, 'proc', 'p_pid')
-        with patch('process_layout.subprocess.check_output', return_value='DW_AT_byte_size (0x80)') as run:
+        first_member = ('0x0001: DW_TAG_structure_type\n  DW_AT_name ("thread_kernel_state")\n'
+                        '0x0002: DW_TAG_member\n  DW_AT_name ("machine")')
+        with patch('process_layout.subprocess.check_output', return_value=first_member):
+            self.assertEqual(member(objects, 'thread_kernel_state', 'machine'), 0)
+        nonfirst_member = (first_member.replace('0x0002: DW_TAG_member\n  DW_AT_name ("machine")',
+                          '0x0002: DW_TAG_member\n  DW_AT_name ("padding")\n  DW_AT_data_member_location (0x8)\n'
+                          '0x0003: DW_TAG_member\n  DW_AT_name ("machine")'))
+        with patch('process_layout.subprocess.check_output', return_value=nonfirst_member), \
+                self.assertRaisesRegex(SystemExit, 'Cannot derive compiler member location: thread_kernel_state.machine'):
+            member(objects, 'thread_kernel_state', 'machine')
+        with patch('process_layout.subprocess.check_output',
+                   return_value='0x0001: DW_TAG_structure_type\n  DW_AT_name ("thread_kernel_state")\n  DW_AT_byte_size (0x80)') as run:
             self.assertEqual(type_size(objects, 'thread_kernel_state'), 0x80)
-        self.assertTrue(str(run.call_args.args[0][-1]).endswith('osfmk/DEVELOPMENT/machine_routines.o'))
+        self.assertTrue(str(run.call_args.args[0][-1]).endswith('osfmk/DEVELOPMENT/pcb.o'))
         with patch('process_layout.subprocess.check_output', return_value=''), \
-                self.assertRaisesRegex(SystemExit, 'Cannot derive compiler layout size: thread_kernel_state'):
+                self.assertRaisesRegex(SystemExit, 'Cannot uniquely derive compiler layout size: thread_kernel_state'):
             type_size(objects, 'thread_kernel_state')
 
     def test_builds_native_hash_bound_thread_layout_from_exact_objects(self):
@@ -46,7 +59,7 @@ class ProcessLayoutTests(unittest.TestCase):
         relatives = (
             'osfmk/DEVELOPMENT/thread.o', 'bsd/DEVELOPMENT/kern_proc.o',
             'osfmk/DEVELOPMENT/task.o', 'osfmk/DEVELOPMENT/vm_shared_region.o',
-            'osfmk/DEVELOPMENT/pmap.o', 'osfmk/DEVELOPMENT/machine_routines.o',
+            'osfmk/DEVELOPMENT/pmap.o', 'osfmk/DEVELOPMENT/pcb.o',
             'mach.development.bcm2837.unstripped.noctf',
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -64,10 +77,14 @@ class ProcessLayoutTests(unittest.TestCase):
                 if parts[1] == 'dwarfdump':
                     type_name = parts[2].split('=', 1)[1]
                     size = {'thread_kernel_state': 0x90, 'arm_kernel_context': 0x80}.get(type_name)
-                    entries = [
-                        f'DW_AT_name ("{name}")\nDW_AT_data_member_location (0x{offset:x})'
-                        for name, offset in fields[type_name].items()]
-                    return ('DW_AT_byte_size (0x%x)\n' % size if size else '') + '\n'.join(entries)
+                    lines = [f'0x0001: DW_TAG_structure_type', f'  DW_AT_name ("{type_name}")']
+                    if size:
+                        lines.append(f'  DW_AT_byte_size (0x{size:x})')
+                    for index, (name, offset) in enumerate(fields[type_name].items(), 2):
+                        lines += [f'0x{index:04x}: DW_TAG_member', f'  DW_AT_name ("{name}")']
+                        if not (type_name == 'thread_kernel_state' and name == 'machine'):
+                            lines.append(f'  DW_AT_data_member_location (0x{offset:x})')
+                    return '\n'.join(lines)
                 if parts[1] == 'llvm-objdump':
                     return 'add x0, x0, #0x5bc\n'
                 if parts[1] == 'nm':
@@ -99,7 +116,7 @@ class ProcessLayoutTests(unittest.TestCase):
         self.assertTrue(vm_map_call[-1].endswith('/osfmk/DEVELOPMENT/task.o'))
         kernel_state_call = next(call for call in calls
                                  if call[1] == 'dwarfdump' and call[2] == '--name=thread_kernel_state')
-        self.assertTrue(kernel_state_call[-1].endswith('/osfmk/DEVELOPMENT/machine_routines.o'))
+        self.assertTrue(kernel_state_call[-1].endswith('/osfmk/DEVELOPMENT/pcb.o'))
 
     def test_probe_uses_compiler_only_layout_plan_and_preserves_stop_on_snapshot_error(self):
         probe = (ROOT / 'scripts/probe-darwinboot-xnu.py').read_text()

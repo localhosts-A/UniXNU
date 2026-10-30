@@ -251,7 +251,7 @@ def capture(packet, processes, plan, registers):
                 thread_snapshot_layout=dict(layout),
                 thread_snapshot_layout_objects_sha256={
                     'thread.o': common.get('thread_object_sha256'),
-                    'machine_routines.o': common.get('machine_routines_object_sha256'),
+                    'pcb.o': common.get('pcb_object_sha256'),
                 },
                 kernel_stack_size_symbol=hex(stack_size_address),
                 kernel_stack_size_bytes=kernel_stack_size, kernel_stack_size_error=kernel_stack_size_error,
